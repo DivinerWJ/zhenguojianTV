@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_layout.dart';
+import 'markdown_lite.dart';
 
 /// 应用内更新检查。
 ///
@@ -234,26 +235,34 @@ class AppUpdater {
       barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
         title: const Text('发现新版本'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('新版本：${release.version.join('.')}'),
-              const SizedBox(height: 6),
-              Text('当前版本：${AppLayout.versionOf(context)}'),
-              // 0.2.27 新增（用户反馈第 3 条）：展示 GitHub Release 的更新日志。
-              // 内容来自 GitHub Release 的 body 字段，就是发布时填写的更新说明。
-              if (release.notes.trim().isNotEmpty) ...[
-                const SizedBox(height: 12),
-                const Text(
-                  '更新日志（GitHub）',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 4),
-                Text(release.notes.trim()),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('新版本：${release.version.join('.')}'),
+                const SizedBox(height: 6),
+                Text('当前版本：${AppLayout.versionOf(context)}'),
+                // 0.2.27 新增（用户反馈第 3 条）：展示 GitHub Release 的更新日志。
+                // 内容来自 GitHub Release 的 body 字段，就是发布时填写的更新说明。
+                // 0.3.3 修复（用户反馈）：原来直接把 Markdown 源码当纯文本显示，
+                // `#`、`**`、反引号全部外露且排版拥挤；改用 MarkdownLite 渲染
+                // 标题/加粗/等宽/列表，并补上分隔线与段间距。
+                if (release.notes.trim().isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '更新日志（GitHub）',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  MarkdownLite(release.notes.trim()),
+                ],
               ],
-            ],
+            ),
           ),
         ),
         actions: [
