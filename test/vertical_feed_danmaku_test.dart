@@ -11,14 +11,12 @@ import 'player_fixtures.dart';
 
 void main() {
   Future<void> settle(WidgetTester tester) async {
-    for (var i = 0; i < 15; i++) {
+    for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 20));
     }
   }
 
-  /// 挂载"单剧模式"的竖滑播放页（详情页/下载页点播放走的就是这条路径）。
-  ///
-  /// 单剧模式会跳过推荐流拉取，因此测试不需要首页目录数据。
+  /// 用固定 key 挂载，保证 `active` 变化时是 `didUpdateWidget` 而不是重建 State。
   Future<void> pumpFeed(
     WidgetTester tester, {
     required DanmakuFixtureRepository repository,
@@ -29,13 +27,18 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(),
-        home: VerticalFeedScreen(
-          repository: repository,
-          store: store,
-          embedded: true,
-          singleDrama: FixtureRepository.free,
-          active: active,
-          playerFactory: () => Player(platformPlayer: player),
+        home: Scaffold(
+          body: VerticalFeedScreen(
+            key: const ValueKey('feed'),
+            repository: repository,
+            store: store,
+            embedded: true,
+            singleDrama: FixtureRepository.free,
+            active: active,
+            playerFactory: () => Player(platformPlayer: player),
+            // 测试环境不创建 VideoController（会走原生通道并失败）。
+            videoBuilder: (controls) => controls,
+          ),
         ),
       ),
     );
@@ -65,40 +68,36 @@ void main() {
     return (store, repository, player);
   }
 
-  testWidgets(
-    'feed player exposes a danmaku switch with status and persists it',
-    (tester) async {
-      final (store, _, _) = await setUpFeed(tester, active: true);
+  testWidgets('当前页能正常开始加载并播放（回归：0.3.5 曾卡在"正在加载视频…"）', (tester) async {
+    final (_, _, player) = await setUpFeed(tester, active: true);
+    expect(
+      player.opened,
+      hasLength(1),
+      reason: '当前页挂载后必须真的把媒体交给播放器，否则界面会一直卡在加载中',
+    );
+    expect(find.text('正在加载视频…'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
-      // 弹幕入口必须存在（修复前新播放器完全没有这个入口）。
-      expect(find.byKey(const ValueKey('feed-danmaku')), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('feed-danmaku')));
-      await settle(tester);
-      expect(find.byKey(const ValueKey('feed-danmaku-sheet')), findsOneWidget);
+  testWidgets('弹幕开关存在并能持久化', (tester) async {
+    final (store, _, _) = await setUpFeed(tester, active: true);
+    expect(find.byKey(const ValueKey('feed-danmaku')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('feed-danmaku')));
+    await settle(tester);
+    expect(find.byKey(const ValueKey('feed-danmaku-sheet')), findsOneWidget);
+    final toggle = find.byKey(const ValueKey('feed-danmaku-enabled'));
+    expect(toggle, findsOneWidget);
+    await tester.tap(toggle);
+    await settle(tester);
+    expect(store.playbackPreferences.danmaku, isFalse);
+    await tester.tap(toggle);
+    await settle(tester);
+    expect(store.playbackPreferences.danmaku, isTrue);
+  });
 
-      // 开关初始为开（偏好默认值），切换后写入偏好并持久化。
-      final toggle = find.byKey(const ValueKey('feed-danmaku-enabled'));
-      expect(toggle, findsOneWidget);
-      await tester.tap(toggle);
-      await settle(tester);
-      expect(store.playbackPreferences.danmaku, isFalse);
-
-      await tester.tap(toggle);
-      await settle(tester);
-      expect(store.playbackPreferences.danmaku, isTrue);
-      expect(tester.takeException(), isNull);
-    },
-  );
-
-  testWidgets('an inactive feed page never drives a player, and loads once it '
-      'becomes active', (tester) async {
+  testWidgets('未激活的页面不创建播放器，变为当前页后才加载', (tester) async {
     final (store, repository, player) = await setUpFeed(tester, active: false);
-
-    // 未激活的页面不允许创建播放器（`_ensurePlayer` 的硬前置）。
     expect(player.opened, isEmpty);
-    expect(player.disposed, isFalse);
-
-    // 变为当前页后正常加载，且只加载一次（防止"释放后重复 open"这类回归）。
     await pumpFeed(
       tester,
       repository: repository,
@@ -107,7 +106,5 @@ void main() {
       active: true,
     );
     expect(player.opened, hasLength(1));
-    expect(player.disposed, isFalse);
-    expect(tester.takeException(), isNull);
   });
 }

@@ -41,6 +41,7 @@ class VerticalFeedScreen extends StatefulWidget {
     this.active = true,
     this.sources = const [],
     this.playerFactory,
+    this.videoBuilder,
     this.refreshSignal,
     this.onReady,
     this.singleDrama,
@@ -51,6 +52,13 @@ class VerticalFeedScreen extends StatefulWidget {
 
   final AppRepository repository;
   final LocalStore store;
+
+  /// 测试用：替换视频渲染层。
+  ///
+  /// 非空时不再创建 `VideoController`（它会走原生 platform channel，
+  /// 在测试环境里必然失败并污染用例结果），改用注入的组件，
+  /// 与旧播放器 `player_screen.dart` 的 `videoBuilder` 同一做法。
+  final Widget Function(Widget controls)? videoBuilder;
 
   /// 单剧模式（0.2.29 新增）：
   ///
@@ -762,6 +770,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           active: widget.active && isCurrent,
           autoNextEpisode: _autoNextEpisode,
           playerFactory: widget.playerFactory,
+          videoBuilder: widget.videoBuilder,
           onToggleAutoNext: _toggleAutoNext,
           onFinished: () => _jump(1),
           onOpenDetail: () => _openDetail(drama),
@@ -934,6 +943,7 @@ class _FeedPage extends StatefulWidget {
     required this.onOpenDetail,
     this.playerFactory,
     this.onEpisodeStateChanged,
+    this.videoBuilder,
     this.initialEpisodeIndex = 0,
     this.initialPosition = 0,
     this.localOnly = false,
@@ -960,6 +970,9 @@ class _FeedPage extends StatefulWidget {
 
   /// 测试用：注入假播放器。
   final Player Function()? playerFactory;
+
+  /// 测试用：替换视频渲染层（见 [VerticalFeedScreen.videoBuilder]）。
+  final Widget Function(Widget controls)? videoBuilder;
 
   /// 单剧模式（0.2.29）：起始集索引。
   final int initialEpisodeIndex;
@@ -1128,16 +1141,16 @@ class _FeedPageState extends State<_FeedPage> {
   /// 把操作挂到同一条 Future 链上，前一个失败也不影响后续执行
   /// （`catchError` 吞掉异常，与旧播放器 `player_screen.dart` 一致）。
   ///
-  /// 0.3.5 修正：队列里的操作在真正执行前会核对 [_playerGeneration]。
+  /// 0.3.5 修正：如果播放器已被释放，队列里还没执行的操作直接作废。
   /// 原因是"滑走页面即释放播放器"（0.3.1 性能修复）与"换集加载"会撞车：
   /// 已经排队的 `player.open()` 手里拿的是**已被释放的播放器**，
   /// 而 media_kit 对已释放实例调用 `open` 走的是 `assert`
   /// （release 包中断言被移除），于是既不报错也不播放，
   /// 真机表现为**全黑、无声、也没有加载提示**。
   Future<void> _serialize(Future<void> Function() operation) {
-    final generation = _playerGeneration;
+    final released = _playerReleased;
     Future<void> run() async {
-      if (_playerGeneration != generation) return;
+      if (_closed || _playerReleased != released) return;
       await operation();
     }
 
@@ -1146,12 +1159,6 @@ class _FeedPageState extends State<_FeedPage> {
     return next;
   }
 
-  /// 播放器代次（0.3.5）。
-  ///
-  /// 每次释放 / 重建播放器都会 +1；队列中的旧操作据此作废，
-  /// 避免对已释放的播放器执行原生调用。
-  int _playerGeneration = 0;
-
   /// 是否已进入"释放播放器"流程（页面被滑走或销毁）。
   ///
   /// 与 [_closed] 的区别：[_closed] 只在 `dispose` 时置位，
@@ -1159,13 +1166,15 @@ class _FeedPageState extends State<_FeedPage> {
   /// 用于阻止已滑走的页面继续加载、也就不会在已释放实例上操作。
   bool _playerReleased = false;
 
-  /// 判断某次异步操作是否仍然有效：页面未销毁、未滑走、代次未变，
+  /// 判断某次异步加载是否仍然有效：页面未销毁、播放器未被释放，
   /// 且捕获到的播放器实例仍是当前实例。
-  bool _attemptAlive(Player player, int generation) =>
-      !_closed &&
-      !_playerReleased &&
-      generation == _playerGeneration &&
-      identical(_player, player);
+  ///
+  /// ⚠️ 0.3.5 事故教训：**绝不要把"加载任务代次"（[_generation]）与播放器状态混在一起判断**。
+  /// 0.3.5 首次实现里它和另一个"播放器代次"计数器做了相等比较，
+  /// 两个计数器互不相关（首次加载 1 != 0），于是**每一次加载都被误判为过期**、
+  /// 静默返回且不置 `_loading`，导致所有视频永久卡在"正在加载视频…"。
+  bool _attemptAlive(Player player) =>
+      !_closed && !_playerReleased && identical(_player, player);
 
   /// 给"曾被滑走"的页面一次自愈机会：重新创建播放器后再加载。
   ///
@@ -1322,7 +1331,9 @@ class _FeedPageState extends State<_FeedPage> {
           ),
         );
     _player = player;
-    _video = VideoController(player);
+    // 测试环境注入视频层时不去创建 VideoController：
+    // 它会调用原生 platform channel，在测试里必然失败并污染用例结果。
+    _video = widget.videoBuilder == null ? VideoController(player) : null;
     final interactions = PlayerInteractions(
       player: player,
       available: () =>
@@ -1482,14 +1493,13 @@ class _FeedPageState extends State<_FeedPage> {
   ///
   /// 释放后可再次通过 `_ensurePlayer()` 重建；[ _resumeFrom ] 已记录位置。
   ///
-  /// 0.3.5：释放时递增 [_playerGeneration] 并换掉操作队列，
+  /// 0.3.5：释放时置位 [_playerReleased] 并换掉操作队列，
   /// 让**已经排队但还没执行**的操作全部作废 —— 这是"黑屏卡住"的根因修复：
   /// 旧实现只 `dispose` 播放器，队列里的 `player.open()` 仍会执行，
   /// 而 media_kit 对已释放实例的操作在 release 包中静默失败。
   void _releasePlayer() {
     _playerReleased = true;
-    _playerGeneration++;
-    // 丢弃旧队列：仍在排队的操作会因代次不符而跳过。
+    // 丢弃旧队列：仍排队的操作会因 [_playerReleased] 已变而跳过。
     _operations = Future<void>.value();
     _saveTimer?.cancel();
     _saveTimer = null;
@@ -1779,7 +1789,7 @@ class _FeedPageState extends State<_FeedPage> {
       final detail = _detail ?? await widget.repository.detail(widget.drama);
       // 0.3.5：除代次外还要确认播放器实例没被替换/释放
       // （滑走页面会释放播放器，此时继续加载就是在操作已释放的实例）。
-      if (!_attemptAlive(player, generation)) return;
+      if (!_attemptAlive(player)) return;
       if (detail.episodes.isEmpty) {
         throw AppFailure('该剧暂无可用剧集');
       }
@@ -1807,7 +1817,7 @@ class _FeedPageState extends State<_FeedPage> {
                   detail.episodes[index],
                   quality: _quality,
                 ));
-      if (!_attemptAlive(player, generation)) {
+      if (!_attemptAlive(player)) {
         // 页面已不可用：把刚解析出来的会话还回去，避免会话泄漏。
         unawaited(widget.repository.release(plan.session));
         return;
@@ -1836,7 +1846,7 @@ class _FeedPageState extends State<_FeedPage> {
           await platform.setProperty('network-timeout', '20');
         }
       });
-      if (!_attemptAlive(player, generation)) return;
+      if (!_attemptAlive(player)) return;
       _detail = detail;
       _plan = plan;
       _episodeIndex = index;
@@ -1845,12 +1855,12 @@ class _FeedPageState extends State<_FeedPage> {
       // 续播位置（0.2.29）：只有首次打开、且传入了非零位置时才生效；
       // 换集时 `_playEpisode` 会把 `_pendingStart` 清空，避免每集都跳。
       final start = _takeStartPosition();
-      await _openMedia(player, generation, plan, start);
+      await _openMedia(player, plan, start);
       // 0.3.5：open 之后再次确认播放器仍然有效
       // （用户可能在加载中滑走页面，此时播放器已被释放）。
-      if (!_attemptAlive(player, generation)) return;
+      if (!_attemptAlive(player)) return;
       await _interactions?.applySpeed();
-      if (!_attemptAlive(player, generation)) return;
+      if (!_attemptAlive(player)) return;
       if (previous != null && previous.session != plan.session) {
         unawaited(widget.repository.release(previous.session));
       }
@@ -1884,14 +1894,9 @@ class _FeedPageState extends State<_FeedPage> {
   /// 期间用户可能已经滑走页面、播放器已被释放；此时若继续调用
   /// `open()`，media_kit 在 release 包中断言被移除，会**静默什么都不做**，
   /// 页面就永久黑屏。
-  Future<void> _openMedia(
-    Player player,
-    int generation,
-    PlaybackPlan plan,
-    Duration? start,
-  ) {
+  Future<void> _openMedia(Player player, PlaybackPlan plan, Duration? start) {
     return _serialize(() async {
-      if (!_attemptAlive(player, generation)) return;
+      if (!_attemptAlive(player)) return;
       await player.open(
         Media(plan.url, httpHeaders: plan.headers, start: start),
         play: widget.active,
@@ -2903,7 +2908,10 @@ class _FeedPageState extends State<_FeedPage> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (video != null && !_landscape)
+        if (widget.videoBuilder != null)
+          // 测试注入的视频层：不依赖原生视频控制器。
+          widget.videoBuilder!(const SizedBox.shrink())
+        else if (video != null && !_landscape)
           Video(
             controller: video,
             controls: (_) => const SizedBox.shrink(),

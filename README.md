@@ -45,7 +45,7 @@
 - 签名与凭据：`*.jks`、`*.keystore`、`key.properties`，以及任何 Token / 密钥 / 账号信息；
 - 原生预编译产物：`android/app/src/main/jniLibs/` 下的 `.so`。
 
-当前源码版本：`0.3.5+42`。
+当前源码版本：`0.3.6+43`。
 
 > 因为不含预编译原生库，克隆源码后**不能直接构建出可用的安装包**，需要先用 Go 工具链编译 `native/core` 生成 `libduanju_core.so`。
 
