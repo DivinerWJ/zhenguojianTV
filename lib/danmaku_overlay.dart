@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'danmaku_controller.dart';
+import 'danmaku_emoji.dart';
 import 'danmaku_models.dart';
 
 class DanmakuFlight {
@@ -144,7 +145,7 @@ class _DanmakuOverlayState extends State<DanmakuOverlay> {
                         rows: rows,
                         measure: (text) {
                           final painter = TextPainter(
-                            text: TextSpan(text: text, style: style),
+                            text: danmakuTextSpan(text, style),
                             textDirection: TextDirection.ltr,
                             textScaler: scaler,
                             maxLines: 1,
@@ -267,13 +268,13 @@ class _DanmakuMotionState extends State<_DanmakuMotion>
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: _motion,
     child: RepaintBoundary(
-      child: Text(
-        widget.flight.text,
-        style: widget.style,
+      child: RichText(
+        text: danmakuTextSpan(widget.flight.text, widget.style),
         textScaler: widget.scaler,
         textDirection: TextDirection.ltr,
         maxLines: 1,
         softWrap: false,
+        overflow: TextOverflow.clip,
       ),
     ),
     builder: (context, child) => Transform.translate(

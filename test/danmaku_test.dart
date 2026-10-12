@@ -1,11 +1,13 @@
 import 'dart:convert';
 
 import 'package:duanju_app/danmaku_controller.dart';
+import 'package:duanju_app/danmaku_emoji.dart';
 import 'package:duanju_app/danmaku_models.dart';
 import 'package:duanju_app/danmaku_overlay.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/models.dart';
 import 'package:duanju_app/playback_preferences.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
@@ -84,6 +86,81 @@ void main() {
         expect(() => parse(invalid), throwsFormatException);
       }
       expect(parse({...json, 'items': []}).items, isEmpty);
+    },
+  );
+
+  test(
+    'danmaku emoji tags render as characters without touching plain brackets',
+    () {
+      // 抽样自真实红果弹幕：表情在源站就是 [送花] 这类文字标签。
+      const samples = [
+        '天啦，女宝咱那么可爱了[送花]',
+        '[笑哭]太真实了',
+        '[捂脸]真的绝',
+        '[偷笑]被你发现了',
+        '[爱慕]好看',
+        '[666]',
+        '[玫瑰]',
+        '没有表情的普通弹幕',
+        '这段[没见过的标签]保持原样',
+      ];
+      for (final sample in samples) {
+        final parsed = splitDanmakuEmojis(sample);
+        expect(parsed.map((part) => part.text).join(), sample);
+        for (final part in parsed) {
+          if (!part.emoji) continue;
+          expect(part.text.runes.length, lessThanOrEqualTo(3));
+          expect(part.text.startsWith('['), isFalse);
+        }
+      }
+      final parts = splitDanmakuEmojis('天啦[送花]好看[没见过的标签]');
+      expect(parts.map((part) => part.text).toList(), [
+        '天啦',
+        '🌹',
+        '好看',
+        '[没见过的标签]',
+      ]);
+      expect(parts.map((part) => part.emoji).toList(), [
+        false,
+        true,
+        false,
+        false,
+      ]);
+      expect(danmakuEmojiCount('[笑哭][笑哭][微笑]'), 3);
+      expect(splitDanmakuEmojis(''), isEmpty);
+      expect(splitDanmakuEmojis('没有表情'), hasLength(1));
+      const style = TextStyle(fontSize: 16);
+      final span = danmakuTextSpan('[捂脸]真的绝', style);
+      expect(span.children, hasLength(2));
+      expect((span.children!.first as TextSpan).text, '🤦');
+      expect((span.children!.last as TextSpan).text, '真的绝');
+      final plain = danmakuTextSpan('普通弹幕', style);
+      expect(plain.text, '普通弹幕');
+      expect(plain.children, isNull);
+      for (final tag in [
+        '[送花]',
+        '[捂脸]',
+        '[笑哭]',
+        '[偷笑]',
+        '[爱慕]',
+        '[赞]',
+        '[666]',
+        '[玫瑰]',
+        '[流泪]',
+        '[可爱]',
+        '[大笑]',
+        '[鼓掌]',
+        '[比心]',
+        '[爱心]',
+        '[大哭]',
+        '[震惊]',
+        '[思考]',
+        '[白眼]',
+        '[汗]',
+        '[胜利]',
+      ]) {
+        expect(danmakuEmojiOf(tag), isNotNull, reason: '常见表情 $tag 必须有映射');
+      }
     },
   );
 
