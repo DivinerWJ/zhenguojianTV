@@ -1036,6 +1036,12 @@ class _FeedPageState extends State<_FeedPage> {
   /// 说明：弹幕一直只存在于旧播放器，这里把同一套控制器接到竖滑流，
   /// 复用既有实现，不新建第二套逻辑。
   late final DanmakuController _danmaku;
+
+  /// 弹幕开关（0.3.5：新播放器补齐可切换与持久化）。
+  ///
+  /// 旧播放器通过 `player_menu.dart` 提供「弹幕」开关 + 状态 + 重试，
+  /// 并在切换时写入偏好；新播放器此前只在进入时读一次偏好，
+  /// 既不能关，也看不到加载状态，因此用户无法判断"没有弹幕"是数据问题还是故障。
   bool _danmakuEnabled = true;
 
   /// 横屏/全屏模式：用独立的全屏层铺满整个屏幕（含状态栏区域），
@@ -1121,10 +1127,55 @@ class _FeedPageState extends State<_FeedPage> {
   ///
   /// 把操作挂到同一条 Future 链上，前一个失败也不影响后续执行
   /// （`catchError` 吞掉异常，与旧播放器 `player_screen.dart` 一致）。
+  ///
+  /// 0.3.5 修正：队列里的操作在真正执行前会核对 [_playerGeneration]。
+  /// 原因是"滑走页面即释放播放器"（0.3.1 性能修复）与"换集加载"会撞车：
+  /// 已经排队的 `player.open()` 手里拿的是**已被释放的播放器**，
+  /// 而 media_kit 对已释放实例调用 `open` 走的是 `assert`
+  /// （release 包中断言被移除），于是既不报错也不播放，
+  /// 真机表现为**全黑、无声、也没有加载提示**。
   Future<void> _serialize(Future<void> Function() operation) {
-    final next = _operations.catchError((Object _) {}).then((_) => operation());
+    final generation = _playerGeneration;
+    Future<void> run() async {
+      if (_playerGeneration != generation) return;
+      await operation();
+    }
+
+    final next = _operations.catchError((Object _) {}).then((_) => run());
     _operations = next;
     return next;
+  }
+
+  /// 播放器代次（0.3.5）。
+  ///
+  /// 每次释放 / 重建播放器都会 +1；队列中的旧操作据此作废，
+  /// 避免对已释放的播放器执行原生调用。
+  int _playerGeneration = 0;
+
+  /// 是否已进入"释放播放器"流程（页面被滑走或销毁）。
+  ///
+  /// 与 [_closed] 的区别：[_closed] 只在 `dispose` 时置位，
+  /// 而本标记在 `didUpdateWidget` 被滑走时就置位，
+  /// 用于阻止已滑走的页面继续加载、也就不会在已释放实例上操作。
+  bool _playerReleased = false;
+
+  /// 判断某次异步操作是否仍然有效：页面未销毁、未滑走、代次未变，
+  /// 且捕获到的播放器实例仍是当前实例。
+  bool _attemptAlive(Player player, int generation) =>
+      !_closed &&
+      !_playerReleased &&
+      generation == _playerGeneration &&
+      identical(_player, player);
+
+  /// 给"曾被滑走"的页面一次自愈机会：重新创建播放器后再加载。
+  ///
+  /// 不做这一步的话，页面被滑走时放弃的加载会永久停住，
+  /// 用户只能靠"切到别的集再切回来"绕过（0.3.5 前的真机现象）。
+  Future<void> _resumeAfterRelease() async {
+    if (_closed || !_playerReleased) return;
+    _playerReleased = false;
+    _ready = false;
+    await _prepare(force: true);
   }
 
   /// 取出并清空待续播位置（只在首次打开时返回非零值）。
@@ -1258,7 +1309,11 @@ class _FeedPageState extends State<_FeedPage> {
   /// 只为当前页创建播放器，避免同时持有多个实例。
   bool _ensurePlayer() {
     if (_player != null) return true;
-    if (!widget.active || _closed) return false;
+    // 0.3.5：只有当页面**当前可见**、且没有处于"已释放等待重建"状态时才建。
+    // `_playerReleased` 由 `_releasePlayer` 置位；页面重新可见时
+    // `didUpdateWidget` 会先调用 `_resumeAfterRelease()` 把它清掉再加载，
+    // 这样"滑走时放弃的加载"不会永久停住。
+    if (!widget.active || _closed || _playerReleased) return false;
     final player =
         widget.playerFactory?.call() ??
         Player(
@@ -1396,8 +1451,13 @@ class _FeedPageState extends State<_FeedPage> {
       // 成为当前页：重新上报能否切下一集，避免沿用上一页的状态。
       _reportEpisodeState();
       if (_ready && _error == null) {
+        _playerReleased = false;
         unawaited(_player?.play());
         _showControls();
+      } else if (_playerReleased) {
+        // 0.3.5：本页曾经被滑走并放弃了一次加载，这里重新建播放器接着加载，
+        // 不需要用户"切到别的集再切回来"来绕过。
+        unawaited(_resumeAfterRelease());
       } else {
         _prepare();
       }
@@ -1421,7 +1481,16 @@ class _FeedPageState extends State<_FeedPage> {
   /// 释放当前播放器与相关资源（切页 / 销毁共用）。
   ///
   /// 释放后可再次通过 `_ensurePlayer()` 重建；[ _resumeFrom ] 已记录位置。
+  ///
+  /// 0.3.5：释放时递增 [_playerGeneration] 并换掉操作队列，
+  /// 让**已经排队但还没执行**的操作全部作废 —— 这是"黑屏卡住"的根因修复：
+  /// 旧实现只 `dispose` 播放器，队列里的 `player.open()` 仍会执行，
+  /// 而 media_kit 对已释放实例的操作在 release 包中静默失败。
   void _releasePlayer() {
+    _playerReleased = true;
+    _playerGeneration++;
+    // 丢弃旧队列：仍在排队的操作会因代次不符而跳过。
+    _operations = Future<void>.value();
     _saveTimer?.cancel();
     _saveTimer = null;
     // 取消所有播放器流订阅，避免释放后回调访问已失效对象。
@@ -1674,6 +1743,10 @@ class _FeedPageState extends State<_FeedPage> {
     if (index < 0 || index >= detail.episodes.length) return;
     // 换集前先把当前集的进度存下来，否则切走就丢。
     await _saveProgress();
+    // 0.3.5：等待落盘期间页面可能已被滑走（播放器已释放）。
+    // 此时若继续按老流程走，会在已释放的播放器上加载，最终黑屏；
+    // 这里改为把状态复位，交给 `_resumeAfterRelease()`（滑回来时）重新加载。
+    if (_closed || _playerReleased) return;
     _episodeIndex = index;
     _ready = false;
     // 预载（0.2.31）：换集时 `_prepare` 里会先 `take()` 取走目标集的预载结果，
@@ -1683,7 +1756,17 @@ class _FeedPageState extends State<_FeedPage> {
 
   Future<void> _prepare({bool force = false}) async {
     if (_closed) return;
-    if (!_ensurePlayer()) return;
+    if (!_ensurePlayer()) {
+      // 0.3.5：拿不到播放器时不能静默退出，否则页面会停在"既不加载也不报错"。
+      // 只有"页面已被滑走/销毁"属于正常停止，此时不动状态，等滑回来重试。
+      if (!_closed && !_playerReleased && mounted) {
+        setState(() {
+          _loading = false;
+          _error = '播放器未能启动，请返回上一集重试';
+        });
+      }
+      return;
+    }
     final player = _player;
     if (player == null) return;
     if (_ready && !force) return;
@@ -1694,7 +1777,9 @@ class _FeedPageState extends State<_FeedPage> {
     });
     try {
       final detail = _detail ?? await widget.repository.detail(widget.drama);
-      if (_closed || generation != _generation) return;
+      // 0.3.5：除代次外还要确认播放器实例没被替换/释放
+      // （滑走页面会释放播放器，此时继续加载就是在操作已释放的实例）。
+      if (!_attemptAlive(player, generation)) return;
       if (detail.episodes.isEmpty) {
         throw AppFailure('该剧暂无可用剧集');
       }
@@ -1722,8 +1807,9 @@ class _FeedPageState extends State<_FeedPage> {
                   detail.episodes[index],
                   quality: _quality,
                 ));
-      if (_closed || generation != _generation) {
-        await widget.repository.release(plan.session);
+      if (!_attemptAlive(player, generation)) {
+        // 页面已不可用：把刚解析出来的会话还回去，避免会话泄漏。
+        unawaited(widget.repository.release(plan.session));
         return;
       }
       if (plan.url.isEmpty) {
@@ -1750,7 +1836,7 @@ class _FeedPageState extends State<_FeedPage> {
           await platform.setProperty('network-timeout', '20');
         }
       });
-      if (_closed || generation != _generation) return;
+      if (!_attemptAlive(player, generation)) return;
       _detail = detail;
       _plan = plan;
       _episodeIndex = index;
@@ -1759,14 +1845,12 @@ class _FeedPageState extends State<_FeedPage> {
       // 续播位置（0.2.29）：只有首次打开、且传入了非零位置时才生效；
       // 换集时 `_playEpisode` 会把 `_pendingStart` 清空，避免每集都跳。
       final start = _takeStartPosition();
-      await _serialize(
-        () => player.open(
-          Media(plan.url, httpHeaders: plan.headers, start: start),
-          play: widget.active,
-        ),
-      );
+      await _openMedia(player, generation, plan, start);
+      // 0.3.5：open 之后再次确认播放器仍然有效
+      // （用户可能在加载中滑走页面，此时播放器已被释放）。
+      if (!_attemptAlive(player, generation)) return;
       await _interactions?.applySpeed();
-      if (_closed || generation != _generation) return;
+      if (!_attemptAlive(player, generation)) return;
       if (previous != null && previous.session != plan.session) {
         unawaited(widget.repository.release(previous.session));
       }
@@ -1791,6 +1875,28 @@ class _FeedPageState extends State<_FeedPage> {
       });
       _refreshFullscreen(immediate: true);
     }
+  }
+
+  /// 真正把媒体交给播放器（0.3.5 独立成方法，便于加"释放护栏"）。
+  ///
+  /// 关键点：`open()` 前**再确认一次**播放器实例仍然有效。
+  /// 因为 `_serialize()` 是排队执行的，从入队到真正执行可能已经过了几百毫秒，
+  /// 期间用户可能已经滑走页面、播放器已被释放；此时若继续调用
+  /// `open()`，media_kit 在 release 包中断言被移除，会**静默什么都不做**，
+  /// 页面就永久黑屏。
+  Future<void> _openMedia(
+    Player player,
+    int generation,
+    PlaybackPlan plan,
+    Duration? start,
+  ) {
+    return _serialize(() async {
+      if (!_attemptAlive(player, generation)) return;
+      await player.open(
+        Media(plan.url, httpHeaders: plan.headers, start: start),
+        play: widget.active,
+      );
+    });
   }
 
   String get _qualityLabel {
@@ -1845,7 +1951,7 @@ class _FeedPageState extends State<_FeedPage> {
   /// `showModalBottomSheet` 的 builder 挂在 `MaterialApp` 主题上，
   /// 浅色主题下 `ListTile` 的 textColor/iconColor/tileColor 会从主题解析，
   /// 只包 DefaultTextStyle 会被覆盖，导致深色底配深色字看不清。
-  Widget _sheetShell({required String title, required Widget child}) {
+  Widget _sheetShell({required String title, required Widget child, Key? key}) {
     const background = Color(0xFF191A20);
     const foreground = Colors.white;
     return Theme(
@@ -1886,6 +1992,7 @@ class _FeedPageState extends State<_FeedPage> {
         child: IconTheme(
           data: const IconThemeData(color: foreground),
           child: Material(
+            key: key,
             color: background,
             child: SafeArea(
               child: Column(
@@ -2039,6 +2146,77 @@ class _FeedPageState extends State<_FeedPage> {
       ),
     );
     if (value != null && mounted) await _setQuality(value);
+  });
+
+  /// 切换弹幕开关，并写入偏好（长期保留）。
+  Future<void> _setDanmakuEnabled(bool enabled) async {
+    if (_closed) return;
+    setState(() => _danmakuEnabled = enabled);
+    _danmaku.setEnabled(enabled);
+    try {
+      await widget.store.setPlaybackPreferences(
+        widget.store.playbackPreferences.copyWith(danmaku: enabled),
+      );
+    } catch (_) {
+      if (mounted && !_closed) {
+        setState(() => _saveWarning = '弹幕开关未能保存，请检查存储空间后重试。');
+      }
+    }
+  }
+
+  /// 弹幕底部面板：开关 + 状态 + 重试。
+  Future<void> _openDanmakuMenu() => _openPanel(() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: _sheetUsesRootNavigator,
+      backgroundColor: const Color(0xFF191A20),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) => _sheetShell(
+        title: '弹幕',
+        key: const ValueKey('feed-danmaku-sheet'),
+        child: StatefulBuilder(
+          builder: (context, setSheetState) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SwitchListTile.adaptive(
+                key: const ValueKey('feed-danmaku-enabled'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('显示弹幕'),
+                subtitle: Text(_danmaku.status),
+                value: _danmakuEnabled,
+                onChanged: (value) async {
+                  await _setDanmakuEnabled(value);
+                  if (sheetContext.mounted) setSheetState(() {});
+                },
+              ),
+              if (_danmaku.canRetry)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: const ValueKey('feed-danmaku-retry'),
+                    onPressed: () {
+                      _danmaku.retry();
+                      _syncDanmaku();
+                      setSheetState(() {});
+                    },
+                    icon: const Icon(Icons.refresh_rounded, size: 18),
+                    label: const Text('重试弹幕'),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              const Text(
+                '仅红果源在线播放提供弹幕；本地文件与其他站源不加载弹幕。',
+                style: TextStyle(fontSize: 12, color: Color(0xFFB9B6C2)),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      ),
+    );
   });
 
   /// 加入 / 取消追剧（0.2.26 新增，用户要求）。
@@ -2382,7 +2560,12 @@ class _FeedPageState extends State<_FeedPage> {
                               OutlinedButton(
                                 onPressed: () {
                                   _ready = false;
-                                  _prepare(force: true);
+                                  // 0.3.5：播放器已释放时先重建再加载，避免在已释放实例上操作。
+                                  unawaited(
+                                    _playerReleased
+                                        ? _resumeAfterRelease()
+                                        : _prepare(force: true),
+                                  );
                                 },
                                 child: const Text('重试'),
                               ),
@@ -2460,6 +2643,14 @@ class _FeedPageState extends State<_FeedPage> {
                                       icon: Icons.hd_rounded,
                                       label: _qualityLabel,
                                       onPressed: _openQualityMenu,
+                                    ),
+                                    _sideButton(
+                                      key: const ValueKey('fullscreen-danmaku'),
+                                      icon: _danmakuEnabled
+                                          ? Icons.subtitles_rounded
+                                          : Icons.subtitles_off_rounded,
+                                      label: '弹幕',
+                                      onPressed: _openDanmakuMenu,
                                     ),
                                     _sideButton(
                                       key: const ValueKey(
@@ -2768,7 +2959,12 @@ class _FeedPageState extends State<_FeedPage> {
                   OutlinedButton(
                     onPressed: () {
                       _ready = false;
-                      _prepare(force: true);
+                      // 0.3.5：播放器已释放时先重建再加载，避免在已释放实例上操作。
+                      unawaited(
+                        _playerReleased
+                            ? _resumeAfterRelease()
+                            : _prepare(force: true),
+                      );
                     },
                     child: const Text('重试'),
                   ),
@@ -2891,6 +3087,14 @@ class _FeedPageState extends State<_FeedPage> {
                                 icon: Icons.hd_rounded,
                                 label: _qualityLabel,
                                 onPressed: _openQualityMenu,
+                              ),
+                              _sideButton(
+                                key: const ValueKey('feed-danmaku'),
+                                icon: _danmakuEnabled
+                                    ? Icons.subtitles_rounded
+                                    : Icons.subtitles_off_rounded,
+                                label: '弹幕',
+                                onPressed: _openDanmakuMenu,
                               ),
                               _sideButton(
                                 key: const ValueKey('feed-episodes'),
