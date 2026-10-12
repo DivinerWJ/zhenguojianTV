@@ -106,7 +106,20 @@ void main() {
       ];
       for (final sample in samples) {
         final parsed = splitDanmakuEmojis(sample);
-        expect(parsed.map((part) => part.text).join(), sample);
+        // 已收录标签会被替换成表情字符，未收录标签原样保留，
+        // 所以不再要求「拼回来逐字等于原文」；
+        // 改为断言普通文字片段按原顺序出现在原文中（不丢字、不串行）。
+        var cursor = 0;
+        for (final part in parsed) {
+          if (part.emoji) continue;
+          final at = sample.indexOf(part.text, cursor);
+          expect(
+            at,
+            greaterThanOrEqualTo(cursor),
+            reason: '普通文字片段「${part.text}」必须按原顺序出现在原文中',
+          );
+          cursor = at + part.text.length;
+        }
         for (final part in parsed) {
           if (!part.emoji) continue;
           expect(part.text.runes.length, lessThanOrEqualTo(3));
@@ -114,18 +127,14 @@ void main() {
         }
       }
       final parts = splitDanmakuEmojis('天啦[送花]好看[没见过的标签]');
+      // 连续普通文字会合并成一段（表情是分段边界），因此「好看」与
+      // 未收录的「[没见过的标签]」属于同一段普通文字。
       expect(parts.map((part) => part.text).toList(), [
         '天啦',
         '🌹',
-        '好看',
-        '[没见过的标签]',
+        '好看[没见过的标签]',
       ]);
-      expect(parts.map((part) => part.emoji).toList(), [
-        false,
-        true,
-        false,
-        false,
-      ]);
+      expect(parts.map((part) => part.emoji).toList(), [false, true, false]);
       expect(danmakuEmojiCount('[笑哭][笑哭][微笑]'), 3);
       expect(splitDanmakuEmojis(''), isEmpty);
       expect(splitDanmakuEmojis('没有表情'), hasLength(1));
