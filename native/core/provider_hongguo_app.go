@@ -47,8 +47,6 @@ type hongguoAppClient struct {
 	searchPending  map[string]*hongguoSearchCall
 	suggestions    map[string]hongguoSuggestionEntry
 	suggestPending map[string]*hongguoSuggestionCall
-	danmaku        map[string]hongguoDanmakuCacheEntry
-	danmakuPending map[string]*hongguoDanmakuCall
 }
 
 func (downloader *Downloader) hongguoClient() *hongguoAppClient {
@@ -174,16 +172,6 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 		request.Header.Set("Accept", "application/json")
 		request.Header.Set("X-XS-From-Web", "0")
 		request.Header.Set("Sdk-Version", "2")
-		comment, _ := ctx.Value(hongguoCommentKey{}).(bool)
-		var commentNonce hongguoCommentNonce
-		if comment {
-			commentNonce, err = newHongguoCommentNonce()
-			if err != nil {
-				return nil, errors.New("无法准备红果文字请求")
-			}
-			request.Header.Set("Comment-Source", "601")
-			request.Header.Set("Server-Channel", "1000")
-		}
 		if payload != nil {
 			request.Header.Set("Content-Type", "application/json; charset=utf-8")
 		}
@@ -191,11 +179,7 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 			now := time.Now()
 			query.Set("_rticket", strconv.FormatInt(now.UnixMilli(), 10))
 			prepared.URL.RawQuery = query.Encode()
-			if comment {
-				signHongguoCommentRequest(prepared, commentNonce, now)
-			} else {
-				signHongguoRequest(prepared, body, now)
-			}
+			signHongguoRequest(prepared, body, now)
 		})
 		if err != nil {
 			lastErr = err

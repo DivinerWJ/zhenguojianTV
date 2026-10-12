@@ -9,7 +9,6 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import 'models.dart';
-import 'danmaku_models.dart';
 import 'background_downloads.dart';
 import 'local_store.dart';
 import 'app_build.dart';
@@ -110,12 +109,6 @@ abstract class AppRepository {
     int quality = 0,
     bool online = false,
   }) async => null;
-  Future<void> cancelDanmaku() async {}
-  Future<DanmakuPage> danmaku(
-    PlaybackPlan plan, {
-    required int startMs,
-    required int durationMs,
-  }) async => throw AppFailure('当前环境不支持弹幕');
   Future<void> cancelCatalog() async {}
   Future<void> cancelSuggestions() async {}
   Future<void> cancelRecommendations() async {}
@@ -334,9 +327,6 @@ class NativeRepository extends AppRepository {
   }
 
   @override
-  Future<void> cancelDanmaku() => _cancelReads('danmaku');
-
-  @override
   Future<void> cancelPreload() => _cancelReads('preload');
 
   @override
@@ -357,29 +347,6 @@ class NativeRepository extends AppRepository {
   );
 
   @override
-  Future<DanmakuPage> danmaku(
-    PlaybackPlan plan, {
-    required int startMs,
-    required int durationMs,
-  }) async {
-    _authorize('hongguo');
-    if (plan.local || plan.session.isEmpty || plan.danmakuId.isEmpty) {
-      throw AppFailure('本集暂不支持弹幕');
-    }
-    return DanmakuPage.fromJson(
-      await _read('danmaku', {
-        'action': 'danmaku',
-        'playbackSession': plan.session,
-        'startMs': startMs,
-        'durationMs': durationMs,
-      }),
-      episodeId: plan.danmakuId,
-      startMs: startMs,
-      durationMs: durationMs,
-    );
-  }
-
-  @override
   Future<void> cancelCatalog() => _cancelReads('catalog-');
   @override
   Future<void> cancelSuggestions() => _cancelReads('suggestions');
@@ -391,17 +358,16 @@ class NativeRepository extends AppRepository {
     String source, {
     int page = 1,
     bool force = false,
-  }) async =>
-      CatalogPage.fromJson(
-        await _read('feed-catalog-$source', {
-          'action': 'catalog',
-          'source': source,
-          'page': page,
-          'query': '',
-          'category': '',
-          'force': force,
-        }),
-      );
+  }) async => CatalogPage.fromJson(
+    await _read('feed-catalog-$source', {
+      'action': 'catalog',
+      'source': source,
+      'page': page,
+      'query': '',
+      'category': '',
+      'force': force,
+    }),
+  );
 
   @override
   Future<void> cancelFeedCatalog() => _cancelReads('feed-catalog-');
@@ -595,8 +561,7 @@ class NativeRepository extends AppRepository {
       }
       if (action == 'recommendations' ||
           action == 'cachedRecommendations' ||
-          action == 'suggestions' ||
-          action == 'danmaku') {
+          action == 'suggestions') {
         _authorize('hongguo');
       }
       if ({
@@ -645,8 +610,6 @@ class NativeRepository extends AppRepository {
         Duration(
           seconds: action == 'moveDownloads'
               ? 620
-              : action == 'danmaku'
-              ? 15
               : action == 'preload'
               ? 20
               : 70,
@@ -681,7 +644,6 @@ class NativeRepository extends AppRepository {
             'suggestions',
             'recommendations',
             'metadata',
-            'danmaku',
             'preload',
             'prepareHandoff',
           }.contains(input['action'])) {
@@ -791,7 +753,8 @@ class NativeRepository extends AppRepository {
     final cacheKey = '${drama.source}|${drama.id}';
     final now = DateTime.now();
     final cachedEntry = _detailCache[cacheKey];
-    if (cachedEntry != null && now.difference(cachedEntry.storedAt) < _detailCacheTtl) {
+    if (cachedEntry != null &&
+        now.difference(cachedEntry.storedAt) < _detailCacheTtl) {
       return cachedEntry.detail;
     }
     // 内存未命中 → 尝试磁盘缓存（仅首次调用时加载索引）。
@@ -904,6 +867,7 @@ class NativeRepository extends AppRepository {
       return null;
     }
   }
+
   @override
   Future<PlaybackPlan> resolve(
     Drama drama,

@@ -8,8 +8,6 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import 'core_bridge.dart';
-import 'danmaku_controller.dart';
-import 'danmaku_overlay.dart';
 import 'detail_screen.dart';
 import 'local_store.dart';
 import 'models.dart';
@@ -1045,18 +1043,6 @@ class _FeedPageState extends State<_FeedPage> {
   /// 观看记录保存失败提示（与旧播放器一致的容错）。
   String? _saveWarning;
 
-  /// 弹幕控制器。挂在当前页的播放会话上，仅在本页可播时拉取弹幕。
-  /// 说明：弹幕一直只存在于旧播放器，这里把同一套控制器接到竖滑流，
-  /// 复用既有实现，不新建第二套逻辑。
-  late final DanmakuController _danmaku;
-
-  /// 弹幕开关（0.3.5：新播放器补齐可切换与持久化）。
-  ///
-  /// 旧播放器通过 `player_menu.dart` 提供「弹幕」开关 + 状态 + 重试，
-  /// 并在切换时写入偏好；新播放器此前只在进入时读一次偏好，
-  /// 既不能关，也看不到加载状态，因此用户无法判断"没有弹幕"是数据问题还是故障。
-  bool _danmakuEnabled = true;
-
   /// 横屏/全屏模式：用独立的全屏层铺满整个屏幕（含状态栏区域），
   /// 并隐藏竖滑流的所有非播放界面（AppBar、剧名、简介、底栏等）。
   /// 注意：这里不是"把系统屏幕转一下"，而是真正进入全屏观看。
@@ -1123,14 +1109,11 @@ class _FeedPageState extends State<_FeedPage> {
     final preferences = widget.store.playbackPreferences;
     _speed = preferences.speed;
     _quality = preferences.quality;
-    _danmakuEnabled = preferences.danmaku;
     // 单剧模式（0.2.29）：从指定集开始播放（详情页/下载页点的是第几集）。
     _episodeIndex = widget.initialEpisodeIndex;
     _pendingStart = widget.initialPosition;
     // 追剧按钮初始状态（0.2.26 新增）。
     _followed = widget.store.isFavorite(widget.drama.id);
-    _danmaku = DanmakuController(widget.repository)
-      ..setEnabled(_danmakuEnabled);
     // 预载器（0.2.31）：默认常开（用户 Q3）。
     _preloader = PlaybackPreloader(widget.repository);
     if (widget.active) _prepare();
@@ -1293,28 +1276,6 @@ class _FeedPageState extends State<_FeedPage> {
     }
   }
 
-  /// 把当前播放状态同步给弹幕控制器。
-  ///
-  /// [discontinuity] 为 true 表示发生了跳集/换源，需要清空上一集的弹幕。
-  void _syncDanmaku({bool discontinuity = false}) {
-    if (_closed || _player == null) return;
-    final state = _player!.state;
-    _danmaku.update(
-      position: state.position,
-      duration: state.duration,
-      speed: state.rate,
-      playing: state.playing && !_closed,
-      buffering: state.buffering,
-      foreground: widget.active,
-      available:
-          !_loading &&
-          _error == null &&
-          widget.active &&
-          widget.store.allowsSource('hongguo'),
-      discontinuity: discontinuity,
-    );
-  }
-
   /// 只为当前页创建播放器，避免同时持有多个实例。
   bool _ensurePlayer() {
     if (_player != null) return true;
@@ -1385,16 +1346,6 @@ class _FeedPageState extends State<_FeedPage> {
         }),
       );
     }
-    // 弹幕随播放进度滚动：位置/时长/播放状态变化时同步给控制器。
-    for (final stream in [
-      player.stream.position,
-      player.stream.duration,
-      player.stream.rate,
-      player.stream.playing,
-      player.stream.buffering,
-    ]) {
-      _subscriptions.add(stream.listen((_) => _syncDanmaku()));
-    }
     // 探测视频真实分辨率，决定是否提供「横屏」按钮。
     // 优先用 aspect（显示宽高比，最可靠），其次 dw/dh、w/h。
     // 注意：很多流在首帧前这些值都是 null，属于正常情况，
@@ -1442,7 +1393,6 @@ class _FeedPageState extends State<_FeedPage> {
     if (ratio > 100 || ratio < 0.01) return; // 明显异常，忽略
     if ((ratio - _aspectRatio).abs() < 0.01) return;
     setState(() => _aspectRatio = ratio);
-    // 弹幕层比例依赖该项，全屏层需同步。
     _refreshFullscreen();
   }
 
@@ -1552,7 +1502,6 @@ class _FeedPageState extends State<_FeedPage> {
       unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     }
     _releasePlayer();
-    _danmaku.dispose();
     // 预载器释放（0.2.31）：取消挂起请求并释放已预取的会话，避免会话泄漏。
     _preloader.dispose();
     super.dispose();
@@ -1871,9 +1820,6 @@ class _FeedPageState extends State<_FeedPage> {
       });
       // 就绪是重要状态切换，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
-      // 接入弹幕：换集/换源属于不连续点，先清掉上一集的弹幕再挂新会话。
-      _danmaku.setPlan(plan);
-      _syncDanmaku(discontinuity: true);
       _scheduleHide();
       // 兜底：某些平台 videoParams 流不会补发，这里主动读一次分辨率。
       _refreshAspectRatio();
@@ -2153,77 +2099,6 @@ class _FeedPageState extends State<_FeedPage> {
     if (value != null && mounted) await _setQuality(value);
   });
 
-  /// 切换弹幕开关，并写入偏好（长期保留）。
-  Future<void> _setDanmakuEnabled(bool enabled) async {
-    if (_closed) return;
-    setState(() => _danmakuEnabled = enabled);
-    _danmaku.setEnabled(enabled);
-    try {
-      await widget.store.setPlaybackPreferences(
-        widget.store.playbackPreferences.copyWith(danmaku: enabled),
-      );
-    } catch (_) {
-      if (mounted && !_closed) {
-        setState(() => _saveWarning = '弹幕开关未能保存，请检查存储空间后重试。');
-      }
-    }
-  }
-
-  /// 弹幕底部面板：开关 + 状态 + 重试。
-  Future<void> _openDanmakuMenu() => _openPanel(() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      useRootNavigator: _sheetUsesRootNavigator,
-      backgroundColor: const Color(0xFF191A20),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (sheetContext) => _sheetShell(
-        title: '弹幕',
-        key: const ValueKey('feed-danmaku-sheet'),
-        child: StatefulBuilder(
-          builder: (context, setSheetState) => Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SwitchListTile.adaptive(
-                key: const ValueKey('feed-danmaku-enabled'),
-                contentPadding: EdgeInsets.zero,
-                title: const Text('显示弹幕'),
-                subtitle: Text(_danmaku.status),
-                value: _danmakuEnabled,
-                onChanged: (value) async {
-                  await _setDanmakuEnabled(value);
-                  if (sheetContext.mounted) setSheetState(() {});
-                },
-              ),
-              if (_danmaku.canRetry)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    key: const ValueKey('feed-danmaku-retry'),
-                    onPressed: () {
-                      _danmaku.retry();
-                      _syncDanmaku();
-                      setSheetState(() {});
-                    },
-                    icon: const Icon(Icons.refresh_rounded, size: 18),
-                    label: const Text('重试弹幕'),
-                  ),
-                ),
-              const SizedBox(height: 8),
-              const Text(
-                '仅红果源在线播放提供弹幕；本地文件与其他站源不加载弹幕。',
-                style: TextStyle(fontSize: 12, color: Color(0xFFB9B6C2)),
-              ),
-              const SizedBox(height: 12),
-            ],
-          ),
-        ),
-      ),
-    );
-  });
-
   /// 加入 / 取消追剧（0.2.26 新增，用户要求）。
   ///
   /// 复用 `store.toggleFavorite`（与详情页、追剧页共用同一份数据），
@@ -2462,7 +2337,7 @@ class _FeedPageState extends State<_FeedPage> {
     }
   }
 
-  /// 全屏层内容：视频铺满 + 弹幕 + 手势 + 可自动隐藏的简洁控件。
+  /// 全屏层内容：视频铺满 + 手势 + 可自动隐藏的简洁控件。
   ///
   /// 0.2.28（方案 D）：本层现在是**全屏路由的内容**（不是 OverlayEntry），
   /// 位于 Navigator 路由栈中，因此 `PopScope` 能正常拦截系统返回键。
@@ -2518,11 +2393,6 @@ class _FeedPageState extends State<_FeedPage> {
                       )
                     else
                       const ColoredBox(color: Colors.black),
-                    // 弹幕层（全屏时同样显示）。
-                    DanmakuOverlay(
-                      controller: _danmaku,
-                      aspectRatio: _aspectRatio > 0 ? _aspectRatio : 16 / 9,
-                    ),
                     // 手势层：单击显隐控件，双击播放/暂停，上下滑切集。
                     Positioned.fill(
                       child: Listener(
@@ -2648,14 +2518,6 @@ class _FeedPageState extends State<_FeedPage> {
                                       icon: Icons.hd_rounded,
                                       label: _qualityLabel,
                                       onPressed: _openQualityMenu,
-                                    ),
-                                    _sideButton(
-                                      key: const ValueKey('fullscreen-danmaku'),
-                                      icon: _danmakuEnabled
-                                          ? Icons.subtitles_rounded
-                                          : Icons.subtitles_off_rounded,
-                                      label: '弹幕',
-                                      onPressed: _openDanmakuMenu,
                                     ),
                                     _sideButton(
                                       key: const ValueKey(
@@ -2871,7 +2733,7 @@ class _FeedPageState extends State<_FeedPage> {
 
   /// 让全屏层重建（状态变化时调用）。
   ///
-  /// 节流到 250ms（0.3.1 性能修复）：全屏层内容较重（进度条 + 选集 + 弹幕层），
+  /// 节流到 250ms（0.3.1 性能修复）：全屏层内容较重（进度条 + 选集），
   /// 而 position 流每秒推送多次，每次都整层重建会造成明显掉帧。
   /// [immediate] 为 true 时跳过节流，用于用户操作（切集、暂停等）需要立刻反馈的场景。
   void _refreshFullscreen({bool immediate = false}) {
@@ -2922,11 +2784,6 @@ class _FeedPageState extends State<_FeedPage> {
           const ColoredBox(color: Colors.black)
         else
           const ColoredBox(color: Colors.black),
-        // 弹幕层：位于视频之上、控件层之下，不拦截任何点击。
-        DanmakuOverlay(
-          controller: _danmaku,
-          aspectRatio: _aspectRatio > 0 ? _aspectRatio : 16 / 9,
-        ),
         // 手势层：单击显隐控件，双击暂停，长按 3 倍速，上下滑切集。
         Positioned.fill(
           child: Listener(
@@ -3095,14 +2952,6 @@ class _FeedPageState extends State<_FeedPage> {
                                 icon: Icons.hd_rounded,
                                 label: _qualityLabel,
                                 onPressed: _openQualityMenu,
-                              ),
-                              _sideButton(
-                                key: const ValueKey('feed-danmaku'),
-                                icon: _danmakuEnabled
-                                    ? Icons.subtitles_rounded
-                                    : Icons.subtitles_off_rounded,
-                                label: '弹幕',
-                                onPressed: _openDanmakuMenu,
                               ),
                               _sideButton(
                                 key: const ValueKey('feed-episodes'),

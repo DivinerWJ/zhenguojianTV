@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'danmaku_fixtures.dart';
 import 'fixtures.dart';
 import 'player_fixtures.dart';
 
@@ -19,7 +18,7 @@ void main() {
   /// 用固定 key 挂载，保证 `active` 变化时是 `didUpdateWidget` 而不是重建 State。
   Future<void> pumpFeed(
     WidgetTester tester, {
-    required DanmakuFixtureRepository repository,
+    required RouteRepository repository,
     required ScriptedPlayer player,
     required LocalStore store,
     required bool active,
@@ -45,7 +44,7 @@ void main() {
     await settle(tester);
   }
 
-  Future<(LocalStore, DanmakuFixtureRepository, ScriptedPlayer)> setUpFeed(
+  Future<(LocalStore, RouteRepository, ScriptedPlayer)> setUpFeed(
     WidgetTester tester, {
     required bool active,
   }) async {
@@ -56,7 +55,7 @@ void main() {
     SharedPreferences.setMockInitialValues(const {});
     final store = LocalStore(await SharedPreferences.getInstance());
     addTearDown(store.dispose);
-    final repository = DanmakuFixtureRepository();
+    final repository = RouteRepository();
     final player = ScriptedPlayer();
     await pumpFeed(
       tester,
@@ -77,22 +76,6 @@ void main() {
     );
     expect(find.text('正在加载视频…'), findsNothing);
     expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('弹幕开关存在并能持久化', (tester) async {
-    final (store, _, _) = await setUpFeed(tester, active: true);
-    expect(find.byKey(const ValueKey('feed-danmaku')), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('feed-danmaku')));
-    await settle(tester);
-    expect(find.byKey(const ValueKey('feed-danmaku-sheet')), findsOneWidget);
-    final toggle = find.byKey(const ValueKey('feed-danmaku-enabled'));
-    expect(toggle, findsOneWidget);
-    await tester.tap(toggle);
-    await settle(tester);
-    expect(store.playbackPreferences.danmaku, isFalse);
-    await tester.tap(toggle);
-    await settle(tester);
-    expect(store.playbackPreferences.danmaku, isTrue);
   });
 
   testWidgets('未激活的页面不创建播放器，变为当前页后才加载', (tester) async {

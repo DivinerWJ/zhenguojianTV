@@ -11,8 +11,6 @@ import 'package:window_manager/window_manager.dart';
 import 'app_layout.dart';
 import 'app_theme.dart';
 import 'core_bridge.dart';
-import 'danmaku_controller.dart';
-import 'danmaku_overlay.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'playback_loader.dart';
@@ -67,9 +65,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PlaybackLoader _loader;
   late final PlaybackPreloader _preloader;
   bool _preloadEnabled = true;
-  late final DanmakuController _danmaku;
-  int _seekSequence = 0;
-  bool _danmakuEnabled = true;
   late final PlayerInteractions _interactions;
   final _playerFocus = FocusNode(debugLabel: 'player-surface');
   final _videoPaneKey = GlobalKey();
@@ -121,7 +116,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     speed: _speed,
     quality: _requestedQuality,
     autoAdvance: _autoAdvance,
-    danmaku: _danmakuEnabled,
     preload: _preloadEnabled,
   );
   String get _qualityLabel => _plan?.local == true
@@ -145,12 +139,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _speed = preferences.speed;
     _requestedQuality = preferences.quality;
     _autoAdvance = preferences.autoAdvance;
-    _danmakuEnabled = preferences.danmaku;
     _preloadEnabled = preferences.preload;
     _loader = PlaybackLoader(widget.repository);
     _preloader = PlaybackPreloader(widget.repository);
-    _danmaku = DanmakuController(widget.repository)
-      ..setEnabled(_danmakuEnabled);
     widget.store.addListener(_accessChanged);
     _player =
         widget.playerFactory?.call() ??
@@ -221,7 +212,6 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!_closed && _openedIndex == _index && position > Duration.zero) {
           _resumePosition = position.inMilliseconds / 1000;
         }
-        _syncDanmaku();
         _syncPreload();
         _acknowledgeHandoff();
       }),
@@ -236,7 +226,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     ]) {
       _subscriptions.add(
         stream.listen((_) {
-          _syncDanmaku();
           _syncPreload();
           _acknowledgeHandoff();
         }),
@@ -311,12 +300,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       _playIntent = false;
       widget.handoff?.fail('接收端用户已变更');
       unawaited(_player.pause());
-    }
-    if (!_closed &&
-        (widget.store.profileEpoch != _profileEpoch ||
-            widget.store.locked ||
-            !widget.store.allowsSource('hongguo'))) {
-      _danmaku.setPlan(null);
     }
   }
 
@@ -461,27 +444,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  void _syncDanmaku({bool discontinuity = false}) {
-    if (_closed) return;
-    final state = _player.state;
-    _danmaku.update(
-      position: state.position,
-      duration: state.duration,
-      speed: state.rate,
-      playing: state.playing && _playIntent && !state.completed,
-      buffering: state.buffering,
-      foreground: _foreground,
-      available:
-          !_loading &&
-          _error == null &&
-          _openedIndex == _index &&
-          widget.store.profileEpoch == _profileEpoch &&
-          !widget.store.locked &&
-          widget.store.allowsSource('hongguo'),
-      discontinuity: discontinuity,
-    );
-  }
-
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -512,7 +474,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
-    _syncDanmaku();
     _syncPreload();
     _health.reset();
     if (!_foreground) _interactions.cancel();
@@ -563,7 +524,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     _acceptErrors = false;
-    _danmaku.setPlan(null);
     _errorTimer?.cancel();
     _pendingError = false;
     final position = _currentPosition;
@@ -616,7 +576,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     unawaited(_player.playOrPause());
     if (!_playIntent) unawaited(_saveProgress(flush: true));
-    _syncDanmaku();
   }
 
   Future<void> _saveProgress({bool flush = false}) async {
@@ -701,8 +660,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             : null);
     _preloader.clear();
     final ticket = ++_generation;
-    _seekSequence++;
-    _danmaku.setPlan(null);
     _acceptErrors = false;
     _pendingError = false;
     _errorTimer?.cancel();
@@ -812,8 +769,6 @@ class _PlayerScreenState extends State<PlayerScreen>
           setState(() {
             _loading = false;
           });
-          _danmaku.setPlan(plan);
-          _syncDanmaku();
           _acknowledgeHandoff();
           _menuRevision.value++;
         }
@@ -942,11 +897,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       _speed = preferences.speed;
       _requestedQuality = preferences.quality;
       _autoAdvance = preferences.autoAdvance;
-      _danmakuEnabled = preferences.danmaku;
       _preloadEnabled = preferences.preload;
     });
-    _danmaku.setEnabled(_danmakuEnabled);
-    _syncDanmaku();
     if (qualityChanged || !_preloadEnabled) _preloader.clear();
     _syncPreload();
     _menuRevision.value++;
@@ -977,7 +929,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             animation: Listenable.merge([
               _menuRevision,
               widget.store,
-              _danmaku,
               _preloader,
             ]),
             builder: (_, _) => PlayerMenu(
@@ -992,9 +943,6 @@ class _PlayerScreenState extends State<PlayerScreen>
               mobile: _mobile,
               onEpisode: (index) => Navigator.pop(menuContext, index),
               onPreferences: _setPreferences,
-              showDanmaku: widget.detail.drama.source == 'hongguo',
-              danmakuStatus: _danmaku.status,
-              onRetryDanmaku: _danmaku.canRetry ? _danmaku.retry : null,
               preloadStatus: _preloader.status,
               onFavorite: () =>
                   widget.store.toggleFavorite(widget.detail.drama),
@@ -1017,19 +965,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_closed || _loading || _error != null) return;
     _handoffOwned = false;
     widget.handoff?.fail('接收端已调整播放位置');
-    final ticket = ++_seekSequence;
-    final generation = _generation;
-    _danmaku.beginSeek();
-    var succeeded = false;
     try {
       await _player.seek(target);
-      succeeded = true;
     } catch (_) {
       _notice('跳转失败，请重试');
-    } finally {
-      if (!_closed && ticket == _seekSequence && generation == _generation) {
-        _danmaku.endSeek(succeeded ? target : _player.state.position);
-      }
     }
   }
 
@@ -1072,7 +1011,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       selection = await showDialog<TelevisionPlaybackSetting>(
         context: context,
         builder: (_) => AnimatedBuilder(
-          animation: Listenable.merge([_danmaku, _preloader]),
+          animation: Listenable.merge([_preloader]),
           builder: (_, _) => TelevisionSettingsDialog(
             speed: _speed,
             quality: _requestedQuality,
@@ -1080,10 +1019,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             favorite: widget.store.isFavorite(widget.detail.drama.id),
             onFavorite: _toggleFavorite,
             autoAdvance: _autoAdvance,
-            danmaku: _danmakuEnabled,
-            showDanmaku: widget.detail.drama.source == 'hongguo',
-            danmakuStatus: _danmaku.status,
-            onRetryDanmaku: _danmaku.canRetry ? _danmaku.retry : null,
             preload: _preloadEnabled,
             preloadStatus: _preloader.status,
           ),
@@ -1099,7 +1034,6 @@ class _PlayerScreenState extends State<PlayerScreen>
           speed: selection.speed,
           quality: selection.quality,
           autoAdvance: selection.autoAdvance,
-          danmaku: selection.danmaku,
           preload: selection.preload,
         ),
       );
@@ -1122,7 +1056,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     LanController.current?.detachPlayback(_lanIdentity);
     widget.handoff?.fail('接收端已退出播放');
     widget.store.removeListener(_accessChanged);
-    _danmaku.dispose();
     _preloader.dispose();
     _generation++;
     WidgetsBinding.instance.removeObserver(this);
@@ -1310,24 +1243,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ? () => _play(_index + 1)
                 : null,
           );
-    final layeredControls = Stack(
-      fit: StackFit.expand,
-      children: [
-        DanmakuOverlay(controller: _danmaku, aspectRatio: _aspectRatio),
-        controls,
-      ],
-    );
     return Stack(
       key: _videoPaneKey,
       fit: StackFit.expand,
       children: [
         if (widget.videoBuilder != null)
-          widget.videoBuilder!(layeredControls)
+          widget.videoBuilder!(controls)
         else
           Video(
             controller: _video!,
             fit: BoxFit.contain,
-            controls: (_) => layeredControls,
+            controls: (_) => controls,
           ),
         if (_loading)
           ColoredBox(
@@ -1469,8 +1395,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               onPressed: _loading || _error != null ? null : _pushToDevice,
             ),
           IconButton(
-            key: const ValueKey('player-danmaku-settings'),
-            tooltip: '播放设置 · 画质、倍速与弹幕',
+            key: const ValueKey('player-playback-settings'),
+            tooltip: '播放设置 · 画质、倍速与预加载',
             onPressed: () => _openPanel(PlayerMenuSection.settings),
             icon: const Icon(Icons.tune_rounded),
           ),

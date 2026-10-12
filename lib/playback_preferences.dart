@@ -5,27 +5,23 @@ class PlaybackPreferences {
     this.speed = 1,
     this.quality = 0,
     this.autoAdvance = true,
-    this.danmaku = true,
     this.preload = true,
   });
 
   final double speed;
   final int quality;
   final bool autoAdvance;
-  final bool danmaku;
   final bool preload;
 
   PlaybackPreferences copyWith({
     double? speed,
     int? quality,
     bool? autoAdvance,
-    bool? danmaku,
     bool? preload,
   }) => PlaybackPreferences(
     speed: speed ?? this.speed,
     quality: quality ?? this.quality,
     autoAdvance: autoAdvance ?? this.autoAdvance,
-    danmaku: danmaku ?? this.danmaku,
     preload: preload ?? this.preload,
   );
 
@@ -33,7 +29,6 @@ class PlaybackPreferences {
     'speed': speed,
     'quality': quality,
     'autoAdvance': autoAdvance,
-    'danmaku': danmaku,
     'preload': preload,
   };
 
@@ -41,7 +36,6 @@ class PlaybackPreferences {
     final speed = (value['speed'] as num? ?? 1).toDouble();
     final quality = value['quality'] as int? ?? 0;
     final autoAdvance = value['autoAdvance'] as bool? ?? true;
-    final danmaku = value['danmaku'] as bool? ?? true;
     final preload = value['preload'] as bool? ?? true;
     if (!playbackSpeeds.contains(speed) || quality < 0 || quality > 4320) {
       throw const FormatException('播放偏好无效');
@@ -50,7 +44,6 @@ class PlaybackPreferences {
       speed: speed,
       quality: quality,
       autoAdvance: autoAdvance,
-      danmaku: danmaku,
       preload: preload,
     );
   }
