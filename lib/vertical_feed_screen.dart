@@ -2199,66 +2199,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         child: Wrap(spacing: spacing, runSpacing: spacing, children: children),
       );
 
-  /// 「更多」面板（0.6.0 布局重设计）。
-  ///
-  /// 背景：新播放器功能越加越多，底部常显按钮行横向将满（5 个按钮已占约 2/3 屏宽），
-  /// 再加功能只能继续挤压画面。改为把**低频功能收进这里**，底部只留
-  /// 倍速 / 选集 / 连播 / 更多 四个，今后新增功能一律进本面板。
-  ///
-  /// 目前收纳：清晰度、追剧。
-  /// （局域网推送将在后续版本加入，避免此处出现"点了没反应"的入口。）
-  Future<void> _openMoreMenu() => _openPanel(() async {
-    final choice = await showModalBottomSheet<String>(
-      context: context,
-      useRootNavigator: _sheetUsesRootNavigator,
-      backgroundColor: const Color(0xFF191A20),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (sheetContext) => _sheetShell(
-        title: '更多',
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              key: const ValueKey('feed-quality'),
-              leading: const Icon(Icons.hd_rounded),
-              title: const Text('清晰度'),
-              trailing: Text(
-                _qualityLabel,
-                style: const TextStyle(color: Color(0xFFB9B6C2)),
-              ),
-              onTap: () => Navigator.pop(sheetContext, 'quality'),
-            ),
-            ListTile(
-              key: const ValueKey('feed-follow'),
-              leading: Icon(
-                _followed
-                    ? Icons.bookmark_rounded
-                    : Icons.bookmark_border_rounded,
-              ),
-              title: Text(_followed ? '已追剧' : '追剧'),
-              trailing: Text(
-                _followed ? '点击取消' : '点击加入',
-                style: const TextStyle(color: Color(0xFFB9B6C2)),
-              ),
-              onTap: () => Navigator.pop(sheetContext, 'follow'),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-    // 等本面板真正关闭后再开下一个，避免两层弹窗叠加、层级错乱。
-    if (choice == null || !mounted || _closed) return;
-    switch (choice) {
-      case 'quality':
-        await _openQualityMenu();
-      case 'follow':
-        await _toggleFollow();
-    }
-  });
-
   Future<void> _openSpeedMenu() => _openPanel(() async {
     final value = await showModalBottomSheet<double>(
       context: context,
@@ -2736,10 +2676,23 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                     children: [
                                       Row(
                                         children: [
-                                          Text(
-                                            formatPosition(
-                                              (_seekValue ?? position / 1000),
+                                          IconButton(
+                                            key: const ValueKey(
+                                              'fullscreen-play-toggle',
                                             ),
+                                            tooltip: (state?.playing ?? false)
+                                                ? '暂停'
+                                                : '播放',
+                                            onPressed: _togglePlayback,
+                                            icon: Icon(
+                                              (state?.playing ?? false)
+                                                  ? Icons.pause_rounded
+                                                  : Icons.play_arrow_rounded,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          Text(
+                                            '${formatPosition((_seekValue ?? position / 1000))} / ${formatPosition(duration / 1000)}',
                                             style: const TextStyle(
                                               color: Colors.white70,
                                               fontSize: 12,
@@ -2801,13 +2754,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                               ),
                                             ),
                                           ),
-                                          Text(
-                                            formatPosition(duration / 1000),
-                                            style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 12,
-                                            ),
-                                          ),
                                           IconButton(
                                             key: const ValueKey(
                                               'fullscreen-exit',
@@ -2835,11 +2781,29 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                           ),
                                           _sideButton(
                                             key: const ValueKey(
+                                              'fullscreen-quality',
+                                            ),
+                                            icon: Icons.hd_rounded,
+                                            label: _qualityLabel,
+                                            onPressed: _openQualityMenu,
+                                          ),
+                                          _sideButton(
+                                            key: const ValueKey(
                                               'fullscreen-episodes',
                                             ),
                                             icon: Icons.grid_view_rounded,
                                             label: '选集',
                                             onPressed: _openEpisodes,
+                                          ),
+                                          _sideButton(
+                                            key: const ValueKey(
+                                              'fullscreen-follow',
+                                            ),
+                                            icon: _followed
+                                                ? Icons.bookmark_rounded
+                                                : Icons.bookmark_border_rounded,
+                                            label: _followed ? '已追剧' : '追剧',
+                                            onPressed: _toggleFollow,
                                           ),
                                           if (!widget.singleDrama)
                                             _sideButton(
@@ -2858,14 +2822,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                               onPressed:
                                                   widget.onToggleAutoNext,
                                             ),
-                                          _sideButton(
-                                            key: const ValueKey(
-                                              'fullscreen-more',
-                                            ),
-                                            icon: Icons.more_horiz_rounded,
-                                            label: '更多',
-                                            onPressed: _openMoreMenu,
-                                          ),
                                         ],
                                       ),
                                     ],
@@ -3152,6 +3108,26 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                               ),
                               Row(
                                 children: [
+                                  IconButton(
+                                    key: const ValueKey('feed-play-toggle'),
+                                    tooltip: (state?.playing ?? false)
+                                        ? '暂停'
+                                        : '播放',
+                                    onPressed: _togglePlayback,
+                                    icon: Icon(
+                                      (state?.playing ?? false)
+                                          ? Icons.pause_rounded
+                                          : Icons.play_arrow_rounded,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${formatPosition((_seekValue ?? position / 1000))} / ${formatPosition(duration / 1000)}',
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 12,
+                                    ),
+                                  ),
                                   Expanded(
                                     child: SliderTheme(
                                       data: SliderTheme.of(
@@ -3212,29 +3188,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                 ],
                               ),
                               Row(
-                                children: [
-                                  IconButton(
-                                    tooltip: (state?.playing ?? false)
-                                        ? '暂停'
-                                        : '播放',
-                                    onPressed: _togglePlayback,
-                                    icon: Icon(
-                                      (state?.playing ?? false)
-                                          ? Icons.pause_rounded
-                                          : Icons.play_arrow_rounded,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  Text(
-                                    '${formatPosition((_seekValue ?? position / 1000))} / ${formatPosition(duration / 1000)}',
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              Row(
                                 mainAxisAlignment:
                                     MainAxisAlignment.spaceEvenly,
                                 children: [
@@ -3245,10 +3198,24 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                     onPressed: _openSpeedMenu,
                                   ),
                                   _sideButton(
+                                    key: const ValueKey('feed-quality'),
+                                    icon: Icons.hd_rounded,
+                                    label: _qualityLabel,
+                                    onPressed: _openQualityMenu,
+                                  ),
+                                  _sideButton(
                                     key: const ValueKey('feed-episodes'),
                                     icon: Icons.grid_view_rounded,
                                     label: '选集',
                                     onPressed: _openEpisodes,
+                                  ),
+                                  _sideButton(
+                                    key: const ValueKey('feed-follow'),
+                                    icon: _followed
+                                        ? Icons.bookmark_rounded
+                                        : Icons.bookmark_border_rounded,
+                                    label: _followed ? '已追剧' : '追剧',
+                                    onPressed: _toggleFollow,
                                   ),
                                   if (!widget.singleDrama)
                                     _sideButton(
@@ -3264,12 +3231,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                           : Colors.white,
                                       onPressed: widget.onToggleAutoNext,
                                     ),
-                                  _sideButton(
-                                    key: const ValueKey('feed-more'),
-                                    icon: Icons.more_horiz_rounded,
-                                    label: '更多',
-                                    onPressed: _openMoreMenu,
-                                  ),
                                 ],
                               ),
                             ],
