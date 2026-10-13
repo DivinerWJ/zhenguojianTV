@@ -13,6 +13,7 @@ import 'local_store.dart';
 import 'models.dart';
 import 'playback_preferences.dart';
 import 'playback_preloader.dart';
+import 'playback_recovery.dart';
 import 'player_interactions.dart';
 import 'widgets.dart';
 
@@ -46,6 +47,7 @@ class VerticalFeedScreen extends StatefulWidget {
     this.initialEpisodeIndex = 0,
     this.initialPosition = 0,
     this.localOnly = false,
+    this.mediaId,
   });
 
   final AppRepository repository;
@@ -77,6 +79,16 @@ class VerticalFeedScreen extends StatefulWidget {
   /// true 时用 `repository.localPlayback` 取**已下载的本地文件**，
   /// 而不是 `repository.resolve` 拉在线流。供下载页使用。
   final bool localOnly;
+
+  /// 本地媒体 ID（0.6.0 新增，迁移自老播放器）。
+  ///
+  /// 非空表示本次播放的是「本地媒体库」里的成品文件（下载页的合并视频等），
+  /// 此时观看进度写入**独立存储** `store.saveMediaWatch`，
+  /// 而不是普通观看记录 `store.saveWatch`。
+  ///
+  /// 为什么必须分开：老播放器（`player_screen.dart`）就是这么做的——
+  /// 本地媒体的进度用 `mediaWatched` 单独读取，混进普通观看记录会污染「最近观看」。
+  final String? mediaId;
 
   /// 嵌入首页标签页时为 true：不渲染自己的 Scaffold 与返回按钮。
   final bool embedded;
@@ -782,6 +794,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
               ? widget.initialPosition
               : 0,
           localOnly: widget.singleDrama != null && widget.localOnly,
+          mediaId: widget.singleDrama != null ? widget.mediaId : null,
           singleDrama: widget.singleDrama != null,
           // 预载（0.2.31）：把"下一部剧"传给当前页，供"连播下一部"模式预载。
           // 只在首页无限流、且当前页有下一部时有效（单剧模式无下一部）。
@@ -945,6 +958,7 @@ class _FeedPage extends StatefulWidget {
     this.initialEpisodeIndex = 0,
     this.initialPosition = 0,
     this.localOnly = false,
+    this.mediaId,
     this.singleDrama = false,
     this.nextDrama,
     this.autoNextDramaEnabled = false,
@@ -981,6 +995,9 @@ class _FeedPage extends StatefulWidget {
   /// 单剧模式（0.2.29）：true 时播放已下载的本地文件。
   final bool localOnly;
 
+  /// 本地媒体 ID（0.6.0）：非空时进度写入 `store.saveMediaWatch`。
+  final String? mediaId;
+
   /// 单剧模式（0.2.29）：true 时隐藏"连播本剧"开关（只有一部剧，无意义）。
   final bool singleDrama;
 
@@ -996,7 +1013,7 @@ class _FeedPage extends StatefulWidget {
   State<_FeedPage> createState() => _FeedPageState();
 }
 
-class _FeedPageState extends State<_FeedPage> {
+class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   Player? _player;
   VideoController? _video;
   PlayerInteractions? _interactions;
@@ -1042,6 +1059,23 @@ class _FeedPageState extends State<_FeedPage> {
 
   /// 观看记录保存失败提示（与旧播放器一致的容错）。
   String? _saveWarning;
+
+  /// 播放健康检查（0.6.0，迁移自老播放器 `player_screen.dart`）。
+  ///
+  /// 老播放器每秒检测一次"是否卡住"（位置 20 秒不前进且处于播放中），
+  /// 卡住则自动恢复（切备用线路 / 重新解析地址）。
+  /// 新播放器此前**完全没有**这个能力，网络抖动时会一直黑屏等下去，
+  /// 用户只能手动切集绕过。这里补齐同一套能力。
+  final _health = PlaybackHealth();
+
+  /// 健康检查定时器（每秒一次）。
+  Timer? _healthTimer;
+
+  /// 自动恢复尝试计数与"是否已刷新过地址"（与老播放器同一套策略）。
+  final _recovery = PlaybackRecovery();
+
+  /// 应用是否在前台。后台时不判定"卡住"，否则会被误判。
+  bool _foreground = true;
 
   /// 横屏/全屏模式：用独立的全屏层铺满整个屏幕（含状态栏区域），
   /// 并隐藏竖滑流的所有非播放界面（AppBar、剧名、简介、底栏等）。
@@ -1106,6 +1140,7 @@ class _FeedPageState extends State<_FeedPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final preferences = widget.store.playbackPreferences;
     _speed = preferences.speed;
     _quality = preferences.quality;
@@ -1168,6 +1203,61 @@ class _FeedPageState extends State<_FeedPage> {
     _playerReleased = false;
     _ready = false;
     await _prepare(force: true);
+  }
+
+  /// 自动恢复（0.6.0，迁移自老播放器）。
+  ///
+  /// 触发条件：健康检查判定"播放中但位置长时间不前进"。
+  /// 策略与老播放器一致（`PlaybackRecovery`）：
+  /// 1. 有计划且有备用线路 → 切备用线路；
+  /// 2. 否则首次 → 重新解析播放地址（刷新）；
+  /// 3. 累计超过 3 次 → 停止，展示错误让用户手动重试。
+  ///
+  /// 恢复后从**当前进度**续播，不让用户回到片头。
+  Future<void> _recover() async {
+    final current = _plan;
+    if (_closed ||
+        _playerReleased ||
+        !widget.active ||
+        !_foreground ||
+        current == null ||
+        _error != null) {
+      return;
+    }
+    final position = _player?.state.position ?? Duration.zero;
+    // 本地文件没有备用线路可切，直接停止，避免无意义地反复重试。
+    final action = current.local
+        ? PlaybackRecoveryAction.stop
+        : _recovery.next(current);
+    if (action == PlaybackRecoveryAction.stop) {
+      if (!mounted || _closed) return;
+      setState(() {
+        _error = current.local
+            ? '本地视频播放中断，请返回重试。'
+            : '播放已中断，请点击重试。';
+      });
+      _refreshFullscreen(immediate: true);
+      return;
+    }
+    // 记录续播点，`_prepare` 会通过 `_takeStartPosition` 取用。
+    _resumeFrom = position;
+    _health.reset();
+    final message = switch (action) {
+      PlaybackRecoveryAction.alternative => '正在切换备用线路',
+      PlaybackRecoveryAction.refresh => '正在重新获取播放地址',
+      PlaybackRecoveryAction.stop => '',
+    };
+    if (mounted && !_closed && message.isNotEmpty) _toast(message);
+    await _prepare(force: true);
+  }
+
+  /// 应用前后台切换（0.6.0）。
+  ///
+  /// 后台时不判定"卡住"（`_health.reset()`），否则回到前台会被误判为卡死并触发恢复。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    _health.reset();
   }
 
   /// 取出并清空待续播位置（只在首次打开时返回非零值）。
@@ -1337,6 +1427,28 @@ class _FeedPageState extends State<_FeedPage> {
       const Duration(seconds: 5),
       (_) => unawaited(_saveProgress()),
     );
+    // 健康检查（0.6.0）：每秒检测是否卡住，卡住则自动恢复。
+    // 只在"播放中 + 前台 + 无错误"时判定，避免把暂停/缓冲误判为卡死。
+    _healthTimer?.cancel();
+    _healthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_closed ||
+          _playerReleased ||
+          !widget.active ||
+          _loading ||
+          _error != null) {
+        return;
+      }
+      final current = _player;
+      if (current == null) return;
+      if (_health.stalled(
+        position: current.state.position,
+        playing: current.state.playing,
+        foreground: _foreground,
+        now: DateTime.now(),
+      )) {
+        unawaited(_recover());
+      }
+    });
     for (final stream in [
       player.stream.position,
       player.stream.duration,
@@ -1475,6 +1587,11 @@ class _FeedPageState extends State<_FeedPage> {
     _interactions?.removeListener(_interactionChanged);
     _interactions?.dispose();
     _interactions = null;
+    // 播放器已释放：健康检查定时器必须一并停掉，
+    // 否则它会继续读取已释放实例的 state（0.6.0）。
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    _health.reset();
     final player = _player;
     _player = null;
     _video = null;
@@ -1488,6 +1605,9 @@ class _FeedPageState extends State<_FeedPage> {
   @override
   void dispose() {
     _closed = true;
+    WidgetsBinding.instance.removeObserver(this);
+    _healthTimer?.cancel();
+    _healthTimer = null;
     // 退出前先把观看进度落盘（与旧播放器 dispose 行为一致）。
     unawaited(_saveProgress());
     _saveTimer?.cancel();
@@ -1682,7 +1802,15 @@ class _FeedPageState extends State<_FeedPage> {
       updatedAt: DateTime.now(),
     );
     try {
-      await widget.store.saveWatch(entry);
+      // 0.6.0：本地媒体（mediaId 非空）写入**独立**的本地媒体进度存储，
+      // 与老播放器 `player_screen.dart` 的 `saveMediaWatch` 语义一致。
+      // 混入普通观看记录会污染「最近观看」，因此必须分开。
+      final mediaId = widget.mediaId;
+      if (mediaId != null) {
+        await widget.store.saveMediaWatch(mediaId, entry);
+      } else {
+        await widget.store.saveWatch(entry);
+      }
       if (widget.store.profileEpoch != epoch) return;
       _savedProgressKey = key;
       if (mounted && !_closed && _saveWarning != null) {
@@ -1851,6 +1979,10 @@ class _FeedPageState extends State<_FeedPage> {
         _ready = true;
         _controlsVisible = true;
       });
+      // 加载成功：复位健康检查与恢复计数（0.6.0）。
+      // 不复位的话，上一次的失败计数会累计，导致本次偶发卡顿直接判为"停止"。
+      _health.reset();
+      _recovery.reset();
       // 就绪是重要状态切换，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
       _scheduleHide();
@@ -2066,6 +2198,66 @@ class _FeedPageState extends State<_FeedPage> {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
         child: Wrap(spacing: spacing, runSpacing: spacing, children: children),
       );
+
+  /// 「更多」面板（0.6.0 布局重设计）。
+  ///
+  /// 背景：新播放器功能越加越多，底部常显按钮行横向将满（5 个按钮已占约 2/3 屏宽），
+  /// 再加功能只能继续挤压画面。改为把**低频功能收进这里**，底部只留
+  /// 倍速 / 选集 / 连播 / 更多 四个，今后新增功能一律进本面板。
+  ///
+  /// 目前收纳：清晰度、追剧。
+  /// （局域网推送将在后续版本加入，避免此处出现"点了没反应"的入口。）
+  Future<void> _openMoreMenu() => _openPanel(() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      useRootNavigator: _sheetUsesRootNavigator,
+      backgroundColor: const Color(0xFF191A20),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) => _sheetShell(
+        title: '更多',
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              key: const ValueKey('feed-quality'),
+              leading: const Icon(Icons.hd_rounded),
+              title: const Text('清晰度'),
+              trailing: Text(
+                _qualityLabel,
+                style: const TextStyle(color: Color(0xFFB9B6C2)),
+              ),
+              onTap: () => Navigator.pop(sheetContext, 'quality'),
+            ),
+            ListTile(
+              key: const ValueKey('feed-follow'),
+              leading: Icon(
+                _followed
+                    ? Icons.bookmark_rounded
+                    : Icons.bookmark_border_rounded,
+              ),
+              title: Text(_followed ? '已追剧' : '追剧'),
+              trailing: Text(
+                _followed ? '点击取消' : '点击加入',
+                style: const TextStyle(color: Color(0xFFB9B6C2)),
+              ),
+              onTap: () => Navigator.pop(sheetContext, 'follow'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    // 等本面板真正关闭后再开下一个，避免两层弹窗叠加、层级错乱。
+    if (choice == null || !mounted || _closed) return;
+    switch (choice) {
+      case 'quality':
+        await _openQualityMenu();
+      case 'follow':
+        await _toggleFollow();
+    }
+  });
 
   Future<void> _openSpeedMenu() => _openPanel(() async {
     final value = await showModalBottomSheet<double>(
@@ -2506,64 +2698,6 @@ class _FeedPageState extends State<_FeedPage> {
                                 ),
                               ),
                             ),
-                            // 右上角：退出全屏。
-                            //
-                            // 0.2.26 修正：原先放在左上角（left: 8, top: 8），
-                            // 用户反馈"退出全屏按钮跑到左上角"，与竖滑流控件层
-                            // 的按钮习惯不一致。改到右上角。
-                            Positioned(
-                              right: 8,
-                              top: 8,
-                              child: SafeArea(
-                                child: IconButton(
-                                  key: const ValueKey('fullscreen-exit'),
-                                  tooltip: '退出全屏',
-                                  onPressed: _toggleLandscape,
-                                  icon: const Icon(
-                                    Icons.fullscreen_exit_rounded,
-                                    color: Colors.white,
-                                    size: 30,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            // 右侧：倍速 / 清晰度 / 选集。
-                            //
-                            // 说明：这些按钮原先**根本没有放进全屏层**，
-                            // 用户反馈"倍数等功能消失了"即由此而来。
-                            // 这里与竖滑流的按钮组保持同一套实现，行为一致。
-                            Positioned(
-                              right: 8,
-                              bottom: 96,
-                              child: SafeArea(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: [
-                                    _sideButton(
-                                      key: const ValueKey('fullscreen-speed'),
-                                      icon: Icons.speed_rounded,
-                                      label: '${_speed}x',
-                                      onPressed: _openSpeedMenu,
-                                    ),
-                                    _sideButton(
-                                      key: const ValueKey('fullscreen-quality'),
-                                      icon: Icons.hd_rounded,
-                                      label: _qualityLabel,
-                                      onPressed: _openQualityMenu,
-                                    ),
-                                    _sideButton(
-                                      key: const ValueKey(
-                                        'fullscreen-episodes',
-                                      ),
-                                      icon: Icons.grid_view_rounded,
-                                      label: '选集',
-                                      onPressed: _openEpisodes,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
                             // 中央：播放/暂停。
                             if (!(state?.playing ?? false) &&
                                 !_loading &&
@@ -2597,118 +2731,142 @@ class _FeedPageState extends State<_FeedPage> {
                                     16,
                                     8,
                                   ),
-                                  child: Row(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Text(
-                                        formatPosition(
-                                          (_seekValue ?? position / 1000),
-                                        ),
-                                        style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                      Expanded(
-                                        // 限定进度条的高度与触摸范围：
-                                        // Material `Slider` 默认热区高度较大，
-                                        // 在全屏层这种"整屏可点"的场景里会抢走
-                                        // 画面区域的点击。这里用 SizedBox 限制高度，
-                                        // 使进度条只响应底部这一条区域。
-                                        child: SizedBox(
-                                          height: 32,
-                                          child: SliderTheme(
-                                            // 不依赖 SliderTheme.of(context)：
-                                            // 全屏路由脱离竖滑页主题树，
-                                            // 会退回默认样式（横杆变居中圆盘）。
-                                            data: fullscreenSliderTheme,
-                                            child: Slider(
-                                              key: const ValueKey(
-                                                'fullscreen-progress',
-                                              ),
-                                              value:
-                                                  (_seekValue ??
-                                                          position / 1000)
-                                                      .clamp(0, total),
-                                              max: total,
-                                              secondaryTrackValue:
-                                                  (buffered / 1000).clamp(
-                                                    0,
-                                                    total,
-                                                  ),
-                                              onChangeStart: duration > 0
-                                                  ? (_) {
-                                                      _interactions?.cancel();
-                                                      _hideTimer?.cancel();
-                                                    }
-                                                  : null,
-                                              onChanged: duration <= 0
-                                                  ? null
-                                                  : (value) {
-                                                      _hideTimer?.cancel();
-                                                      setState(
-                                                        () =>
-                                                            _seekValue = value,
-                                                      );
-                                                    },
-                                              onChangeEnd: (value) {
-                                                if (duration > 0) {
-                                                  unawaited(
-                                                    _seekTo(
-                                                      Duration(
-                                                        milliseconds:
-                                                            (value * 1000)
-                                                                .round(),
-                                                      ),
-                                                    ),
-                                                  );
-                                                }
-                                                setState(
-                                                  () => _seekValue = null,
-                                                );
-                                                _showControls();
-                                              },
+                                      Row(
+                                        children: [
+                                          Text(
+                                            formatPosition(
+                                              (_seekValue ?? position / 1000),
+                                            ),
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 12,
                                             ),
                                           ),
-                                        ),
-                                      ),
-                                      Text(
-                                        formatPosition(duration / 1000),
-                                        style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      // 连播开关在全屏里同样可用，
-                                      // 否则进全屏后无法切换「连播本剧 / 连播下一部」。
-                                      TextButton.icon(
-                                        key: const ValueKey(
-                                          'fullscreen-auto-next',
-                                        ),
-                                        onPressed: widget.onToggleAutoNext,
-                                        icon: Icon(
-                                          widget.autoNextEpisode
-                                              ? Icons.repeat_one_rounded
-                                              : Icons.skip_next_rounded,
-                                          size: 18,
-                                        ),
-                                        label: Text(
-                                          widget.autoNextEpisode
-                                              ? '连播本剧'
-                                              : '连播下一部',
-                                        ),
-                                        style: TextButton.styleFrom(
-                                          foregroundColor:
-                                              widget.autoNextEpisode
-                                              ? const Color(0xFFFF765F)
-                                              : Colors.white70,
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
+                                          Expanded(
+                                            child: SizedBox(
+                                              height: 32,
+                                              child: SliderTheme(
+                                                data: fullscreenSliderTheme,
+                                                child: Slider(
+                                                  key: const ValueKey(
+                                                    'fullscreen-progress',
+                                                  ),
+                                                  value:
+                                                      (_seekValue ??
+                                                              position / 1000)
+                                                          .clamp(0, total),
+                                                  max: total,
+                                                  secondaryTrackValue:
+                                                      (buffered / 1000).clamp(
+                                                        0,
+                                                        total,
+                                                      ),
+                                                  onChangeStart: duration > 0
+                                                      ? (_) {
+                                                          _interactions
+                                                              ?.cancel();
+                                                          _hideTimer?.cancel();
+                                                        }
+                                                      : null,
+                                                  onChanged: duration <= 0
+                                                      ? null
+                                                      : (value) {
+                                                          _hideTimer?.cancel();
+                                                          setState(
+                                                            () => _seekValue =
+                                                                value,
+                                                          );
+                                                        },
+                                                  onChangeEnd: (value) {
+                                                    if (duration > 0) {
+                                                      unawaited(
+                                                        _seekTo(
+                                                          Duration(
+                                                            milliseconds:
+                                                                (value * 1000)
+                                                                    .round(),
+                                                          ),
+                                                        ),
+                                                      );
+                                                    }
+                                                    setState(
+                                                      () => _seekValue = null,
+                                                    );
+                                                    _showControls();
+                                                  },
+                                                ),
+                                              ),
+                                            ),
                                           ),
-                                          minimumSize: const Size(0, 32),
-                                          tapTargetSize:
-                                              MaterialTapTargetSize.shrinkWrap,
-                                        ),
+                                          Text(
+                                            formatPosition(duration / 1000),
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                          IconButton(
+                                            key: const ValueKey(
+                                              'fullscreen-exit',
+                                            ),
+                                            tooltip: '退出全屏',
+                                            onPressed: _toggleLandscape,
+                                            icon: const Icon(
+                                              Icons.fullscreen_exit_rounded,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceEvenly,
+                                        children: [
+                                          _sideButton(
+                                            key: const ValueKey(
+                                              'fullscreen-speed',
+                                            ),
+                                            icon: Icons.speed_rounded,
+                                            label: '${_speed}x',
+                                            onPressed: _openSpeedMenu,
+                                          ),
+                                          _sideButton(
+                                            key: const ValueKey(
+                                              'fullscreen-episodes',
+                                            ),
+                                            icon: Icons.grid_view_rounded,
+                                            label: '选集',
+                                            onPressed: _openEpisodes,
+                                          ),
+                                          if (!widget.singleDrama)
+                                            _sideButton(
+                                              key: const ValueKey(
+                                                'fullscreen-auto-next',
+                                              ),
+                                              icon: widget.autoNextEpisode
+                                                  ? Icons.repeat_one_rounded
+                                                  : Icons.skip_next_rounded,
+                                              label: widget.autoNextEpisode
+                                                  ? '连播本剧'
+                                                  : '连播下一部',
+                                              color: widget.autoNextEpisode
+                                                  ? const Color(0xFFFF765F)
+                                                  : Colors.white,
+                                              onPressed:
+                                                  widget.onToggleAutoNext,
+                                            ),
+                                          _sideButton(
+                                            key: const ValueKey(
+                                              'fullscreen-more',
+                                            ),
+                                            icon: Icons.more_horiz_rounded,
+                                            label: '更多',
+                                            onPressed: _openMoreMenu,
+                                          ),
+                                        ],
                                       ),
                                     ],
                                   ),
@@ -2969,56 +3127,8 @@ class _FeedPageState extends State<_FeedPage> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8, bottom: 8),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              _sideButton(
-                                key: const ValueKey('feed-speed'),
-                                icon: Icons.speed_rounded,
-                                label: '${_speed}x',
-                                onPressed: _openSpeedMenu,
-                              ),
-                              _sideButton(
-                                key: const ValueKey('feed-quality'),
-                                icon: Icons.hd_rounded,
-                                label: _qualityLabel,
-                                onPressed: _openQualityMenu,
-                              ),
-                              _sideButton(
-                                key: const ValueKey('feed-episodes'),
-                                icon: Icons.grid_view_rounded,
-                                label: '选集',
-                                onPressed: _openEpisodes,
-                              ),
-                              // 追剧按钮（0.2.26 新增，用户要求）。
-                              //
-                              // 复用 store 已有的 toggleFavorite 能力（JC-0002：只新增入口，
-                              // 不改写现有逻辑）。图标随收藏状态变化：已追剧为实心书签。
-                              _sideButton(
-                                key: const ValueKey('feed-follow'),
-                                icon: _followed
-                                    ? Icons.bookmark_rounded
-                                    : Icons.bookmark_border_rounded,
-                                label: _followed ? '已追剧' : '追剧',
-                                onPressed: _toggleFollow,
-                              ),
-                              // 全屏切换常显：分辨率往往拿不到，不能因为未知就隐藏按钮，
-                              // 否则用户会觉得功能缺失或点了没反应。
-                              _sideButton(
-                                key: const ValueKey('feed-landscape'),
-                                icon: _landscape
-                                    ? Icons.fullscreen_exit_rounded
-                                    : Icons.fullscreen_rounded,
-                                label: _landscape ? '退出全屏' : '全屏',
-                                onPressed: _toggleLandscape,
-                              ),
-                            ],
-                          ),
-                        ),
                         Container(
-                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
                           decoration: const BoxDecoration(
                             gradient: LinearGradient(
                               begin: Alignment.topCenter,
@@ -3030,49 +3140,76 @@ class _FeedPageState extends State<_FeedPage> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              SliderTheme(
-                                data: SliderTheme.of(
-                                  context,
-                                ).copyWith(trackHeight: 3),
-                                child: Slider(
-                                  key: const ValueKey('feed-progress'),
-                                  value: (_seekValue ?? position / 1000).clamp(
-                                    0,
-                                    total,
-                                  ),
-                                  max: total,
-                                  secondaryTrackValue: (buffered / 1000).clamp(
-                                    0,
-                                    total,
-                                  ),
-                                  semanticFormatterCallback: formatPosition,
-                                  onChangeStart: duration > 0
-                                      ? (_) {
-                                          _interactions?.cancel();
-                                          _hideTimer?.cancel();
-                                        }
-                                      : null,
-                                  onChanged: duration <= 0
-                                      ? null
-                                      : (value) {
-                                          _hideTimer?.cancel();
-                                          setState(() => _seekValue = value);
-                                        },
-                                  onChangeEnd: (value) {
-                                    if (duration > 0) {
-                                      unawaited(
-                                        _seekTo(
-                                          Duration(
-                                            milliseconds: (value * 1000)
-                                                .round(),
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                    setState(() => _seekValue = null);
-                                    _showControls();
-                                  },
+                              Text(
+                                widget.drama.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.bold,
                                 ),
+                              ),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: SliderTheme(
+                                      data: SliderTheme.of(
+                                        context,
+                                      ).copyWith(trackHeight: 3),
+                                      child: Slider(
+                                        key: const ValueKey('feed-progress'),
+                                        value:
+                                            (_seekValue ?? position / 1000)
+                                                .clamp(0, total),
+                                        max: total,
+                                        secondaryTrackValue:
+                                            (buffered / 1000).clamp(0, total),
+                                        semanticFormatterCallback:
+                                            formatPosition,
+                                        onChangeStart: duration > 0
+                                            ? (_) {
+                                                _interactions?.cancel();
+                                                _hideTimer?.cancel();
+                                              }
+                                            : null,
+                                        onChanged: duration <= 0
+                                            ? null
+                                            : (value) {
+                                                _hideTimer?.cancel();
+                                                setState(
+                                                  () => _seekValue = value,
+                                                );
+                                              },
+                                        onChangeEnd: (value) {
+                                          if (duration > 0) {
+                                            unawaited(
+                                              _seekTo(
+                                                Duration(
+                                                  milliseconds: (value * 1000)
+                                                      .round(),
+                                                ),
+                                              ),
+                                            );
+                                          }
+                                          setState(() => _seekValue = null);
+                                          _showControls();
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    key: const ValueKey('feed-landscape'),
+                                    tooltip: _landscape ? '退出全屏' : '全屏',
+                                    onPressed: _toggleLandscape,
+                                    icon: Icon(
+                                      _landscape
+                                          ? Icons.fullscreen_exit_rounded
+                                          : Icons.fullscreen_rounded,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
                               ),
                               Row(
                                 children: [
@@ -3095,98 +3232,43 @@ class _FeedPageState extends State<_FeedPage> {
                                       fontSize: 12,
                                     ),
                                   ),
-                                  const Spacer(),
-                                  // 连播开关：默认连播下一部，点一下改成连播本剧。
-                                  //
-                                  // 单剧模式（0.2.29）下**隐藏**：只有一部剧，
-                                  // "连播本剧/连播下一部"没有区别，留着只会误导。
-                                  if (!widget.singleDrama)
-                                    TextButton.icon(
-                                      key: const ValueKey('feed-auto-next'),
-                                      onPressed: widget.onToggleAutoNext,
-                                      icon: Icon(
-                                        widget.autoNextEpisode
-                                            ? Icons.repeat_one_rounded
-                                            : Icons.skip_next_rounded,
-                                        size: 18,
-                                      ),
-                                      label: Text(
-                                        widget.autoNextEpisode
-                                            ? '连播本剧'
-                                            : '连播下一部',
-                                      ),
-                                      style: TextButton.styleFrom(
-                                        foregroundColor: widget.autoNextEpisode
-                                            ? Theme.of(
-                                                context,
-                                              ).colorScheme.primary
-                                            : Colors.white70,
-                                      ),
-                                    ),
                                 ],
                               ),
-                              Text(
-                                widget.drama.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 17,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              if (widget.drama.description
-                                  .trim()
-                                  .isNotEmpty) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  widget.drama.description.trim(),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                              const SizedBox(height: 8),
                               Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceEvenly,
                                 children: [
-                                  if (widget.drama.heat.isNotEmpty) ...[
-                                    const Icon(
-                                      Icons.local_fire_department_rounded,
-                                      size: 16,
-                                      color: Colors.orangeAccent,
+                                  _sideButton(
+                                    key: const ValueKey('feed-speed'),
+                                    icon: Icons.speed_rounded,
+                                    label: '${_speed}x',
+                                    onPressed: _openSpeedMenu,
+                                  ),
+                                  _sideButton(
+                                    key: const ValueKey('feed-episodes'),
+                                    icon: Icons.grid_view_rounded,
+                                    label: '选集',
+                                    onPressed: _openEpisodes,
+                                  ),
+                                  if (!widget.singleDrama)
+                                    _sideButton(
+                                      key: const ValueKey('feed-auto-next'),
+                                      icon: widget.autoNextEpisode
+                                          ? Icons.repeat_one_rounded
+                                          : Icons.skip_next_rounded,
+                                      label: widget.autoNextEpisode
+                                          ? '连播本剧'
+                                          : '连播下一部',
+                                      color: widget.autoNextEpisode
+                                          ? const Color(0xFFFF765F)
+                                          : Colors.white,
+                                      onPressed: widget.onToggleAutoNext,
                                     ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      widget.drama.heat,
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                  ],
-                                  if (widget.drama.episodes > 0)
-                                    Text(
-                                      _detail == null
-                                          ? '共 ${widget.drama.episodes} 集'
-                                          : '第 ${_detail!.episodes[_episodeIndex].number} 集 · 共 ${_detail!.episodes.length} 集',
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  const Spacer(),
-                                  TextButton.icon(
-                                    key: const ValueKey('feed-detail'),
-                                    onPressed: widget.onOpenDetail,
-                                    icon: const Icon(
-                                      Icons.list_rounded,
-                                      size: 18,
-                                    ),
-                                    label: const Text('详情'),
+                                  _sideButton(
+                                    key: const ValueKey('feed-more'),
+                                    icon: Icons.more_horiz_rounded,
+                                    label: '更多',
+                                    onPressed: _openMoreMenu,
                                   ),
                                 ],
                               ),
@@ -3210,8 +3292,9 @@ class _FeedPageState extends State<_FeedPage> {
     required IconData icon,
     required String label,
     required VoidCallback onPressed,
+    Color color = Colors.white,
   }) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
+    padding: const EdgeInsets.symmetric(horizontal: 2),
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3219,9 +3302,14 @@ class _FeedPageState extends State<_FeedPage> {
           key: key,
           tooltip: label,
           onPressed: onPressed,
-          icon: Icon(icon, color: Colors.white, size: 26),
+          icon: Icon(icon, color: color, size: 24),
         ),
-        Text(label, style: const TextStyle(color: Colors.white, fontSize: 11)),
+        Text(
+          label,
+          style: TextStyle(color: color, fontSize: 11),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ],
     ),
   );

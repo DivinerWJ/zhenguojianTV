@@ -8,7 +8,7 @@ import 'core_bridge.dart';
 import 'local_store.dart';
 import 'media_library.dart';
 import 'models.dart';
-import 'player_screen.dart';
+import 'vertical_feed_screen.dart';
 import 'settings_screen.dart';
 import 'merge_queue_screen.dart';
 import 'widgets.dart';
@@ -119,18 +119,15 @@ class _LocalMediaScreenState extends State<LocalMediaScreen> {
 
   Future<void> _play(LocalMediaItem item) async {
     final watch = widget.store.mediaWatched(item.id);
-    final episode = Episode({
-      'id': item.id,
-      'title': item.merged ? '合并视频' : '第 ${item.episodes.first} 集',
-      'currentEpisode': item.episodes.first,
-    }, 1);
+    // 0.6.0：本地媒体播放改用**竖滑播放器**（与下载页、详情页统一）。
+    //
+    // 为什么能换：新播放器已具备 `localOnly`（取本地文件）与 `mediaId`
+    // （进度写入独立的 `saveMediaWatch`）两项能力，与老播放器的行为对齐。
+    // 单剧模式（`singleDrama`）保证只播这一部、上下滑不跳剧。
     await Navigator.push(
       context,
       MaterialPageRoute<void>(
-        builder: (_) => PlayerScreen(
-          detail: DramaDetail(item.drama, [episode]),
-          initialIndex: 0,
-          initialPosition: watch == null || watch.finished ? 0 : watch.position,
+        builder: (_) => VerticalFeedScreen(
           repository: _LocalFileRepository(
             widget.repository,
             widget.store,
@@ -138,8 +135,10 @@ class _LocalMediaScreenState extends State<LocalMediaScreen> {
             library.fileFor(item),
           ),
           store: widget.store,
+          singleDrama: item.drama,
+          initialEpisodeIndex: 0,
+          initialPosition: watch == null || watch.finished ? 0 : watch.position,
           localOnly: true,
-          allowOnlineFallback: false,
           mediaId: item.id,
         ),
       ),
@@ -424,8 +423,21 @@ class _LocalFileRepository extends AppRepository {
   @override
   Future<String> cover(Drama drama, {bool force = false}) =>
       parent.cover(drama, force: force);
+  /// 本地媒体详情：**不联网**，直接构造单集信息（0.6.0）。
+  ///
+  /// 为什么必须覆盖：竖滑播放器在加载前会调用 `repository.detail()` 取剧集列表，
+  /// 而默认实现会转发到**在线**详情。本地媒体（尤其是合并视频）若走在线详情，
+  /// 会变成"没有网络就播不了"，且集数显示成原剧集数而非本成品，
+  /// 与老播放器传入 `DramaDetail(item.drama, [episode])` 的行为不一致。
   @override
-  Future<DramaDetail> detail(Drama drama) => parent.detail(drama);
+  Future<DramaDetail> detail(Drama drama) async {
+    final episode = Episode({
+      'id': item.id,
+      'title': item.merged ? '合并视频' : '第 ${item.episodes.first} 集',
+      'currentEpisode': item.episodes.first,
+    }, 1);
+    return DramaDetail(item.drama, [episode]);
+  }
   @override
   Future<PlaybackPlan> resolve(
     Drama drama,
