@@ -31,8 +31,25 @@ class AppUpdater {
   static const _apiUrl =
       'https://api.github.com/repos/$_owner/$_repo/releases/latest';
 
-  /// 下载加速镜像前缀（GitHub 直连失败时尝试，用户此前用于其他下载且验证可用）。
+  /// Release 页面地址（**不占用 API 额度**，见 [_fetchFromRedirect]）。
+  static const _latestPageUrl =
+      'https://github.com/$_owner/$_repo/releases/latest';
+
+  /// 下载加速镜像前缀（用于 APK 下载兜底，实测可用）。
   static const _mirrorPrefix = 'https://ghfast.top/';
+
+  /// **API 代理**前缀（用于 API 兜底）。
+  ///
+  /// 注意：`ghfast.top` **只代理文件下载，不支持 GitHub API**
+  /// （对 `api.github.com` 返回 403 `Invalid input.`，2026-10-13 实测），
+  /// 因此 API 兜底必须用 `gh-proxy.com`（实测对 API 返回 200 且 JSON 可解析）。
+  static const _apiProxyPrefix = 'https://gh-proxy.com/';
+
+  /// 上一次检查失败的**用户可见原因**（供 UI 提示，空串表示无）。
+  ///
+  /// 0.5.1 新增：此前任何失败都被静默忽略，用户只看到"检查失败"，
+  /// 无法区分"网络不通"与"GitHub 限流"。现在区分后给出可操作的提示。
+  static String lastFailureReason = '';
 
   /// 记录用户点击“稍后”的日期，格式 yyyy-MM-dd。
   static const _snoozeKey = 'appUpdateSnoozedDate';
@@ -114,7 +131,13 @@ class AppUpdater {
     if (!context.mounted) return;
 
     if (release == null) {
-      _toast(context, '检查失败，请检查网络后重试');
+      // 0.5.1：区分"限流"与"普通网络失败"，给出可操作的提示。
+      _toast(
+        context,
+        lastFailureReason.isNotEmpty
+            ? lastFailureReason
+            : '检查失败，请检查网络后重试',
+      );
       return;
     }
     if (!release.isNewerThan(context)) {
@@ -133,7 +156,22 @@ class AppUpdater {
   /// 1. GitHub API 直连；
   /// 2. `ghfast.top` 镜像代理（该镜像此前已在下载 APK 时验证可用）。
   /// 任意一路成功即返回；全部失败才返回 null。
+  ///
+  /// 0.5.1 修正（用户真机反馈：**开着 VPN 依旧无法检测更新**）：
+  /// 定位到两个独立原因，本次一并处理：
+  /// 1. **GitHub API 按 IP 限流**（未认证请求每小时 60 次）。VPN 节点是共享 IP，
+  ///    额度极易被他人耗尽，返回 **403 `API rate limit exceeded`**（不是超时）。
+  ///    旧代码只认 200，403 被静默当失败。
+  /// 2. **`ghfast.top` 不支持 API**（对 `api.github.com` 返回 403 `Invalid input.`），
+  ///    因此旧代码的"镜像兜底"这一路**从来就没生效过**。
+  ///
+  /// 新策略（**首选不占 API 额度的路径**）：
+  /// 1. **重定向法**：请求 `releases/latest` 页面，读 302 的 `Location`
+  ///    得到 tag，再解析 `expanded_assets` 页面拿附件名。**完全不走 API，不受限流**。
+  /// 2. API 直连（走系统代理）；
+  /// 3. API 代理兜底（`gh-proxy.com`，走系统代理）。
   static Future<AppRelease?> _fetchLatestRelease() async {
+    lastFailureReason = '';
     // 读取系统代理（Android：`ConnectivityManager.defaultProxy`）。
     //
     // Dart 的 `HttpClient` **不会自动读取系统代理**：它只认 `findProxy` 或
@@ -141,20 +179,117 @@ class AppUpdater {
     // `HttpClient` 看不见 → 直连 `api.github.com` 超时 → 表现为"检测不到更新"。
     // 这正是 WT-0028 记录的问题（用户 2026-10-11 曾决定暂缓，2026-10-13 恢复处理）。
     final proxy = await _systemProxy();
+
+    // 第 1 路：重定向法（不占 API 额度，优先）。
+    final redirected = await _fetchFromRedirect(proxy);
+    if (redirected != null) return redirected;
+
+    // 第 2、3 路：API（直连 + 代理兜底）。
+    var rateLimited = false;
     for (final candidate in _apiCandidates(proxy)) {
-      final release = await _fetchReleaseFrom(candidate.url, candidate.proxy);
-      if (release != null) return release;
+      final result = await _fetchReleaseFrom(candidate.url, candidate.proxy);
+      if (result != null) return result;
+      if (_lastStatus == 403) rateLimited = true;
+    }
+    if (rateLimited) {
+      lastFailureReason = 'GitHub 访问受限（该网络出口请求过多），请稍后重试或关闭 VPN 再试';
     }
     return null;
   }
 
-  /// 更新检查候选地址。
+  /// 上一次请求的 HTTP 状态码（0 表示未取到响应）。
+  static int _lastStatus = 0;
+
+  /// **重定向法**：不经 API 获取最新 Release。
+  ///
+  /// 原理：`/releases/latest` 会 302 到 `/releases/tag/<tag>`，
+  /// 从 `Location` 头即可拿到版本号；附件名再从
+  /// `/releases/expanded_assets/<tag>` 页面解析。
+  /// **这两步都不占用 GitHub API 额度**，因此不受共享 IP 限流影响。
+  ///
+  /// 失败（网络/解析）返回 null，由调用方继续走 API 兜底。
+  static Future<AppRelease?> _fetchFromRedirect(String? proxy) async {
+    final tag = await _resolveLatestTag(proxy);
+    if (tag == null) return null;
+    final version = _parseVersion(tag);
+    if (version == null) return null;
+    final apkName = await _resolveAssetName(tag, proxy);
+    if (apkName == null) return null;
+    return AppRelease(
+      version: version,
+      tag: tag,
+      apkName: apkName,
+      // 用 release 的固定下载地址，不依赖 API 返回的 browser_download_url。
+      apkUrl: 'https://github.com/$_owner/$_repo/releases/download/$tag/$apkName',
+      notes: '',
+    );
+  }
+
+  /// 读 `releases/latest` 的 302 目标，解析出 tag（如 `v0.5.0`）。
+  static Future<String?> _resolveLatestTag(String? proxy) async {
+    final client = HttpClient();
+    _applyProxy(client, proxy);
+    client.connectionTimeout = const Duration(seconds: 10);
+    try {
+      final request = await client.getUrl(Uri.parse(_latestPageUrl));
+      request.headers.set(HttpHeaders.userAgentHeader, 'zhenguojian-updater');
+      // 手动处理重定向，才能拿到 Location。
+      // 注意：`followRedirects` 是 `HttpClientRequest` 的属性，不是 `HttpClient` 的。
+      request.followRedirects = false;
+      final response = await request.close().timeout(
+        const Duration(seconds: 20),
+      );
+      _lastStatus = response.statusCode;
+      // 302/301 时从 Location 取 tag；200 说明已被自动跟随（理论上不会）。
+      final location = response.headers.value(HttpHeaders.locationHeader);
+      await response.drain<void>();
+      if (location == null) return null;
+      final match = RegExp(r'/releases/tag/([^/?#]+)').firstMatch(location);
+      return match?.group(1);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 从 `expanded_assets` 页面解析 arm64-v8a 的 APK 文件名。
+  static Future<String?> _resolveAssetName(String tag, String? proxy) async {
+    final client = HttpClient();
+    _applyProxy(client, proxy);
+    client.connectionTimeout = const Duration(seconds: 10);
+    try {
+      final url =
+          'https://github.com/$_owner/$_repo/releases/expanded_assets/$tag';
+      final request = await client.getUrl(Uri.parse(url));
+      request.headers.set(HttpHeaders.userAgentHeader, 'zhenguojian-updater');
+      final response = await request.close().timeout(
+        const Duration(seconds: 20),
+      );
+      if (response.statusCode != 200) return null;
+      final body = await response.transform(utf8.decoder).join();
+      // 页面里含形如 zhenguojian-0.5.0+46-arm64-v8a.apk 的文件名。
+      final match = RegExp(
+        r'zhenguojian-[0-9][0-9.+]*-arm64-v8a\.apk',
+      ).firstMatch(body);
+      return match?.group(0);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 更新检查候选地址（API 路径，重定向法失败后才走）。
   ///
   /// 顺序策略：**系统代理存在时优先走代理**（VPN 下直连 GitHub 通常不通），
-  /// 其次走镜像兜底；无代理时直连优先，保持原有行为不变。
+  /// 其次走 API 代理兜底；无代理时直连优先，保持原有行为不变。
+  ///
+  /// 0.5.1：兜底由 `ghfast.top` 改为 `gh-proxy.com`——前者**不支持 API**
+  /// （对 `api.github.com` 返回 403 `Invalid input.`），旧兜底形同虚设。
   static List<({String url, String? proxy})> _apiCandidates(String? proxy) => [
     (url: _apiUrl, proxy: proxy),
-    (url: '$_mirrorPrefix$_apiUrl', proxy: null),
+    (url: '$_apiProxyPrefix$_apiUrl', proxy: proxy),
   ];
 
   /// 读取系统代理，返回 PAC 形式的 `PROXY host:port`；无代理或失败返回 null。
@@ -247,6 +382,8 @@ class AppUpdater {
       final response = await request.close().timeout(
         const Duration(seconds: 20),
       );
+      // 0.5.1：记录状态码，供调用方识别 403 限流。
+      _lastStatus = response.statusCode;
       if (response.statusCode != 200) return null;
       return await response.transform(utf8.decoder).join();
     } catch (_) {
@@ -417,8 +554,14 @@ class AppUpdater {
     );
 
     // 下载同样需要走系统代理：否则 VPN 下会出现"能检测到更新、却下载不动"。
+    // 0.5.1：`ghfast.top` 对**文件下载**可用（实测 200），故仍作下载兜底；
+    // 再补一路 `gh-proxy.com`（同样支持文件下载），提高 VPN 下的成功率。
     final proxy = await _systemProxy();
-    for (final url in [release.apkUrl, '$_mirrorPrefix${release.apkUrl}']) {
+    for (final url in [
+      release.apkUrl,
+      '$_mirrorPrefix${release.apkUrl}',
+      '$_apiProxyPrefix${release.apkUrl}',
+    ]) {
       final ok = await _downloadFrom(
         url,
         target,
