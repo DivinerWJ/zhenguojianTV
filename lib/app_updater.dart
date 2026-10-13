@@ -134,23 +134,63 @@ class AppUpdater {
   /// 2. `ghfast.top` 镜像代理（该镜像此前已在下载 APK 时验证可用）。
   /// 任意一路成功即返回；全部失败才返回 null。
   static Future<AppRelease?> _fetchLatestRelease() async {
-    for (final url in _apiCandidates) {
-      final release = await _fetchReleaseFrom(url);
+    // 读取系统代理（Android：`ConnectivityManager.defaultProxy`）。
+    //
+    // Dart 的 `HttpClient` **不会自动读取系统代理**：它只认 `findProxy` 或
+    // `HTTP_PROXY` 环境变量。而 VPN（Clash 等）在 Android 上设置的是系统代理，
+    // `HttpClient` 看不见 → 直连 `api.github.com` 超时 → 表现为"检测不到更新"。
+    // 这正是 WT-0028 记录的问题（用户 2026-10-11 曾决定暂缓，2026-10-13 恢复处理）。
+    final proxy = await _systemProxy();
+    for (final candidate in _apiCandidates(proxy)) {
+      final release = await _fetchReleaseFrom(candidate.url, candidate.proxy);
       if (release != null) return release;
     }
     return null;
   }
 
-  /// 更新检查候选地址：直连优先，失败后走镜像。
-  static List<String> get _apiCandidates => [
-    _apiUrl,
-    '${_mirrorPrefix}https://api.github.com/repos/$_owner/$_repo/releases/latest',
+  /// 更新检查候选地址。
+  ///
+  /// 顺序策略：**系统代理存在时优先走代理**（VPN 下直连 GitHub 通常不通），
+  /// 其次走镜像兜底；无代理时直连优先，保持原有行为不变。
+  static List<({String url, String? proxy})> _apiCandidates(String? proxy) => [
+    (url: _apiUrl, proxy: proxy),
+    (url: '$_mirrorPrefix$_apiUrl', proxy: null),
   ];
 
-  /// 从单个地址解析 Release；失败（网络/解析）返回 null。
-  static Future<AppRelease?> _fetchReleaseFrom(String url) async {
+  /// 读取系统代理，返回 PAC 形式的 `PROXY host:port`；无代理或失败返回 null。
+  static Future<String?> _systemProxy() async {
+    if (!_supported) return null;
     try {
-      final body = await _get(url);
+      final result = await const MethodChannel(
+        'duanju/device',
+      ).invokeMapMethod<String, dynamic>('systemProxy');
+      if (result == null) return null;
+      final address = (result['http'] ?? result['https'])?.toString() ?? '';
+      return _pacFrom(address);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 把 `http://host:port` 转成 `findProxy` 需要的 `PROXY host:port`。
+  static String? _pacFrom(String address) {
+    final value = address.trim().replaceFirst(
+      RegExp(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://'),
+      '',
+    );
+    return value.isEmpty ? null : 'PROXY $value';
+  }
+
+  /// 给客户端挂上系统代理（null 表示直连）。
+  static void _applyProxy(HttpClient client, String? proxy) {
+    if (proxy == null) return;
+    client.findProxy = (_) => proxy;
+  }
+
+  /// 从单个地址解析 Release；失败（网络/解析）返回 null。
+  static Future<AppRelease?> _fetchReleaseFrom(String url, String? proxy) async {
+    try {
+      final body = await _get(url, proxy);
       if (body == null) return null;
       final json = jsonDecode(body);
       if (json is! Map) return null;
@@ -192,8 +232,10 @@ class AppUpdater {
   ///
   /// 0.2.27：连接/响应超时放宽（8s/12s → 10s/20s），
   /// 兼顾 VPN/弱网环境；但仍远低于用户的等待上限。
-  static Future<String?> _get(String url) async {
+  /// 0.4.1：支持走系统代理（见 [_systemProxy]），修复 WT-0028。
+  static Future<String?> _get(String url, [String? proxy]) async {
     final client = HttpClient();
+    _applyProxy(client, proxy);
     client.connectionTimeout = const Duration(seconds: 10);
     try {
       final request = await client.getUrl(Uri.parse(url));
@@ -374,8 +416,15 @@ class AppUpdater {
       '${directory.path}/zhenguojian-update-${release.apkName}',
     );
 
+    // 下载同样需要走系统代理：否则 VPN 下会出现"能检测到更新、却下载不动"。
+    final proxy = await _systemProxy();
     for (final url in [release.apkUrl, '$_mirrorPrefix${release.apkUrl}']) {
-      final ok = await _downloadFrom(url, target, onProgress: onProgress);
+      final ok = await _downloadFrom(
+        url,
+        target,
+        onProgress: onProgress,
+        proxy: proxy,
+      );
       if (ok) return target;
     }
     return null;
@@ -385,8 +434,10 @@ class AppUpdater {
     String url,
     File target, {
     void Function(double?)? onProgress,
+    String? proxy,
   }) async {
     final client = HttpClient();
+    _applyProxy(client, proxy);
     client.connectionTimeout = const Duration(seconds: 10);
     try {
       var request = await client.getUrl(Uri.parse(url));

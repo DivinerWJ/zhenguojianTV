@@ -1241,6 +1241,20 @@ class _FeedPageState extends State<_FeedPage> {
         (position < duration ~/ 2 && duration - position > 45000)) {
       return;
     }
+    // 弱网保护（0.5.0）：缓冲余量偏低时**暂停预载**，把带宽让给当前播放。
+    //
+    // 背景：用户实测"开 VPN 就卡"。视频请求经系统代理绕道节点（见
+    // `native/core/proxy_system.go`），带宽与稳定性都不如直连；而预载一次
+    // 最多会拉 4 MB（`native/core/app_preload.go` 的 `nativePreloadLimit`），
+    // 与正在播放的流争抢同一条代理通道，会把缓冲打空 → 抽帧卡顿。
+    // 因此这里以"缓冲余量"为准：余量不足就先不预载，等缓过来再预载。
+    // 阈值取 30 秒（远低于播放器 32 MB 前向缓存能撑的时长），
+    // 只在真正吃紧时生效，正常网络下行为不变。
+    final buffered = state.buffer.inMilliseconds;
+    if (buffered > 0 && buffered < 30000) {
+      _preloader.pause();
+      return;
+    }
     // 「连播本剧」优先：还有下一集就预载下一集。
     if (widget.autoNextEpisode || !widget.autoNextDramaEnabled) {
       if (_episodeIndex + 1 < detail.episodes.length) {
@@ -1793,6 +1807,25 @@ class _FeedPageState extends State<_FeedPage> {
             ].join(','),
           );
           await platform.setProperty('network-timeout', '20');
+          // 弱网缓冲策略（0.5.0）。
+          //
+          // 背景：用户实测"开 VPN 就卡"，根因是视频请求全部绕道代理节点
+          // （Go 原生核心会读系统代理，见 `native/core/proxy_system.go`），
+          // 多一跳且节点质量不稳定 → 缓冲容易被抖动打空 → 表现为抽帧卡顿。
+          // 这里做两件事，都不改变解码/渲染方式、也不影响音调：
+          // 1. 关闭磁盘缓存，改用内存缓存：弱网下避免额外磁盘 IO 拖慢取流；
+          // 2. 加大流层缓冲：对代理带来的抖动更有容忍度。
+          // 属性不受支持时静默忽略，绝不影响播放。
+          for (final entry in const {
+            'cache-on-disk': 'no',
+            'stream-buffer-size': '524288',
+          }.entries) {
+            try {
+              await platform.setProperty(entry.key, entry.value);
+            } catch (_) {
+              // 忽略：仅属调优，失败不构成错误。
+            }
+          }
         }
       });
       if (!_attemptAlive(player)) return;
