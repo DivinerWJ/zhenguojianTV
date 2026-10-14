@@ -19,7 +19,7 @@ import 'profiles_screen.dart';
 import 'media_library.dart';
 import 'package_smoke.dart';
 import 'lan_controller.dart';
-import 'player_screen.dart';
+import 'vertical_feed_screen.dart';
 
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -142,12 +142,19 @@ class _AppBootstrapState extends State<AppBootstrap>
             unawaited(
               navigation.pushAndRemoveUntil<void>(
                 MaterialPageRoute<void>(
-                  builder: (_) => PlayerScreen(
-                    detail: request.detail,
-                    initialIndex: request.index,
-                    initialPosition: request.position,
+                  // 0.6.4：局域网推送接收播放改用**新播放器**（竖滑播放器）。
+                  //
+                  // 迁移原因：老播放器 `player_screen.dart` 即将删除（XF-0003），
+                  // 它最后的独有能力就是这条接收链路。
+                  // 用 `singleDrama` 走"单剧模式"：上滑下一集、下滑上一集，
+                  // 到边界只提示，与老播放器"这是一部剧"的语义一致；
+                  // `initialEpisodeIndex` / `initialPosition` 承接发送端的续播点。
+                  builder: (_) => VerticalFeedScreen(
                     repository: repository,
                     store: store!,
+                    singleDrama: request.detail.drama,
+                    initialEpisodeIndex: request.index,
+                    initialPosition: request.position,
                     handoff: request,
                   ),
                 ),

@@ -9,6 +9,9 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'core_bridge.dart';
 import 'detail_screen.dart';
+import 'lan_controller.dart';
+import 'lan_models.dart';
+import 'lan_screen.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'playback_preferences.dart';
@@ -48,10 +51,24 @@ class VerticalFeedScreen extends StatefulWidget {
     this.initialPosition = 0,
     this.localOnly = false,
     this.mediaId,
+    this.handoff,
   });
 
   final AppRepository repository;
   final LocalStore store;
+
+  /// 局域网推送**接收播放**（0.6.4 从老播放器迁移）。
+  ///
+  /// 非空表示本页是被"另一台设备推送过来"的播放请求打开的，
+  /// 需要按 [LanIncomingPlayback] 的握手协议回报状态：
+  /// - `consumed`：接收端已接管（设置后发送端才认为落地）；
+  /// - `stop`：发送端要求停止时调用（本端暂停并保存进度）；
+  /// - `acknowledge(position)`：**真正开始播放后**回报，发送端据此判成功；
+  /// - `fail(message)`：失败/取消时回报。
+  ///
+  /// 与老播放器（`player_screen.dart` 的 `handoff`）语义完全一致，
+  /// 迁移时保持协议不变，避免两台设备版本不一致时握手失败。
+  final LanIncomingPlayback? handoff;
 
   /// 测试用：替换视频渲染层。
   ///
@@ -812,6 +829,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
               ? _items[index + 1]
               : null,
           autoNextDramaEnabled: widget.singleDrama == null && !_autoNextEpisode,
+          // 局域网推送接收（0.6.4）：只交给**单剧模式的第一页**
+          // （推送必然是一台设备推一部剧过来，不存在"下一部"），
+          // 且只给当前页，避免多页同时回报握手。
+          handoff: widget.singleDrama != null && index == 0 && isCurrent
+              ? widget.handoff
+              : null,
         );
       },
     );
@@ -969,6 +992,7 @@ class _FeedPage extends StatefulWidget {
     this.singleDrama = false,
     this.nextDrama,
     this.autoNextDramaEnabled = false,
+    this.handoff,
   });
 
   final Drama drama;
@@ -1016,6 +1040,13 @@ class _FeedPage extends StatefulWidget {
   /// true 时预载 [nextDrama] 第 1 集，false 时预载本剧下一集。
   final bool autoNextDramaEnabled;
 
+  /// 局域网推送**接收播放**（0.6.4 从老播放器迁移）。
+  ///
+  /// 非空表示本页是被"另一台设备推送过来"的播放请求打开的，
+  /// 需要按 [LanIncomingPlayback] 的握手协议回报状态。
+  /// 只有单剧模式的当前页会拿到它（见 `_body()` 的传参）。
+  final LanIncomingPlayback? handoff;
+
   @override
   State<_FeedPage> createState() => _FeedPageState();
 }
@@ -1044,6 +1075,23 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   ///
   /// 与 `store.isFavorite` 同步；在 initState / didUpdateWidget / 点击后刷新。
   bool _followed = false;
+
+  /// 局域网推送（0.6.4 从老播放器迁移）。
+  ///
+  /// `_lanIdentity`：本页在 LanController 中的身份标记，
+  /// 用于 `attachPlayback` / `detachPlayback` 配对
+  /// （`detachPlayback` 只认同一 identity，避免误清掉别的页面的注册）。
+  Object _lanIdentity = Object();
+
+  /// 是否仍由本页持有 handoff（用户一操作播放就置 false，
+  /// 表示"接收端已接手"，此后不再代发送端停止）。
+  bool _handoffOwned = true;
+
+  /// 首次成功播放后的位置，用于判定"真的播起来了"再回报 acknowledge。
+  double? _lanFirstPosition;
+
+  /// 记录已回报失败，避免重复 `fail`（协议里 started 只能完成一次）。
+  bool _handoffFailed = false;
 
   /// 预载器（0.2.31 新增，用户要求）。
   ///
@@ -1158,6 +1206,21 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _followed = widget.store.isFavorite(widget.drama.id);
     // 预载器（0.2.31）：默认常开（用户 Q3）。
     _preloader = PlaybackPreloader(widget.repository);
+    // 局域网推送（0.6.4）：接管 handoff，并挂上"发送端要求停止"的回调。
+    //
+    // `consumed` 必须在**开始加载前**就置位，否则发送端可能在本端
+    // 还没接管时就把这次推送判为失败。
+    final handoff = widget.handoff;
+    if (handoff != null) {
+      handoff.consumed = true;
+      handoff.stop = () async {
+        if (_handoffOwned && !_closed) await _stopForLan();
+      };
+      // 用户已切换 / 已被取消：直接回报失败，不进入加载。
+      if (handoff.cancelled) {
+        _failHandoff('接收用户已变更，推送已取消');
+      }
+    }
     if (widget.active) _prepare();
   }
 
@@ -1476,6 +1539,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           _tick.value++;
           // 预载（0.2.31）：位置/缓冲变化时评估是否需要提前准备下一集/下一部。
           _syncPreload();
+          // 局域网推送（0.6.4）：**位置推进后**才回报握手。
+          //
+          // 这是握手的关键钩子：`acknowledge` 的判定要求
+          // "位置不早于推送位置，且已推进 ≥0.15 秒"，
+          // 因此必须在**位置流**上检查；只在 playing 流检查会永远不满足条件，
+          // 发送端会一直等不到确认（老播放器同样挂在这里）。
+          _acknowledgeHandoff();
         }),
       );
     }
@@ -1496,7 +1566,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // `playing == true` 时安排自动隐藏，**不触发重建**，因此从其它途径
         // 改变播放状态（自动连播、播放结束、健康检查恢复等）时图标会滞后。
         if (!_closed) _tick.value++;
-        if (playing) _scheduleHide();
+        // 局域网推送（0.6.4）：播放真正开始后回报发送端。
+        if (playing) {
+          _scheduleHide();
+          _acknowledgeHandoff();
+        }
       }),
     );
     _subscriptions.add(
@@ -1618,6 +1692,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _closed = true;
+    // 局域网推送（0.6.4）：注销本页的"正在播放"注册，并回报接收端已退出。
+    LanController.current?.detachPlayback(_lanIdentity);
+    if (!_handoffFailed) widget.handoff?.fail('接收端已退出播放');
     WidgetsBinding.instance.removeObserver(this);
     _healthTimer?.cancel();
     _healthTimer = null;
@@ -1771,9 +1848,20 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   void _togglePlayback() {
     final player = _player;
     if (player == null || _closed || _loading || _error != null) return;
+    // 局域网推送（0.6.4）：用户操作了播放 → 接收端接手。
+    _takeOverHandoff();
     _interactions?.cancel();
     final willPlay = !player.state.playing;
-    unawaited(player.playOrPause());
+    // 0.6.4 修复（用户反馈"暂停时会多走一帧才停下来"）：
+    // 原先统一用 `playOrPause()`，它内部走的是 mpv 的
+    // `_command(['cycle','pause'])` —— **"切换"命令**，需要 mpv 先读当前状态再翻转，
+    // 且是异步排队下发；命令到达前解码器可能又输出了一帧，表现为"多走一帧"。
+    // 现在按**明确意图**分流：要暂停就 `pause()`、要恢复就 `play()`，
+    // 二者内部是 `mpv_set_property('pause', …)` —— **直接设值**，
+    // 不依赖"读状态再翻转"，语义更准确、少一步状态查询。
+    // 顺带消除一个隐患：`cycle` 在状态不同步时可能"翻反"（该停却播），
+    // 直接设值不会出现这种情况。
+    unawaited(willPlay ? player.play() : player.pause());
     // 暂停时立刻落盘，避免用户暂停后直接退出导致进度丢失。
     if (!willPlay) unawaited(_saveProgress());
     // 0.6.3 修复（用户反馈"双击恢复后中央图标仍是暂停"）：
@@ -1788,8 +1876,162 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   Future<void> _seekTo(Duration position) async {
     final player = _player;
     if (player == null || _closed) return;
+    // 局域网推送（0.6.4）：用户调整了播放位置 → 接收端接手。
+    _takeOverHandoff();
     await player.seek(position);
     _showControls();
+  }
+
+  // ───────────────────────── 局域网推送（0.6.4 从老播放器迁移） ─────────────────────────
+  //
+  // 迁移自 `player_screen.dart`，**协议与语义完全保持一致**，
+  // 以便新旧版本混用（一台装新版、一台装旧版）时仍能正常握手。
+
+  /// 注册"本机正在播什么"，供对方设备显示与"替换播放"判断。
+  ///
+  /// `identity` 每次换集/换源都会换新对象，`detachPlayback` 只认同一 identity，
+  /// 因此不会误清掉别的页面的注册（与老播放器一致）。
+  void _attachLanPlayback() {
+    final detail = _detail;
+    if (detail == null) return;
+    final index = _episodeIndex.clamp(0, detail.episodes.length - 1);
+    LanController.current?.attachPlayback(
+      LanPlaybackHost(
+        identity: _lanIdentity,
+        title: '${detail.drama.title} · 第 ${detail.episodes[index].number} 集',
+        stop: _stopForLan,
+      ),
+    );
+  }
+
+  /// 发送端要求停止（或"被替换播放"）时：暂停本机并保存进度。
+  ///
+  /// 与老播放器 `_stopForLan` 等价；这里只需暂停 + 落盘，
+  /// 不退出页面（用户可继续手动播放）。
+  Future<void> _stopForLan() async {
+    final player = _player;
+    if (_closed || player == null) return;
+    _interactions?.cancel();
+    _health.reset();
+    await player.pause();
+    await _saveProgress();
+    if (mounted && !_closed) {
+      _tick.value++;
+      _refreshFullscreen(immediate: true);
+      _showControls();
+    }
+  }
+
+  /// 握手：播放**真正开始**后回报发送端。
+  ///
+  /// 判定条件与老播放器 `_acknowledgeHandoff` 一致——必须同时满足
+  /// "正在播放、未缓冲、有画面尺寸、位置不早于推送位置"，
+  /// 否则发送端会认为"没播起来"而反复重试。
+  void _acknowledgeHandoff() {
+    final handoff = widget.handoff;
+    if (!_handoffOwned ||
+        handoff == null ||
+        _handoffFailed ||
+        handoff.cancelled ||
+        handoff.started.isCompleted ||
+        _closed ||
+        _loading ||
+        _error != null) {
+      return;
+    }
+    // 只认第一集（推送过来的那一集）；换集后不再回报，避免误判。
+    if (_episodeIndex != widget.initialEpisodeIndex) return;
+    final player = _player;
+    if (player == null) return;
+    final state = player.state;
+    final position = state.position.inMilliseconds / 1000;
+    final duration = state.duration.inMilliseconds / 1000;
+    if (duration > 0 && handoff.position > duration + 2) {
+      _failHandoff('续播位置超过接收端分集时长');
+      return;
+    }
+    if (!state.playing ||
+        state.buffering ||
+        (state.width ?? 0) <= 0 ||
+        position < handoff.position - .5 ||
+        position > handoff.position + 20) {
+      return;
+    }
+    _lanFirstPosition ??= position;
+    if (position >= _lanFirstPosition! + .15) {
+      handoff.acknowledge(position);
+    }
+  }
+
+  /// 回报失败（只报一次；`started` 只能完成一次）。
+  void _failHandoff(String message) {
+    if (_handoffFailed) return;
+    _handoffFailed = true;
+    widget.handoff?.fail(message);
+  }
+
+  /// 用户操作了播放（切集/拖动/暂停等）→ 接收端接手，此后不再代发送端停止。
+  void _takeOverHandoff() {
+    if (!_handoffOwned) return;
+    _handoffOwned = false;
+    _failHandoff('接收端已操作播放');
+  }
+
+  /// 推送按钮（主动投屏到另一台设备）。
+  ///
+  /// 与老播放器 `_pushToDevice` 等价，限制也一样：
+  /// - 未开启设备互联、或本地媒体（`mediaId` 非空）时不提供；
+  /// - 面板打开期间不重复触发；
+  /// - 对方接受后**暂停本机**（避免两台设备同时出声）。
+  Future<void> _pushToDevice() async {
+    final link = LanController.current;
+    final detail = _detail;
+    if (link == null ||
+        detail == null ||
+        _panelOpen ||
+        _closed ||
+        _loading ||
+        _error != null ||
+        widget.mediaId != null) {
+      return;
+    }
+    final generation = _generation;
+    final index = _episodeIndex.clamp(0, detail.episodes.length - 1);
+    bool current() =>
+        mounted && !_closed && generation == _generation && index == _episodeIndex;
+    _interactions?.cancel();
+    setState(() => _panelOpen = true);
+    try {
+      await showLanPush(
+        context,
+        link,
+        snapshot: () => LanPlaybackIntent(
+          drama: detail.drama,
+          episodeID: detail.episodes[index].id,
+          episode: detail.episodes[index].number,
+          position: _currentPositionForPush(detail, index),
+        ),
+        stillCurrent: current,
+        onAccepted: () async {
+          if (!current()) throw StateError('本机播放内容已变更');
+          await _stopForLan();
+          if (!current()) throw StateError('本机播放内容已变更');
+        },
+      );
+    } catch (error) {
+      if (mounted && !_closed) _toast(error.toString());
+    } finally {
+      if (mounted && !_closed) setState(() => _panelOpen = false);
+    }
+  }
+
+  /// 推送时上报的当前位置：未打开过或换集时回落到起始位置。
+  double _currentPositionForPush(DramaDetail detail, int index) {
+    final player = _player;
+    if (player == null) return _pendingStart;
+    if (_episodeIndex != index) return 0;
+    final seconds = player.state.position.inMilliseconds / 1000;
+    return seconds > 0 ? seconds : _pendingStart;
   }
 
   /// 保存观看记录，使竖滑流播放的剧也进入「最近观看」。
@@ -1867,6 +2109,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     // 此时若继续按老流程走，会在已释放的播放器上加载，最终黑屏；
     // 这里改为把状态复位，交给 `_resumeAfterRelease()`（滑回来时）重新加载。
     if (_closed || _playerReleased) return;
+    // 局域网推送（0.6.4）：换集属于"接收端已操作播放"，
+    // 此后不再代发送端停止；并换新 identity 重新注册本机播放内容
+    // （`detachPlayback` 只认同一 identity，故先解绑旧的后再挂新的）。
+    _takeOverHandoff();
+    LanController.current?.detachPlayback(_lanIdentity);
+    _lanIdentity = Object();
     _episodeIndex = index;
     _ready = false;
     // 预载（0.2.31）：换集时 `_prepare` 里会先 `take()` 取走目标集的预载结果，
@@ -2002,6 +2250,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 不复位的话，上一次的失败计数会累计，导致本次偶发卡顿直接判为"停止"。
       _health.reset();
       _recovery.reset();
+      // 局域网推送（0.6.4）：内容就绪后重新注册"本机正在播什么"，
+      // 并尝试回报握手（真正开始播放后才会 acknowledge）。
+      _attachLanPlayback();
+      _acknowledgeHandoff();
       // 就绪是重要状态切换，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
       _scheduleHide();
@@ -2060,6 +2312,36 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   ///
   /// 仅在剧集总数 > 1 时显示：单集剧、本地单文件显示"第1集"没有信息量。
   bool get _hasEpisodeBadge => (_detail?.episodes.length ?? 0) > 1;
+
+  /// 是否提供推送按钮（0.6.4，从老播放器迁移）。
+  ///
+  /// 三个前置条件与老播放器一致：
+  /// - 设备互联未开启（`LanController.current == null`）时不显示；
+  /// - **本地媒体不推送**（`mediaId` 非空）——对方没有这个本地文件；
+  /// - 内容未就绪或出错时不显示，避免点了没反应。
+  bool get _canPush =>
+      LanController.current != null &&
+      widget.mediaId == null &&
+      !_loading &&
+      _error == null;
+
+  /// 右上角推送按钮（投屏到另一台设备）。
+  ///
+  /// 复用 `LanPushButton`（与老播放器同一个组件），
+  /// 因此连接状态图标、推送中的转圈、tooltip 文案完全一致。
+  Widget _pushButton() => Align(
+    alignment: Alignment.topRight,
+    child: SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(0, 6, 6, 0),
+        child: LanPushButton(
+          key: const ValueKey('feed-lan-push'),
+          onPressed: _pushToDevice,
+        ),
+      ),
+    ),
+  );
 
   /// 剧名行（0.6.2）。
   ///
@@ -3203,6 +3485,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                   // 只在有多个剧集时显示：单集、本地单文件不显示，
                   // 避免出现"第1集"这种没有信息量的标签。
                   if (_hasEpisodeBadge) _episodeBadge(),
+                  // 右上角推送按钮（0.6.4，从老播放器迁移）。
+                  //
+                  // 位置选择理由：底部按钮行已固定为 5 个等宽槽位
+                  // （320 窄屏槽位仅 59.2px，而"连播下一部"标签已 55px），
+                  // 再加第 6 个会把标签挤到截断；因此放在视频右上角，
+                  // 与左上角集数标签左右对称，也不占用底部功能位。
+                  // 位于控件层内 → 跟随控件一起显隐。
+                  if (_canPush) _pushButton(),
                   // 暂停时显示中央播放按钮。
                   if (!(state?.playing ?? false) &&
                       !_loading &&

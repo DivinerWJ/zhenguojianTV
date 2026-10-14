@@ -96,6 +96,15 @@ class ScriptedPlayer extends PlatformPlayer {
     playingController.add(false);
   }
 
+  /// 0.6.4：播放器改为「暂停走 `pause()`、恢复走 `play()`」，
+  /// 因此夹具必须实现 `play()`，否则恢复播放会落到基类的
+  /// `UnimplementedError`（测试假失败）。
+  @override
+  Future<void> play() async {
+    state = state.copyWith(playing: true, completed: false);
+    playingController.add(true);
+  }
+
   @override
   Future<void> playOrPause() async {
     state = state.copyWith(playing: !state.playing);
