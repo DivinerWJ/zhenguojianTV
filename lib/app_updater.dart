@@ -35,6 +35,19 @@ class AppUpdater {
   static const _latestPageUrl =
       'https://github.com/$_owner/$_repo/releases/latest';
 
+  /// Release **Atom 订阅源**（0.6.5 新增，用于取更新日志）。
+  ///
+  /// 为什么用它：`api.github.com` 按 IP 限流（未认证 60 次/小时），
+  /// VPN 节点是共享 IP，极易返回 **403**；而版本检测走的 `github.com`
+  /// 与取日志走的 `api.github.com` **不是同一条通道**，
+  /// 于是出现"能检测到新版本、但更新日志始终为空"。
+  ///
+  /// 实测（2026-10-14）：`releases.atom` 走系统代理 **1 秒**返回，
+  /// 且 `<content type="html">` 里**直接含完整日志正文**，
+  /// **完全不依赖 API 额度**。
+  static const _atomUrl =
+      'https://github.com/$_owner/$_repo/releases.atom';
+
   /// 下载加速镜像前缀（用于 APK 下载兜底，实测可用）。
   static const _mirrorPrefix = 'https://ghfast.top/';
 
@@ -230,28 +243,43 @@ class AppUpdater {
     );
   }
 
-  /// 按 tag 取该 Release 的更新日志（`body` 字段）。
+  /// 按 tag 取该 Release 的更新日志。
   ///
-  /// 为什么需要单独取：重定向法走的是网页（不占 API 额度），
-  /// 网页里**没有**结构化的更新日志，只有 API 的 `body` 才有。
-  /// 因此这里补一次 API 请求，但**只取日志、不参与版本判定**。
+  /// 0.6.5 重写（用户反馈"**日志依旧不显示**"，已连续两版未修好）：
   ///
-  /// 失败处理：任何异常或非 200 一律返回空串，
+  /// **原先的问题**：只有 API 一条路（直连 + `gh-proxy.com` 兜底），
+  /// 而 `api.github.com` 按 IP 限流，VPN 共享 IP 极易 **403**。
+  /// 关键点是：**版本检测走 `github.com`、取日志走 `api.github.com`，
+  /// 两者不是同一条通道**——所以会出现"能检测到新版本、日志却一直是空的"，
+  /// 这也解释了为什么前一版"补取日志"的修复在真机上仍无效。
+  ///
+  /// **现在的顺序**（都不占 API 额度，API 降为最后兜底）：
+  /// 1. **Atom 订阅源**：`releases.atom` 的 `<content type="html">`
+  ///    直接含日志正文，实测走代理 1 秒返回；
+  /// 2. **Release 网页**：`releases/tag/<tag>` 的 `markdown-body` 区块；
+  /// 3. API 直连；4. API 代理兜底。
+  ///
+  /// 失败处理：任何异常或取不到一律返回空串，
   /// 调用方据此不显示"更新日志"区块，**版本检测结果不受影响**。
-  ///
-  /// 请求量：每次检查更新最多 2 次（直连 + 代理兜底），
-  /// 远低于未认证 60 次/小时的额度，不会把 0.5.1 修好的限流问题带回来。
-  /// 代理兜底有意义：`gh-proxy.com` 从它自己的服务器出口发起请求，
-  /// 可绕开"本机 VPN 共享 IP 已被限流"的情况。
   static Future<String> _fetchNotes(String tag, String? proxy) async {
     // 保存并恢复 `_lastStatus`：本方法只是"顺带取日志"，
     // 不应把它的 403 等状态写进调用方的限流判定逻辑。
     final savedStatus = _lastStatus;
     try {
+      // 第 1 路：Atom 订阅源（最快、不占额度）。
+      final atom = _notesFromAtom(await _get(_atomUrl, proxy), tag);
+      if (atom.isNotEmpty) return atom;
+
+      // 第 2 路：Release 网页（同样不占额度）。
+      final page = _notesFromPage(
+        await _get('https://github.com/$_owner/$_repo/releases/tag/$tag', proxy),
+      );
+      if (page.isNotEmpty) return page;
+
+      // 第 3、4 路：API（直连 + 代理兜底），会受 IP 限流影响。
       final direct = await _get(_apiTagsUrl(tag), proxy);
       final notes = _notesFrom(direct);
       if (notes.isNotEmpty) return notes;
-      // 直连失败或日志为空时，再试一次 API 代理兜底。
       final viaProxy = await _get('$_apiProxyPrefix${_apiTagsUrl(tag)}', proxy);
       return _notesFrom(viaProxy);
     } catch (_) {
@@ -259,6 +287,106 @@ class AppUpdater {
     } finally {
       _lastStatus = savedStatus;
     }
+  }
+
+  /// 从 Atom 订阅源里取指定 tag 的日志正文（0.6.5 新增）。
+  ///
+  /// 结构（实测）：
+  /// ```
+  /// <entry>
+  ///   <link ... href=".../releases/tag/v0.6.4"/>
+  ///   <content type="html">&lt;h1&gt;…&lt;/h1&gt;…</content>
+  /// </entry>
+  /// ```
+  /// 正文是 **HTML 转义**过的，需要反转义；再转成 MarkdownLite 认得的
+  /// 轻量 Markdown（保留标题、列表、加粗），避免把 HTML 标签当文字显示。
+  static String _notesFromAtom(String? body, String tag) {
+    if (body == null || body.isEmpty) return '';
+    // 按 <entry> 切分，逐条找 href 里含目标 tag 的那条。
+    for (final chunk in body.split('<entry>')) {
+      if (!chunk.contains('/releases/tag/$tag')) continue;
+      final match = RegExp(
+        r'<content type="html">([\s\S]*?)</content>',
+      ).firstMatch(chunk);
+      if (match == null) continue;
+      return _htmlToMarkdown(_unescapeHtml(match.group(1)!.trim()));
+    }
+    return '';
+  }
+
+  /// 从 Release 网页里取日志正文（0.6.5 新增）。
+  ///
+  /// 网页里日志位于 `<div class="markdown-body …">…</div>`；
+  /// 取到后同样转成轻量 Markdown。
+  static String _notesFromPage(String? body) {
+    if (body == null || body.isEmpty) return '';
+    final match = RegExp(
+      r'<div[^>]*class="[^"]*markdown-body[^"]*"[^>]*>([\s\S]*?)</div>\s*</div>',
+    ).firstMatch(body);
+    if (match == null) return '';
+    return _htmlToMarkdown(match.group(1)!.trim());
+  }
+
+  /// 反转义 HTML 实体（`&lt;` → `<` 等）。
+  static String _unescapeHtml(String text) => text
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&apos;', "'")
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&amp;', '&');
+
+  /// 把日志 HTML 转成 MarkdownLite 支持的轻量 Markdown（0.6.5 新增）。
+  ///
+  /// 只处理日志实际会出现的标签：`h1`~`h3`、`li`、`strong`、`code`、`br`、`p`。
+  /// 其余标签直接去掉，避免把 HTML 源码暴露给用户。
+  static String _htmlToMarkdown(String html) {
+    var text = html;
+    // 标题（GitHub 的 h1/h2/h3 对应日志里的 # / ## / ###）。
+    for (var level = 1; level <= 3; level++) {
+      text = text.replaceAllMapped(
+        RegExp('<h$level[^>]*>([\\s\\S]*?)</h$level>'),
+        (m) => '\n${'#' * level} ${m.group(1)!.trim()}\n',
+      );
+    }
+    // 无序列表项：统一成 `- `（嵌套缩进保留两级）。
+    text = text.replaceAllMapped(
+      RegExp(r'<li[^>]*>([\s\S]*?)</li>'),
+      (m) => '\n- ${m.group(1)!.trim()}',
+    );
+    // 加粗与等宽。
+    text = text
+        .replaceAllMapped(
+          RegExp(r'<strong[^>]*>([\s\S]*?)</strong>'),
+          (m) => '**${m.group(1)!.trim()}**',
+        )
+        .replaceAllMapped(
+          RegExp(r'<code[^>]*>([\s\S]*?)</code>'),
+          (m) => '`${m.group(1)!.trim()}`',
+        );
+    // 换行与段落。
+    text = text.replaceAll(RegExp(r'<br\s*/?>'), '\n');
+    text = text.replaceAll(RegExp(r'</p>'), '\n');
+    // 去掉剩余标签（ul/ol/div/p/span 等）。
+    text = text.replaceAll(RegExp(r'<[^>]+>'), '');
+    // 折叠多余空行，去掉行尾空白。
+    final lines = text
+        .split('\n')
+        .map((line) => line.trimRight())
+        .toList();
+    final out = <String>[];
+    var blanks = 0;
+    for (final line in lines) {
+      if (line.trim().isEmpty) {
+        blanks++;
+        if (blanks > 1) continue;
+      } else {
+        blanks = 0;
+      }
+      out.add(line);
+    }
+    return out.join('\n').trim();
   }
 
   /// 指定 tag 的 Release API 地址（形如 `.../releases/tags/v0.6.2`）。

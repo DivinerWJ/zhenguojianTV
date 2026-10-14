@@ -55,6 +55,17 @@ class FollowState {
   FollowState afterPlayback(WatchEntry entry) {
     final state = observe(entry.drama);
     if (state.manuallyWatched || entry.position <= 0) return state;
+    // 0.6.5 修复（用户反馈"在追剧中的剧已看完变成已看后，随机里又刷到就会
+    // 重置到第一集变成在看"）：
+    // 原先只保护 `manuallyWatched`（**手动**标记已看）的剧，
+    // 而"看完最后一集自动变已看"的剧 `manuallyWatched == false`，不受保护：
+    // 竖滑流随机刷到它时会从**第 1 集**开始播，`saveWatch` 无条件调用本方法，
+    // 于是"已看"被改回"在看"、进度也退回第 1 集。
+    //
+    // 这里直接把"已看"视为终态，不再因一次播放而降级。
+    // 注意：**新集出现**的情况已由 `observe()` 处理
+    // （`knownEpisodes` 增加时自动降为"在看"），因此不会漏掉更新。
+    if (state.status == FollowStatus.watched) return state;
     return FollowState(
       status:
           state.knownEpisodes > 0 &&

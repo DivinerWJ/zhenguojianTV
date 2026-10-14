@@ -55,8 +55,40 @@ func (engine *nativeEngine) nativeRecommendations(ctx context.Context, input nat
 	if !input.Force && !found && len(cached.Items) > 0 {
 		return cached, nil
 	}
+	// 已推荐过的 ID（用于强制刷新时继续排除，避免"每次开机都是同一批"）。
+	//
+	// 来源有两处，合并去重：
+	// 1. 上一次的内存状态 `state.Query.Seen`（本次运行内翻过的页）；
+	// 2. 磁盘缓存里的条目（上次运行留下的，重启后内存状态已丢）。
+	// 上限 540 与 `hongguoRecommendationQuery.validate()` 保持一致，
+	// 超出会被判为参数无效。
+	accumulated := make([]string, 0, 540)
+	accumulatedSeen := make(map[string]bool, 540)
+	appendAccumulated := func(id string) {
+		if id == "" || accumulatedSeen[id] || len(accumulated) >= 540 {
+			return
+		}
+		accumulatedSeen[id] = true
+		accumulated = append(accumulated, id)
+	}
+	for _, id := range state.Query.Seen {
+		appendAccumulated(id)
+	}
+	for _, drama := range cached.Items {
+		appendAccumulated(drama.ID)
+	}
 	if input.Force || !found {
-		state = nativeRecommendationState{Query: hongguoRecommendationQuery{Genre: genre}, HasMore: true}
+		// 0.6.5 修复（用户反馈"随机刷新不太随机，重启软件很容易出现
+		// 上次启动软件后的随机内容"）：
+		// 原先强制刷新会把整个 query 清空（**含 `Seen`**），于是 `filter_ids`
+		// 为空、游标又是 0 → 服务端每次返回的都是**同一批第一页**，
+		// 表现为"每次开机内容都差不多"。
+		// 现在改为：**游标归零**（重新从池子里挑），但把**已推荐过的 ID
+		// 继续交给服务端排除**，这样拿到的是新的一批。
+		state = nativeRecommendationState{
+			Query:   hongguoRecommendationQuery{Genre: genre, Seen: accumulated},
+			HasMore: true,
+		}
 	}
 	page, err := engine.downloader.fetchHongguoRecommendations(ctx, state.Query)
 	if err != nil {
@@ -69,6 +101,24 @@ func (engine *nativeEngine) nativeRecommendations(ctx context.Context, input nat
 	}
 	if err := ctx.Err(); err != nil {
 		return nativeCatalogResult{}, err
+	}
+	// 排除名单把可选池排空时（返回 0 条），清掉名单再取一次。
+	// 否则用户会看到"刷新之后一条都没有"，比拿到旧内容更糟。
+	if input.Force && len(page.Dramas) == 0 && len(accumulated) > 0 {
+		state.Query.Seen = nil
+		accumulated = nil
+		page, err = engine.downloader.fetchHongguoRecommendations(ctx, state.Query)
+		if err != nil {
+			if len(cached.Items) == 0 || errors.Is(err, context.Canceled) {
+				return nativeCatalogResult{}, err
+			}
+			cached.Fresh = false
+			cached.Warning = joinNativeWarnings(cached.Warning, publicError(err).Error())
+			return cached, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nativeCatalogResult{}, err
+		}
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()

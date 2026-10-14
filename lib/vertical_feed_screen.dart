@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'core_bridge.dart';
 import 'detail_screen.dart';
+import 'follow_state.dart';
 import 'lan_controller.dart';
 import 'lan_models.dart';
 import 'lan_screen.dart';
@@ -374,6 +375,25 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     }
   }
 
+  /// 过滤掉"已看完"的剧（0.6.5，用户要求）。
+  ///
+  /// 用户原话："**我认为已看过的不需要再出现在随机里了**"。
+  ///
+  /// 判定：追剧状态为 `watched`（已看）→ 不再进入随机流。
+  /// 注意只排除**已看**，不排除"在看"——正在追的剧仍应能被刷到。
+  ///
+  /// **兜底**：若过滤后一条都不剩（例如新用户把刷到的都看完了），
+  /// 则**退回未过滤的结果**。否则会出现"刷新之后一片空白"，
+  /// 比偶尔刷到看过的剧更糟。
+  List<Drama> _excludeWatched(List<Drama> items) {
+    if (items.isEmpty) return items;
+    final kept = items
+        .where((drama) => widget.store.following(drama.id)?.status !=
+            FollowStatus.watched)
+        .toList();
+    return kept.isEmpty ? items : kept;
+  }
+
   /// 拉取一批剧集。
   ///
   /// 单源红果走官方推荐流（真随机）；其余情况读取目录分页，
@@ -433,7 +453,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     }
     merged.shuffle(_random);
     return _FeedBatch(
-      merged,
+      _excludeWatched(merged),
       hasMore: hasMore,
       warning: warnings.isEmpty ? '' : warnings.join('；'),
     );
@@ -491,7 +511,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     }
     merged.shuffle(_random);
     return _FeedBatch(
-      merged,
+      _excludeWatched(merged),
       hasMore: hasMore,
       warning: warnings.isEmpty ? '' : warnings.join('；'),
     );
@@ -864,7 +884,19 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
 
   Future<void> _openDetail(Drama drama) async {
     if (!mounted) return;
-    // 复用现有详情页（不修改其实现）。
+    // 0.6.5 修复（用户反馈"点进详情页后视频仍在播放，有声音，应该在后台放"）：
+    // 进详情页前**必须暂停播放**。
+    //
+    // 首页 `home_screen.dart` 的 `_openDrama` 一直有 `_pauseCatalog()`，
+    // 但本页（新播放器）的 `_openDetail` 从加进来起就**没有暂停**，
+    // 于是从竖滑流点剧名进详情页时，视频继续播、声音继续出。
+    //
+    // 实现说明：播放器实例属于**当前子页**（`_FeedPageState`），
+    // 外层拿不到；因此暂停动作由子页在点剧名时先做（见 `_FeedPage` 的
+    // `onTap` 处理），这里只负责导航。
+    //
+    // 按用户确认：**返回后不自动恢复**（想继续看，点一下即可），
+    // 与首页"进详情页即停"的行为保持一致。
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => DetailScreen(
@@ -2394,13 +2426,32 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           label: '${widget.drama.title}，查看详情',
           child: InkWell(
             key: const ValueKey('feed-title-detail'),
-            onTap: widget.onOpenDetail,
+            // 0.6.5：进详情页前**先暂停本页播放**（用户反馈"点进详情页后
+            // 视频仍在播放，有声音"）。播放器实例在子页，因此暂停在这里做。
+            onTap: () {
+              unawaited(_pauseForDetail());
+              widget.onOpenDetail();
+            },
             borderRadius: BorderRadius.circular(6),
             child: row,
           ),
         ),
       ),
     );
+  }
+
+  /// 进详情页前暂停本页播放（0.6.5）。
+  ///
+  /// 与 [ _stopForLan ] 的区别：这里只暂停 + 落盘，**不刷新控件层**
+  /// （本页马上要被详情页盖住，无需重建）；返回后**不自动恢复**，
+  /// 由用户自行决定是否继续（与首页"进详情页即停"一致）。
+  Future<void> _pauseForDetail() async {
+    final player = _player;
+    if (_closed || player == null) return;
+    _interactions?.cancel();
+    _health.reset();
+    await player.pause();
+    await _saveProgress();
   }
 
   /// 左上角集数标签：显示当前第几集。
