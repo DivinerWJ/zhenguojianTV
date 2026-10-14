@@ -1219,6 +1219,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 消费一次即置空，避免换集 / 重试时反复跳到同一位置。
   double _pendingStart = 0;
 
+  /// 是否已套用过观看记录（0.6.6，只套用一次）。
+  ///
+  /// 见 [_applyHistoryOnce]：随机流刷到看过的剧时，从历史进度续播。
+  bool _historyApplied = false;
+
   /// 滑走时记下的播放位置，滑回来重建播放器时据此续播（0.3.1）。
   ///
   /// 因为滑走的页面现在会**释放播放器**，重建时若不带上位置就会从头播。
@@ -1364,6 +1369,46 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
 
   /// 取出并清空待续播位置（只在首次打开时返回非零值）。
   ///
+  /// 首次加载时套用观看记录（0.6.6）。
+  ///
+  /// 背景（用户反馈"已看的不回退了，但**观看进度被重置**"）：
+  /// 随机流此前**完全不读观看记录**——`initialPosition` 只在单剧模式由调用方传入，
+  /// 首页随机流恒为 0。于是每次刷到看过的剧都从**第 1 集第 0 秒**开始播，
+  /// 随后 `_saveProgress` 又把 0 写回记录 → **进度被清零**。
+  ///
+  /// 用户要求："刷到了就**直接从历史进度播放**"。
+  ///
+  /// 只套用一次（[_historyApplied]），且只用于"从随机流刷到"的场景：
+  /// - 单剧模式：调用方已明确指定集号与位置，不覆盖；
+  /// - 本地媒体：进度存在**独立的** `mediaWatched`，不走普通观看记录；
+  /// - 已有显式续播点（`_pendingStart` / `_resumeFrom`）：优先用显式值。
+  void _applyHistoryOnce(DramaDetail detail) {
+    if (_historyApplied) return;
+    _historyApplied = true;
+    // 注意：本类的 `singleDrama` 是 **bool**（外层 `VerticalFeedScreen` 才是 `Drama?`）。
+    // 曾误写 `widget.singleDrama != null` —— bool 恒不等于 null，
+    // 于是本方法**被无条件跳过**、续播完全失效（且 analyze 不会报错）。
+    if (widget.singleDrama || widget.mediaId != null) return;
+    if (_pendingStart > 0 || _resumeFrom > Duration.zero) return;
+    final watch = widget.store.watched(detail.drama.id);
+    if (watch == null) return;
+    _episodeIndex = resumeEpisodeIndex(
+      detail.episodes,
+      watch,
+    ).clamp(0, detail.episodes.length - 1);
+    // 位置只在"记录集号 == 落到的集号"、且**该集还没播完**时沿用。
+    //
+    // 两种情况不沿用（都从头播）：
+    // 1. 集号对不上（如已看完落到最后一集）——避免打开就跳到该集结尾；
+    // 2. **该集已播完**（`watch.finished`）——同理，若沿用结尾位置，
+    //    一打开就等于"已播完"，会立刻触发 `completed` 而**闪跳下一部**。
+    //    这条正是"已看完的剧被刷到"时最容易踩的坑（探针实测确认）。
+    if (detail.episodes[_episodeIndex].number == watch.episode &&
+        !watch.finished) {
+      _pendingStart = watch.position;
+    }
+  }
+
   /// 优先取 [ _resumeFrom ]（滑走再滑回时记录的位置，0.3.1），
   /// 其次取 [ _pendingStart ]（单剧模式调用方传入的续播位置，0.2.29）。
   Duration? _takeStartPosition() {
@@ -2183,6 +2228,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       if (detail.episodes.isEmpty) {
         throw AppFailure('该剧暂无可用剧集');
       }
+      // 0.6.6：首次加载时套用观看记录（随机流刷到看过的剧 → 从历史进度续播）。
+      // **必须在下行 `index` 计算之前调用**：它会改写 `_episodeIndex`，
+      // 而 `index` 是从 `_episodeIndex` 快照出来的，放后面就白改了。
+      _applyHistoryOnce(detail);
       final index = _episodeIndex.clamp(0, detail.episodes.length - 1);
       final previous = _plan;
       // 预载命中（0.2.31）：若之前已提前解析好这一集，直接复用，省一次网络解析。
@@ -2453,6 +2502,45 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     await player.pause();
     await _saveProgress();
   }
+
+  /// 长按加速提示的文字（0.6.6，竖屏与全屏共用）。
+  ///
+  /// 用户要求"**字不透明无所谓，但背景的透明度尽量高一些**"，
+  /// 也就是**背景要透、字要清楚**。做法是给文字加一圈**深色描边**：
+  /// - 背景只用极淡的半透明黑（22%），几乎不挡画面；
+  /// - 描边保证在亮画面（雪景、白墙）上也不糊；
+  /// - 字本身纯白加粗，在任何底色上都有足够对比度。
+  ///
+  /// 用 `Stack` 叠两层同一文案（下层描边、上层填充）实现描边效果，
+  /// 不引入额外依赖，也不依赖字体是否支持 `Paint.stroke`。
+  Widget _boostHintText(String text) => Stack(
+    alignment: Alignment.center,
+    children: [
+      Text(
+        text,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+          height: 1.3,
+          foreground: Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 3.5
+            ..color = const Color(0xCC000000),
+        ),
+      ),
+      Text(
+        text,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+          height: 1.3,
+          color: Color(0xFFFFFFFF),
+        ),
+      ),
+    ],
+  );
 
   /// 左上角集数标签：显示当前第几集。
   ///
@@ -3299,6 +3387,37 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                         ),
                       ),
                     ),
+                    // 长按加速提示（0.6.6 新增，用户反馈"**全屏横屏不显示这个悬浮窗**"）。
+                    //
+                    // 此前该提示**只在竖屏主层渲染**，全屏层（独立路由）完全没有，
+                    // 于是横屏长按加速时看不到任何提示。
+                    // 这里复用竖屏同一份 UI（`_boostHintText` + 相同样式），
+                    // 保证两处外观与行为一致，避免以后改一处漏一处。
+                    if (_interactions != null)
+                      AnimatedBuilder(
+                        animation: _interactions!,
+                        builder: (context, _) {
+                          final feedback = _interactions!.feedback;
+                          if (feedback.isEmpty) return const SizedBox.shrink();
+                          return IgnorePointer(
+                            child: Align(
+                              alignment: const Alignment(0, -.5),
+                              child: Container(
+                                margin: const EdgeInsets.all(16),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: .22),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: _boostHintText(feedback),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
                   ],
                 ),
               ),
@@ -3460,6 +3579,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // 现把它移出控件层、独立渲染，不受控件显隐影响：
         // - 加速中：显示「3 倍速 · 松开恢复」；
         // - 松开后：短暂显示「恢复 X 倍速」（由 PlayerInteractions 的 hint 控制）。
+        //
+        // 0.6.6 修正（用户反馈"**悬浮窗文字和对比度有问题，看不清字，
+        // 然后不透明，会挡住画面**"）：
+        // 用户要求是"**我需要能看到后面的画面，字不透明无所谓，
+        // 但背景的透明度尽量高一些**"——即**背景要透、字要清楚**。
+        // 因此改为：极淡的半透明底 + **高对比度白字 + 深色描边/阴影**。
+        // 描边是关键：只靠半透明底，遇到亮画面（雪景、白墙）字会糊掉；
+        // 加一圈深色描边后，无论背后是亮是暗都能看清。
         if (_interactions != null)
           AnimatedBuilder(
             animation: _interactions!,
@@ -3476,10 +3603,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                       vertical: 10,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.black87,
+                      // 透明度尽量高：仅 22% 黑，基本不挡画面。
+                      color: Colors.black.withValues(alpha: .22),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Text(feedback, textAlign: TextAlign.center),
+                    child: _boostHintText(feedback),
                   ),
                 ),
               );
