@@ -208,6 +208,11 @@ class AppUpdater {
   /// **这两步都不占用 GitHub API 额度**，因此不受共享 IP 限流影响。
   ///
   /// 失败（网络/解析）返回 null，由调用方继续走 API 兜底。
+  ///
+  /// 0.6.2 补充：本路径原先固定 `notes: ''`，导致**更新日志在应用内不再显示**
+  /// （0.5.1 改用它作为首选路径后引入）。现改为在拿到 tag 后
+  /// **额外尝试取一次更新日志**（见 [_fetchNotes]）：
+  /// 取到就显示，取不到（含被限流）**只影响日志、不影响版本检测**。
   static Future<AppRelease?> _fetchFromRedirect(String? proxy) async {
     final tag = await _resolveLatestTag(proxy);
     if (tag == null) return null;
@@ -221,8 +226,55 @@ class AppUpdater {
       apkName: apkName,
       // 用 release 的固定下载地址，不依赖 API 返回的 browser_download_url。
       apkUrl: 'https://github.com/$_owner/$_repo/releases/download/$tag/$apkName',
-      notes: '',
+      notes: await _fetchNotes(tag, proxy),
     );
+  }
+
+  /// 按 tag 取该 Release 的更新日志（`body` 字段）。
+  ///
+  /// 为什么需要单独取：重定向法走的是网页（不占 API 额度），
+  /// 网页里**没有**结构化的更新日志，只有 API 的 `body` 才有。
+  /// 因此这里补一次 API 请求，但**只取日志、不参与版本判定**。
+  ///
+  /// 失败处理：任何异常或非 200 一律返回空串，
+  /// 调用方据此不显示"更新日志"区块，**版本检测结果不受影响**。
+  ///
+  /// 请求量：每次检查更新最多 2 次（直连 + 代理兜底），
+  /// 远低于未认证 60 次/小时的额度，不会把 0.5.1 修好的限流问题带回来。
+  /// 代理兜底有意义：`gh-proxy.com` 从它自己的服务器出口发起请求，
+  /// 可绕开"本机 VPN 共享 IP 已被限流"的情况。
+  static Future<String> _fetchNotes(String tag, String? proxy) async {
+    // 保存并恢复 `_lastStatus`：本方法只是"顺带取日志"，
+    // 不应把它的 403 等状态写进调用方的限流判定逻辑。
+    final savedStatus = _lastStatus;
+    try {
+      final direct = await _get(_apiTagsUrl(tag), proxy);
+      final notes = _notesFrom(direct);
+      if (notes.isNotEmpty) return notes;
+      // 直连失败或日志为空时，再试一次 API 代理兜底。
+      final viaProxy = await _get('$_apiProxyPrefix${_apiTagsUrl(tag)}', proxy);
+      return _notesFrom(viaProxy);
+    } catch (_) {
+      return '';
+    } finally {
+      _lastStatus = savedStatus;
+    }
+  }
+
+  /// 指定 tag 的 Release API 地址（形如 `.../releases/tags/v0.6.2`）。
+  static String _apiTagsUrl(String tag) =>
+      'https://api.github.com/repos/$_owner/$_repo/releases/tags/$tag';
+
+  /// 从 API 返回的 JSON 文本里取 `body`；无法解析返回空串。
+  static String _notesFrom(String? body) {
+    if (body == null || body.isEmpty) return '';
+    try {
+      final json = jsonDecode(body);
+      if (json is! Map) return '';
+      return json['body']?.toString() ?? '';
+    } catch (_) {
+      return '';
+    }
   }
 
   /// 读 `releases/latest` 的 302 目标，解析出 tag（如 `v0.5.0`）。

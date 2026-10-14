@@ -1490,6 +1490,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     );
     _subscriptions.add(
       player.stream.playing.listen((playing) {
+        // 0.6.3：播放状态变化必须让控件层重建。
+        //
+        // 中央播放图标、底部播放/暂停键都依赖 `playing`；此前这里只在
+        // `playing == true` 时安排自动隐藏，**不触发重建**，因此从其它途径
+        // 改变播放状态（自动连播、播放结束、健康检查恢复等）时图标会滞后。
+        if (!_closed) _tick.value++;
         if (playing) _scheduleHide();
       }),
     );
@@ -1770,6 +1776,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     unawaited(player.playOrPause());
     // 暂停时立刻落盘，避免用户暂停后直接退出导致进度丢失。
     if (!willPlay) unawaited(_saveProgress());
+    // 0.6.3 修复（用户反馈"双击恢复后中央图标仍是暂停"）：
+    // 原先这里不重建，中央播放图标与底部播放/暂停键要等下一次
+    // 整页 setState（如自动隐藏计时器到期）才更新，表现为"视频在播、图标不变"。
+    // 现在切换后立即刷新一次，图标与画面同步。
+    _tick.value++;
+    _refreshFullscreen(immediate: true);
     _showControls();
   }
 
@@ -3150,9 +3162,24 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             //
             // 整页 setState 已移除（见 _ensurePlayer 的流监听），
             // 这里只重建底部控件子树，避免每秒多次重建整个手势层与选集按钮。
+            //
+            // 0.6.3 修复（用户反馈"双击恢复后中央图标仍是暂停"）：
+            // 本 builder 的闭包**捕获的是外层 build 那一刻的 `state`**，
+            // 而 `_tick` 变化只会重跑这里，不会重跑外层 build →
+            // 于是这里一直用着过期状态，表现为"视频已在播放、图标却不变"。
+            // （实测：推位置到 30s 后进度条仍为 0；单击触发整页 setState 才跳到 5s。）
+            // 现在在 builder 内**重新读取实时状态**并遮蔽外层同名变量，
+            // 让播放状态、进度、时间都随 `_tick` 真正刷新。
             child: ValueListenableBuilder<int>(
               valueListenable: _tick,
-              builder: (context, _, _) => Stack(
+              builder: (context, _, _) {
+                final live = _player?.state;
+                final state = live;
+                final duration = live?.duration.inMilliseconds ?? 0;
+                final position = live?.position.inMilliseconds ?? 0;
+                final buffered = live?.buffer.inMilliseconds ?? 0;
+                final total = duration > 0 ? duration / 1000 : 1.0;
+                return Stack(
                 fit: StackFit.expand,
                 children: [
                   const IgnorePointer(
@@ -3356,8 +3383,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                       ],
                     ),
                   ),
-                ],
-              ),
+                  ],
+                );
+              },
             ),
           ),
         ),
@@ -3365,14 +3393,24 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     );
   }
 
+  /// 底部功能按钮（0.6.3：改为等宽，位置固定）。
+  ///
+  /// 用户反馈："下方 5 个功能按钮位置没固定，切换连播本剧后由于和之前
+  /// 连播下一部字数不同，所以 5 个按钮都会轻微挪动位置"。
+  ///
+  /// 根因：按钮行用 `MainAxisAlignment.spaceEvenly`，它按**每个子项的实际宽度**
+  /// 分配剩余空间；"连播下一部"（实测 55px）比"连播本剧"（44px）宽，
+  /// 切换时整行重新分配 → 5 个按钮集体位移（实测 1.38 ~ 5.5px）。
+  ///
+  /// 修法：每个按钮**固定占 1/5 槽位**（`Expanded` + 内容居中），
+  /// 与标签文字长短无关，位置恒定；标签仍保留省略号兜底。
   Widget _sideButton({
     required Key key,
     required IconData icon,
     required String label,
     required VoidCallback onPressed,
     Color color = Colors.white,
-  }) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 2),
+  }) => Expanded(
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3387,6 +3425,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           style: TextStyle(color: color, fontSize: 11),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
         ),
       ],
     ),
