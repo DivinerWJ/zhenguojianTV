@@ -677,7 +677,14 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
           tooltip: '返回',
         ),
-        Expanded(child: _sourceLabel()),
+        // 单剧模式（0.6.2）：不再显示站源文字。
+        //
+        // 原先无条件显示 `_sourceLabel()`，而它读的是**首页当前勾选的站源集合**
+        // （见 `_sources`），与"正在播哪部剧"无关：
+        // 首页勾了多个源时，从详情页/下载页/本地媒体进入的单剧播放器
+        // 会错误地显示「全部站源」。单剧模式本就不涉及选源，
+        // 且本地媒体那条剧没有真实站源，故整行去掉，只保留返回按钮。
+        if (widget.singleDrama == null) Expanded(child: _sourceLabel()),
       ],
     ),
   );
@@ -2020,6 +2027,120 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     return _quality == 0 ? '自动' : '${_quality}P';
   }
 
+  /// 剧名最大字数（**含省略号本身**）。
+  ///
+  /// 用户要求：加标点符号一共固定 12 字，超出的用省略号代替，
+  /// 「…」也计入这 12 字内。因此超长时取前 11 个字形 + 1 个「…」。
+  static const int _titleMaxChars = 12;
+
+  /// 按用户规则裁剪剧名。
+  ///
+  /// 用 `characters` 按**字形**切分，而不是 `String.substring`：
+  /// 后者按 UTF-16 码元切，遇到 emoji 或组合字符会切出乱码。
+  String get _displayTitle {
+    final title = widget.drama.title;
+    final chars = title.characters;
+    if (chars.length <= _titleMaxChars) return title;
+    return '${chars.take(_titleMaxChars - 1)}…';
+  }
+
+  /// 是否显示左上角集数标签。
+  ///
+  /// 仅在剧集总数 > 1 时显示：单集剧、本地单文件显示"第1集"没有信息量。
+  bool get _hasEpisodeBadge => (_detail?.episodes.length ?? 0) > 1;
+
+  /// 剧名行（0.6.2）。
+  ///
+  /// - 剧名固定最多 12 字（含省略号）；
+  /// - 右侧 `›` 箭头，**剧名 + 箭头整块可点** → 进入该剧详情页；
+  /// - **单剧模式不显示箭头、剧名不可点**：从详情页进入时再点会叠一层详情页，
+  ///   从本地媒体进入时那条剧是本地合成的，跳详情会去联网拉取，
+  ///   与"本地媒体不联网"的既有约束冲突。
+  /// - 宽度上限为屏宽的 70%，保证再长的剧名也不会把箭头挤出屏幕。
+  Widget _titleBar() {
+    final canOpenDetail = !widget.singleDrama;
+    final row = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            _displayTitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        if (canOpenDetail)
+          const Padding(
+            padding: EdgeInsets.only(left: 4),
+            child: Icon(
+              Icons.chevron_right_rounded,
+              color: Colors.white70,
+              size: 22,
+            ),
+          ),
+      ],
+    );
+    if (!canOpenDetail) {
+      // 单剧模式：保持纯文本，不引入任何点击行为。
+      return Align(alignment: Alignment.centerLeft, child: row);
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * .7,
+        ),
+        child: Semantics(
+          button: true,
+          label: '${widget.drama.title}，查看详情',
+          child: InkWell(
+            key: const ValueKey('feed-title-detail'),
+            onTap: widget.onOpenDetail,
+            borderRadius: BorderRadius.circular(6),
+            child: row,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 左上角集数标签：显示当前第几集。
+  ///
+  /// 放在控件层内，因此**跟随控件一起显隐**（用户要求），
+  /// 单击画面隐藏控件时它也会一并消失，不长期遮挡视频。
+  Widget _episodeBadge() => Align(
+    alignment: Alignment.topLeft,
+    child: SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 0, 0),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.black54,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            child: Text(
+              '第${_episodeIndex + 1}集',
+              key: const ValueKey('feed-episode-badge'),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   Future<void> _setSpeed(double value) async {
     if (_closed) return;
     setState(() => _speed = value);
@@ -3050,6 +3171,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
+                  // 左上角集数标签（0.6.2）。
+                  //
+                  // 只在有多个剧集时显示：单集、本地单文件不显示，
+                  // 避免出现"第1集"这种没有信息量的标签。
+                  if (_hasEpisodeBadge) _episodeBadge(),
                   // 暂停时显示中央播放按钮。
                   if (!(state?.playing ?? false) &&
                       !_loading &&
@@ -3096,16 +3222,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Text(
-                                widget.drama.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 17,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
+                              _titleBar(),
                               Row(
                                 children: [
                                   IconButton(
