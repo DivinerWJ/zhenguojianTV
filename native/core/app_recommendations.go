@@ -153,9 +153,31 @@ func (engine *nativeEngine) nativeRecommendations(ctx context.Context, input nat
 		return nativeCatalogResult{}, errors.New("暂时没有新的推荐，已保留上次位置；可重试或刷新推荐")
 	}
 	items := mergeNativeCatalog(previous, fresh)
-	identifiers := make([]string, 0, min(540, len(items)))
-	for _, drama := range items[max(0, len(items)-540):] {
+	// 0.6.8 修复（用户反馈"**剧的随机性还是太小，重启软件后很容易就刷到
+	// 上次使用软件时刷到过的剧**"）：
+	//
+	// **原先的缺陷**：这里每次都从"当前这批 items"里取最多 540 条当排除名单：
+	//
+	//	identifiers := make([]string, 0, min(540, len(items)))
+	//	for _, drama := range items[max(0, len(items)-540):] { ... }
+	//
+	// 而强制刷新时 `previous` 已被置空、`items` 只剩刚拿到的这一批（约 18 条），
+	// 于是**排除名单每轮都被重置成 18 条**，从不累积。
+	// 实测（模拟"服务端遵守 filter_ids"）：排除数始终是 18，
+	// 服务端只能在第 1、2 批之间来回给，6 轮拿 108 条、去重仅 36 条
+	// ——表现为"随机性很小、重启后容易刷到上次的剧"。
+	//
+	// **现在**：把本次拿到的 ID **追加**到已有名单（`accumulated` 含
+	// 内存状态 + 磁盘缓存），实现**真正累积**。
+	// 超出上限时**丢弃最早的**（保留最近 540 条），即"自动回绕"：
+	// 老剧在很久之后才会重新有机会出现，用户无需手动清理。
+	identifiers := make([]string, 0, min(540, len(accumulated)+len(fresh)))
+	identifiers = append(identifiers, accumulated...)
+	for _, drama := range fresh {
 		identifiers = append(identifiers, drama.ID)
+	}
+	if len(identifiers) > 540 {
+		identifiers = identifiers[len(identifiers)-540:]
 	}
 	session := page.SessionID
 	if session == "" {
