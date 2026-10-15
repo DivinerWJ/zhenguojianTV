@@ -153,6 +153,16 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   /// 连播模式：true = 连播本剧下一集，false = 连播下一部（默认）。
   bool _autoNextEpisode = false;
 
+  /// 全流共享的预载器（0.6.9）。
+  ///
+  /// **根因修复**：此前每个 `_FeedPage` 各建一个预载器，而"连播下一部"
+  /// 预载的是**下一部剧**——结果存在本页预载器里，滑过去的是**另一个页面**，
+  /// 取不到；且本页滑走时会 clear+release，等于**预载白做又被释放**。
+  /// 实测：预载 `甲剧1` → 滑过去 → `release(甲剧1)` + `resolve(甲剧1)`，
+  /// 用户感受就是"完全没有预加载、每次都要现加载"。
+  /// 改为父级持有、传给所有页面后，预载结果可跨页复用。
+  late final PlaybackPreloader _preloader;
+
   /// 当前页「切到下一集」的执行入口（由子页上报）。
   ///
   /// 注意：这里**不能**用 GlobalKey 去访问当前页 State。
@@ -235,6 +245,8 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   void initState() {
     super.initState();
     widget.refreshSignal?.addListener(_onRefreshSignal);
+    // 全流共享预载器（0.6.9）：由本页创建、传给所有子页，并在 dispose 释放。
+    _preloader = PlaybackPreloader(widget.repository);
     // 单剧模式（0.2.29）：详情页/下载页进入时只播指定的一部剧，
     // 直接构造单元素列表，跳过推荐流拉取。
     final single = widget.singleDrama;
@@ -285,6 +297,8 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     widget.refreshSignal?.removeListener(_onRefreshSignal);
     unawaited(widget.repository.cancelRecommendations());
     unawaited(widget.repository.cancelFeedCatalog());
+    // 预载器释放（0.6.9）：取消挂起请求并释放已预取的会话，避免会话泄漏。
+    _preloader.dispose();
     _controller.dispose();
     _focus.dispose();
     super.dispose();
@@ -846,6 +860,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           drama: drama,
           repository: widget.repository,
           store: widget.store,
+          preloader: _preloader,
           active: widget.active && isCurrent,
           autoNextEpisode: _autoNextEpisode,
           playerFactory: widget.playerFactory,
@@ -1076,6 +1091,7 @@ class _FeedPage extends StatefulWidget {
     required this.drama,
     required this.repository,
     required this.store,
+    required this.preloader,
     required this.active,
     required this.autoNextEpisode,
     required this.onToggleAutoNext,
@@ -1100,6 +1116,16 @@ class _FeedPage extends StatefulWidget {
   final EpisodeStateReporter? onEpisodeStateChanged;
   final AppRepository repository;
   final LocalStore store;
+
+  /// 全流共享的预载器（0.6.9）。
+  ///
+  /// **为什么必须共享**：此前每页各持一个预载器，而"连播下一部"预载的是
+  /// **下一部剧**——结果存在本页自己的预载器里；滑到下一部时那是另一个
+  /// 页面、用的是另一个空预载器，取不到；同时本页被滑走时又会 clear+release。
+  /// 实测（探针）：预载 `甲剧1` 后滑过去，紧接着 `release(甲剧1)` 又
+  /// `resolve(甲剧1)` —— 预载**白做还被释放**，用户感觉"完全没有预加载"。
+  /// 改为由父级创建并传入后，预载结果可跨页复用。
+  final PlaybackPreloader preloader;
   final bool active;
 
   /// true = 播完自动播本剧下一集；false = 播完跳到下一部。
@@ -1199,7 +1225,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// - 「连播本剧」→ 预载本剧下一集；
   /// - 「连播下一部」→ 预载下一部剧的第 1 集（需父级传入 `nextDrama`）。
   /// 默认常开（用户 Q3：不加开关，不提供关闭入口）。
-  late final PlaybackPreloader _preloader;
+  ///
+  /// 0.6.9：改为**父级创建并传入**（全流共享），不再本页自建。
+  /// 本页只借用，**不负责 dispose**（生命周期归父级）。
+  PlaybackPreloader get _preloader => widget.preloader;
 
   /// 观看记录保存定时器。
   ///
@@ -1227,6 +1256,32 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
 
   /// 自动恢复尝试计数与"是否已刷新过地址"（与老播放器同一套策略）。
   final _recovery = PlaybackRecovery();
+
+  /// 是否在等"第一帧真正开始播放"（0.6.9）。
+  ///
+  /// **根因修复（用户反馈"切下一集/下一部时很大概率黑屏、没有任何反应，
+  /// 需要上下重新滑动一下才能正常播放"）**：
+  ///
+  /// 原先 `_prepare()` 在 `_openMedia()`（即 `player.open()`）**返回后**
+  /// 立刻 `_loading = false`。但 `open()` 返回只代表"地址已交给播放器"，
+  /// **不代表已经起播**——弱网下（尤其挂 VPN）服务端可能迟迟不给数据，
+  /// 此时：加载提示已被撤掉、又没有任何错误 → **画面纯黑、无任何反馈**。
+  ///
+  /// 更糟的是健康检查要求 `playing == true` 才判定卡住，
+  /// "从未起播"永远不满足条件 → **永远不会自动恢复**，
+  /// 用户只能靠"再滑一次"手动绕过（与真机描述完全一致）。
+  ///
+  /// 现在：保留加载提示直到真正起播；超过阈值仍不起播则自动恢复一次。
+  bool _awaitingFirstFrame = false;
+
+  /// 已等待"第一帧"的健康检查轮次（每秒 +1）。
+  ///
+  /// 用**轮次计数**而不是墙上时钟：既便于测试（可推进假时钟验证），
+  /// 也不受设备休眠 / 系统时间被调整的影响。
+  int _firstFrameTicks = 0;
+
+  /// 迟迟不起播的容忍轮次（约 15 秒，超过即自动恢复一次）。
+  static const _firstFrameTicksLimit = 15;
 
   /// 应用是否在前台。后台时不判定"卡住"，否则会被误判。
   bool _foreground = true;
@@ -1308,8 +1363,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _pendingStart = widget.initialPosition;
     // 追剧按钮初始状态（0.2.26 新增）。
     _followed = widget.store.isFavorite(widget.drama.id);
-    // 预载器（0.2.31）：默认常开（用户 Q3）。
-    _preloader = PlaybackPreloader(widget.repository);
     // 局域网推送（0.6.4）：接管 handoff，并挂上"发送端要求停止"的回调。
     //
     // `consumed` 必须在**开始加载前**就置位，否则发送端可能在本端
@@ -1406,6 +1459,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (action == PlaybackRecoveryAction.stop) {
       if (!mounted || _closed) return;
       setState(() {
+        // 0.6.9：放弃恢复时必须撤掉"等待第一帧"，否则加载提示会盖住错误与重试按钮。
+        _awaitingFirstFrame = false;
+        _firstFrameTicks = 0;
         _error = current.local
             ? '本地视频播放中断，请返回重试。'
             : '播放已中断，请点击重试。';
@@ -1507,7 +1563,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   ///
   /// 触发条件（与旧播放器一致的时机策略）：
   /// - 当前页可见、已就绪、正在播放且缓冲充足；
-  /// - 播放位置过半或距结束不足 45 秒（说明快看完了，值得提前准备）。
+  /// - 播放位置达 25% 或距结束不足 2 分钟（0.6.9 提前，原为"过半或不足 45 秒"）。
   ///
   /// 预载目标：
   /// - 「连播本剧」→ 本剧下一集；
@@ -1516,20 +1572,29 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 不预载的情况：本地文件模式、单剧模式、加载中/出错、当前不在播放。
   void _syncPreload() {
     if (_closed) return;
-    // 本地文件、单剧模式不预载（本地文件无网络解析成本，单剧无下一部）。
-    if (widget.localOnly) {
-      _preloader.clear();
-      return;
-    }
+    // 本地文件不预载（无网络解析成本）。
+    // 0.6.9：**不 clear** 共享预载器（它可能正持有别的页面要用的结果）。
+    if (widget.localOnly) return;
+    // 0.6.9：**非当前页不碰共享预载器**。
+    //
+    // 预载器现在由全流共享，本页预载的很可能正是**下一页要播的内容**。
+    // 若这里对非当前页执行 `clear()`，就会把下一页马上要用的预载结果
+    // 当场清掉（表现为"滑过去仍要现加载"）。因此非当前页直接返回，
+    // 既不预载也不清理，交由当前页与预载器自身的身份校验去管理。
+    if (!widget.active) return;
     final player = _player;
     final detail = _detail;
     if (player == null ||
         detail == null ||
         !_ready ||
         _loading ||
-        _error != null ||
-        !widget.active) {
-      _preloader.clear();
+        _error != null) {
+      // 0.6.9：这里**不能 clear**。
+      //
+      // 本页刚成为当前页、正处于 `_loading` 时，`_prepare()` 马上要调用
+      // `_preloader.take()` 取走上一页预载好的结果；若此处先 clear，
+      // 就会把马上要用的预载**当场清掉**（竞态），预载依然白做。
+      // 过期结果由 `take()` / `prepare()` 的身份与有效期校验自行清理。
       return;
     }
     final state = player.state;
@@ -1540,22 +1605,37 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final duration = state.duration.inMilliseconds;
     final position = state.position.inMilliseconds;
     // 缓冲不足 / 刚开始播放时不预载，避免与当前播放抢带宽。
+    //
+    // 0.6.9 调整（用户反馈"**感觉没有预加载，每次下一集/下一部都要现加载**"）：
+    //
+    // 原先要求"**播放过半** 或 **距结束不足 45 秒**"才预载：
+    //
+    //     (position < duration ~/ 2 && duration - position > 45000)
+    //
+    // 条件过晚——短剧单集往往只有一两分钟，等满足时常常已经快播完了，
+    // 用户感受到的就是"从来没有预加载"。现在提前到
+    // **已看 25%** 或 **距结束不足 2 分钟**（取先满足者）。
+    //
+    // 说明：提前预载只增加一次"解析播放地址"的轻量请求；
+    // 真正拉流的体积上限由原生核心的 `nativePreloadLimit` 控制，
+    // 因此提前不会显著增加流量。
     if (duration <= 0 ||
-        position < 2000 ||
-        (position < duration ~/ 2 && duration - position > 45000)) {
+        position < 3000 ||
+        (position * 4 < duration && duration - position > 120000)) {
       return;
     }
-    // 弱网保护（0.5.0）：缓冲余量偏低时**暂停预载**，把带宽让给当前播放。
+    // 弱网保护（0.5.0，0.6.9 放宽阈值）。
     //
-    // 背景：用户实测"开 VPN 就卡"。视频请求经系统代理绕道节点（见
-    // `native/core/proxy_system.go`），带宽与稳定性都不如直连；而预载一次
-    // 最多会拉 4 MB（`native/core/app_preload.go` 的 `nativePreloadLimit`），
-    // 与正在播放的流争抢同一条代理通道，会把缓冲打空 → 抽帧卡顿。
-    // 因此这里以"缓冲余量"为准：余量不足就先不预载，等缓过来再预载。
-    // 阈值取 30 秒（远低于播放器 32 MB 前向缓存能撑的时长），
-    // 只在真正吃紧时生效，正常网络下行为不变。
+    // 背景：用户实测"开 VPN 就卡"。视频请求经系统代理绕道节点
+    // （见 `native/core/proxy_system.go`），带宽与稳定性都不如直连。
+    // 原阈值 30 秒过于保守：**用户长期挂 VPN 时缓冲余量经常不到 30 秒**，
+    // 于是预载被永久暂停 —— 这正是"感觉完全没有预加载"的主因之一
+    // （用户已确认"平时开着 VPN 用"）。
+    //
+    // 现在放宽到 8 秒：只在缓冲**真的快见底**时才让路给当前播放，
+    // 正常挂 VPN 也能启动预载。
     final buffered = state.buffer.inMilliseconds;
-    if (buffered > 0 && buffered < 30000) {
+    if (buffered > 0 && buffered < 8000) {
       _preloader.pause();
       return;
     }
@@ -1583,7 +1663,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   Future<void> _preloadNextDrama(Drama next) async {
     try {
       final detail = await widget.repository.detail(next);
-      if (_closed || detail.episodes.isEmpty) return;
+      // 0.6.9：取详情期间页面可能已被滑走。此时**不要**再写入共享预载器，
+      // 否则会用旧页面的目标覆盖掉新页面正在准备的预载。
+      if (_closed || !widget.active || detail.episodes.isEmpty) return;
       _preloader.prepare(
         detail.drama,
         detail.episodes.first,
@@ -1643,17 +1725,37 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     );
     // 健康检查（0.6.0）：每秒检测是否卡住，卡住则自动恢复。
     // 只在"播放中 + 前台 + 无错误"时判定，避免把暂停/缓冲误判为卡死。
+    //
+    // 0.6.9 补充：**"从未起播"也要能自愈**。
+    // `open()` 返回只代表地址已交给播放器，弱网下可能长时间不起播；
+    // 原判定要求 `playing == true`，这种情况永远不满足 → 永久黑屏无反应
+    // （用户反馈"黑屏没有任何反应，要再滑一次"）。这里加一条兜底：
+    // 已交给播放器超过 [_firstFrameTicksLimit] 秒仍未起播，则自动恢复一次。
     _healthTimer?.cancel();
     _healthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_closed ||
-          _playerReleased ||
-          !widget.active ||
-          _loading ||
-          _error != null) {
+      if (_closed || _playerReleased || !widget.active || _error != null) {
         return;
       }
       final current = _player;
       if (current == null) return;
+      // 兜底一：地址已交出但迟迟不起播（弱网 / 服务端迟迟不给数据）。
+      if (_awaitingFirstFrame &&
+          _foreground &&
+          !current.state.playing &&
+          !current.state.completed) {
+        _firstFrameTicks++;
+        if (_firstFrameTicks >= _firstFrameTicksLimit) {
+          // 重置计数：若这次恢复也没能起播，下一轮仍会再试
+          // （总次数由 `_recovery` 限制，超过后会转为显示"点击重试"）。
+          _firstFrameTicks = 0;
+          unawaited(_recover());
+          return;
+        }
+      } else {
+        _firstFrameTicks = 0;
+      }
+      // 兜底二：已在播放但位置长时间不前进（原有逻辑）。
+      if (_loading) return;
       if (_health.stalled(
         position: current.state.position,
         playing: current.state.playing,
@@ -1710,6 +1812,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // `playing == true` 时安排自动隐藏，**不触发重建**，因此从其它途径
         // 改变播放状态（自动连播、播放结束、健康检查恢复等）时图标会滞后。
         if (!_closed) _tick.value++;
+        // 0.6.9：真正起播 → 结束"等待第一帧"，撤掉加载提示。
+        if (playing && _awaitingFirstFrame) {
+          _awaitingFirstFrame = false;
+          _firstFrameTicks = 0;
+          if (!_closed) setState(() {});
+        }
         // 局域网推送（0.6.4）：播放真正开始后回报发送端。
         if (playing) {
           _scheduleHide();
@@ -1788,8 +1896,18 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 内存与 CPU 被十几个播放器瓜分，表现为越来越卡（倍速时更明显）。
       unawaited(_saveProgress());
       _interactions?.cancel();
-      // 清掉挂起的预载任务，避免和别的页面抢带宽（0.3.1）。
-      _preloader.clear();
+      // 0.6.9：**不再 clear 预载器**。
+      //
+      // 原先这里会 `_preloader.clear()`（本意是"避免和别的页面抢带宽"），
+      // 但预载器改为全流共享后，本页预载的往往正是**下一页要播的那一集**
+      // （「连播下一部」预载下一部第 1 集）。滑走时清掉它，
+      // 等于把刚做好的准备**当场扔掉**，下一页只能重新解析
+      // ——这正是用户反馈"感觉没有预加载、每次都要现加载"的直接原因。
+      //
+      // 现在改为**保留**：由新成为当前页的页面 `take()` 复用。
+      // 若用户是往回滑（预载目标不是即将播放的），新当前页调用
+      // `prepare()` 时身份不同，预载器内部会自行 `clear()` 掉过期结果，
+      // 因此不会残留无效预载，也不会造成会话泄漏。
       // 先记下当前播放位置，回来时据此续播（否则会从第 0 秒重新开始）。
       _resumeFrom = _player?.state.position ?? Duration.zero;
       _releasePlayer();
@@ -1870,8 +1988,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     }
     _releasePlayer();
-    // 预载器释放（0.2.31）：取消挂起请求并释放已预取的会话，避免会话泄漏。
-    _preloader.dispose();
+    // 预载器（0.2.31）由**父级**持有并释放（0.6.9 改为全流共享），
+    // 本页只借用，不负责 dispose。
     super.dispose();
   }
 
@@ -2393,6 +2511,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _loading = false;
         _ready = true;
         _controlsVisible = true;
+        // 0.6.9：`open()` 返回 ≠ 已起播。这里开始"等待第一帧"，
+        // 期间**保留加载提示**（避免纯黑无反应），并在健康检查里兜底自动恢复。
+        // 注意：有错误时不能显示加载提示，否则会盖住"点击重试"。
+        _awaitingFirstFrame = _error == null;
+        _firstFrameTicks = 0;
       });
       // 加载成功：复位健康检查与恢复计数（0.6.0）。
       // 不复位的话，上一次的失败计数会累计，导致本次偶发卡顿直接判为"停止"。
@@ -2411,6 +2534,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       if (_closed || generation != _generation) return;
       setState(() {
         _loading = false;
+        // 0.6.9：进入错误态后不再"等待第一帧"，否则加载提示会盖住"点击重试"。
+        _awaitingFirstFrame = false;
+        _firstFrameTicks = 0;
         _error = error is AppFailure ? error.message : error.toString();
       });
       _refreshFullscreen(immediate: true);
@@ -3203,7 +3329,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                         ),
                       ),
                     ),
-                    if (_loading)
+                    if (_loading ||
+                        (_awaitingFirstFrame && !(_player?.state.playing ?? false)))
                       const IgnorePointer(
                         child: LoadingHint(message: '正在加载视频…', dark: true),
                       )
@@ -3605,7 +3732,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             ),
           ),
         ),
-        if (_loading)
+        if (_loading || (_awaitingFirstFrame && !(state?.playing ?? false)))
           const IgnorePointer(
             child: LoadingHint(message: '正在加载视频…', dark: true),
           )
