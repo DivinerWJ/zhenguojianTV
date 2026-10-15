@@ -144,11 +144,26 @@ class PlayerInteractions extends ChangeNotifier {
     _pointer = event.pointer;
     _origin = _lastPosition = event.localPosition;
     _started = event.timeStamp;
-    _swipeEnabled = swipeEnabled && event.kind == PointerDeviceKind.touch;
+    // 0.6.7：顶部禁滑区（用户要求）。
+    //
+    // 屏幕最顶部下滑是**系统手势**（拉通知栏 / 控制中心），
+    // 而播放器把下滑用作"切上一集"，两者冲突。
+    // 这里让落在顶部区域的触点**不参与切集滑动**
+    // （单击/双击/长按仍照常，避免出现"点了没反应"的死区）。
+    _swipeEnabled =
+        swipeEnabled &&
+        event.kind == PointerDeviceKind.touch &&
+        !_inTopGuard(event.localPosition);
     _swipeThreshold = math.max(56, math.min(100, height * .1));
     _moved = _held = false;
     _beginHold();
   }
+
+  /// 顶部禁滑区高度（0.6.7，与 `vertical_feed_screen.dart` 保持一致）。
+  static const double topGestureGuard = 60;
+
+  bool _inTopGuard(Offset localPosition) =>
+      localPosition.dy < topGestureGuard;
 
   void pointerMove(PointerMoveEvent event) {
     if (_pointer != event.pointer || _origin == null) return;

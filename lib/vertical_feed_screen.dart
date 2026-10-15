@@ -575,8 +575,33 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   ///    因此表现为"第一部要下滑才切下集、第二部上滑却回上一部剧"。
   ///    修法：只要处于「连播本剧」模式，就一律由本方法接管并优先切集，
   ///    不再依赖"是否上报了下一集"来做分支（切集函数内部自身会判断边界）。
+  /// 顶部禁滑区高度（0.6.7，用户要求）。
+  ///
+  /// 背景：从屏幕**最顶部**向下滑是系统手势（拉出通知栏 / 控制中心），
+  /// 但播放器把"下滑"用作"切上一集"，两者冲突——用户想拉通知栏却切了集。
+  ///
+  /// 这里在顶部留出一段**不响应播放器滑动**的区域，
+  /// 让系统手势正常生效（用户确认取 **60** 逻辑像素）。
+  ///
+  /// 注意：只是**不响应切集滑动**，单击显隐控件、双击播放/暂停仍照常，
+  /// 否则顶部会出现"点了没反应"的死区。
+  static const double _topGestureGuard = 60;
+
+  /// 触点是否落在顶部禁滑区（0.6.7）。
+  ///
+  /// [localY] 用 `Listener` 的 `event.localPosition.dy`（相对手势层顶部）。
+  /// 手势层是 `Positioned.fill`，因此其顶部即屏幕顶部（不含系统栏偏移）。
+  bool _inTopGuard(Offset localPosition) =>
+      localPosition.dy < _topGestureGuard;
+
   void _onVerticalDrag(DragEndDetails details) {
     if (_closed) return;
+    // 0.6.7：从顶部禁滑区开始的滑动**不切集**，
+    // 让系统手势（拉通知栏 / 控制中心）正常生效。
+    if (_dragStartedInGuard) {
+      _dragStartedInGuard = false;
+      return;
+    }
     final velocity = details.primaryVelocity ?? 0;
     if (velocity == 0) return;
     // 单剧模式（0.2.29，用户方案 C）：
@@ -872,10 +897,52 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       // 只有「连播本剧」模式才接管手势（与上面 physics 条件保持一致）。
+      //
+      // 0.6.7：改用 Start/End 组合，以便记录**起点位置**并套用顶部禁滑区。
+      // 原先只有 `onVerticalDragEnd`，拿不到触点坐标，
+      // 无法判断"这次滑动是否从顶部开始"。
+      onVerticalDragStart: _autoNextEpisode
+          ? (details) => _dragStartedInGuard = _inTopGuard(details.localPosition)
+          : null,
       onVerticalDragEnd: _autoNextEpisode ? _onVerticalDrag : null,
-      child: pageView,
+      child: Stack(
+        // 必须 `expand`：默认的 `loose` 会让非定位子项（`pageView`）
+        // 拿到"最小 0"的约束，`PageView` 可能塌缩成 0 高度而整页空白。
+        fit: StackFit.expand,
+        children: [
+          pageView,
+          // 顶部禁滑条（0.6.7，用户要求）。
+          //
+          // 为什么需要它：`PageView` **不支持"只禁用局部区域"的滑动**，
+          // 而非连播模式下翻页完全由 `PageView` 自己处理，
+          // 外层 `onVerticalDragEnd` 拿不到这次滑动。
+          // 因此在顶部盖一条**只吃竖向拖拽**的透明层：
+          // - 竖向拖拽：本层赢下手势竞争 → `PageView` 不翻页；
+          // - 单击 / 双击：本层不参与，`HitTestBehavior.translucent`
+          //   让事件继续传给下方（单击显隐控件、双击暂停照常）；
+          // - 顶部右上角的推送按钮、左上角集数标签同样不受影响。
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: _topGestureGuard,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onVerticalDragStart: (_) {},
+              onVerticalDragUpdate: (_) {},
+              onVerticalDragEnd: (_) {},
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ],
+      ),
     );
   }
+
+  /// 本次竖向拖拽是否**起点落在顶部禁滑区**（0.6.7）。
+  ///
+  /// 由 `onVerticalDragStart` 置位、`_onVerticalDrag` 读取。
+  bool _dragStartedInGuard = false;
 
   void _toggleAutoNext() {
     if (_closed) return;
@@ -3119,6 +3186,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                         onPointerDown: (event) => _interactions?.pointerDown(
                           event,
                           // 0.2.31：启用上下滑切集（全屏是独立路由，必须由本层承担）。
+                          // 0.6.7：顶部 60px 由 `PlayerInteractions` 内部排除，
+                          // 让系统手势（拉通知栏 / 控制中心）正常生效。
                           swipeEnabled: true,
                           height: MediaQuery.sizeOf(context).height,
                         ),
