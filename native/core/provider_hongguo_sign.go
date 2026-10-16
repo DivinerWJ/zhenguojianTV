@@ -20,6 +20,8 @@ func newHongguoDeviceID() string {
 	return strconv.FormatUint(1_000_000_000_000_000_000+binary.BigEndian.Uint64(random[:])%8_000_000_000_000_000_000, 10)
 }
 
+const hongguoArgusValue = "1"
+
 func signHongguoRequest(request *http.Request, body []byte, now time.Time) {
 	timestamp := uint32(now.Unix())
 	queryHash := md5.Sum([]byte(request.URL.RawQuery))
@@ -44,4 +46,5 @@ func signHongguoRequest(request *http.Request, body []byte, now time.Time) {
 	request.Header.Set("X-Khronos", strconv.FormatUint(uint64(timestamp), 10))
 	request.Header.Set("X-Gorgon", hex.EncodeToString(signature))
 	request.Header.Set("X-SS-Req-Ticket", strconv.FormatInt(now.UnixMilli(), 10))
+	request.Header.Set("X-Argus", hongguoArgusValue)
 }
