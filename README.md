@@ -1,3 +1,6 @@
+# 之前一直没注意有人关注我这个仓库，本来是打算自己用的，今天突然发现居然有Issues和Star，感谢各位的关注
+# 有需求可以在Issues提，能满足的尽量满足，只要不过分吗，更新时间随缘，毕竟不是正业哈哈
+
 # 真果鉴（Zhenguojian）
 
 本仓库用于发布「真果鉴」Android 应用的构建产物（APK），供应用内更新检查使用。
@@ -119,4 +122,5 @@ py scripts\build_android.py --abi arm64-v8a --all-sources
 ## 说明
 
 - 安装包目标架构：`arm64-v8a`（适配极米 Z8X 的 64 位 ARM 处理器）。
+- 现阶段主要针对安卓手机维护，TV版暂停
 - `duanju_app-update.json` 为应用内更新检查所用的版本信息文件。
