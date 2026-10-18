@@ -1477,6 +1477,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     }
     // 0.7.4：自动连播切进来的页面一开始就静默（不弹控件）。
     _autoAdvancing = widget.autoEnter;
+    // 0.7.6：提前读一次系统媒体音量，避免第一次调音量时起点是 0。
+    unawaited(_syncSystemVolume());
     if (widget.active) _prepare();
   }
 
@@ -3587,6 +3589,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   bool _fsGuarded = false;
   Duration _fsDownAt = Duration.zero;
   double _fsStartBrightness = 1;
+
+  /// 音量手势的起点比例（0.7.6）——按下时的系统音量，避免拖动中反复重算基准。
+  double _fsStartSystemRatio = 0;
   Duration _fsStartPosition = Duration.zero;
   Duration? _fsSeekTarget;
   _FsGesture _fsGesture = _FsGesture.none;
@@ -3608,6 +3613,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _fsStartPosition = player?.state.position ?? Duration.zero;
     // 0.7.5（XQ-0108/0109）：清进度预览，并把系统媒体音量同步为起点
     // （用户要求"先同步系统音量，再在此基础上调整"）。
+    // 0.7.6：起点比例用**当前缓存值**立即固定，避免拖动中反复重算基准。
+    _fsStartSystemRatio = _systemVolumeMax <= 0
+        ? 0.5
+        : _systemVolumeIndex / _systemVolumeMax;
     _seekPreview.value = null;
     unawaited(_syncSystemVolume());
   }
@@ -3667,12 +3676,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         );
       case _FsGesture.volume:
         // 0.7.5（XQ-0109）：直接调**系统媒体音量**，不再叠一层应用内音量。
+        //
+        // 0.7.6（用户反馈"滑一点就调太多"）：灵敏度从"0.7 屏高走完"降到
+        // **1.6 屏高走完**（约 2.3 倍更细），以按下时的档位为起点计算。
         final max = _systemVolumeMax <= 0 ? 15 : _systemVolumeMax;
-        final ratio =
-            (_systemVolumeIndex / max - delta.dy / (size.height * .7)).clamp(
-              0.0,
-              1.0,
-            );
+        final ratio = (_fsStartSystemRatio - delta.dy / (size.height * 1.6))
+            .clamp(0.0, 1.0);
         final index = (ratio * max).round();
         if (index != _systemVolumeIndex) {
           _systemVolumeIndex = index;
@@ -3746,8 +3755,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   }
 
   _FsGesture _fsVerticalZone(double x, double width) {
-    if (x < width / 3) return _FsGesture.brightness;
-    if (x > width * 2 / 3) return _FsGesture.volume;
+    // 0.7.6（用户反馈"左右两侧区域太大"）：各占 1/4，中间切集区占一半。
+    if (x < width / 4) return _FsGesture.brightness;
+    if (x > width * 3 / 4) return _FsGesture.volume;
     return _FsGesture.episode;
   }
 
