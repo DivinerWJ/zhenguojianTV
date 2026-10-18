@@ -1384,6 +1384,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 现在：保留加载提示直到真正起播；超过阈值仍不起播则自动恢复一次。
   bool _awaitingFirstFrame = false;
 
+  /// 本集是否已经"出过画面"（0.7.13，修复"连播后加载提示常显"）。
+  ///
+  /// 真机反馈：连播之后「正在加载视频…」一直挂着，直到控件一起隐藏，
+  /// 但视频其实早就正常播放了。原因是 0.7.7 把提示条件里的 `!playing`
+  /// 去掉了，只看 `width <= 0`——而部分流（尤其 m3u8）**始终不报宽高**，
+  /// 于是条件恒真。这里改为"是否出过画面"的显式判定。
+  bool _hasVideoFrame = false;
+
+  /// 起播后位置流推进的轮次（用于兜底认定"画面已出"）。
+  int _frameTicks = 0;
+
   /// 已等待"第一帧"的健康检查轮次（每秒 +1）。
   ///
   /// 用**轮次计数**而不是墙上时钟：既便于测试（可推进假时钟验证），
@@ -1748,24 +1759,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     }
     final duration = state.duration.inMilliseconds;
     final position = state.position.inMilliseconds;
-    // 缓冲不足 / 刚开始播放时不预载，避免与当前播放抢带宽。
+    // 0.7.13 调整（用户反馈"下一个视频还要等 10 多秒"）。
     //
-    // 0.6.9 调整（用户反馈"**感觉没有预加载，每次下一集/下一部都要现加载**"）：
+    // 历史：0.5.0 要求"播放过半或距结束 45 秒"；0.6.9 提前到
+    // "已看 25% 或距结束 2 分钟"。但用户实测仍然要等：
+    //   - 单集 3 分钟以上的剧，25% 意味着要看到 45 秒后才开始预载；
+    //   - 用户常常看到十几秒就滑走，等于**从未预载**。
     //
-    // 原先要求"**播放过半** 或 **距结束不足 45 秒**"才预载：
-    //
-    //     (position < duration ~/ 2 && duration - position > 45000)
-    //
-    // 条件过晚——短剧单集往往只有一两分钟，等满足时常常已经快播完了，
-    // 用户感受到的就是"从来没有预加载"。现在提前到
-    // **已看 25%** 或 **距结束不足 2 分钟**（取先满足者）。
-    //
-    // 说明：提前预载只增加一次"解析播放地址"的轻量请求；
-    // 真正拉流的体积上限由原生核心的 `nativePreloadLimit` 控制，
-    // 因此提前不会显著增加流量。
-    if (duration <= 0 ||
-        position < 3000 ||
-        (position * 4 < duration && duration - position > 120000)) {
+    // 现在改为**开播满 3 秒即预载**：短剧一集才几十秒，早一点准备才可能来得及。
+    // 代价是每集多一次预取（原生侧上限 4MB），Wi-Fi 下可接受；
+    // 移动网络下未点播时 `_autoPlayBlocked` 会拦在前面，不会偷跑流量。
+    if (duration <= 0 || position < 3000) {
       return;
     }
     // 弱网保护（0.5.0，0.6.9 放宽阈值）。
@@ -1942,7 +1946,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           _foreground &&
           !current.state.completed &&
           current.state.playing &&
-          (current.state.width ?? 0) <= 0) {
+          !_hasVideoFrame) {
         _noFrameTicks++;
         if (_noFrameTicks >= _noFrameTicksLimit) {
           _noFrameTicks = 0;
@@ -1992,6 +1996,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     ]) {
       _subscriptions.add(
         stream.listen((_) {
+          // 0.7.13：起播后若播放器一直不报画面尺寸（部分 m3u8 如此），
+          // 就永远撤不掉「正在加载视频…」。这里用"起播状态下位置流持续推进"
+          // 兜底认定画面已出（约 1 秒后），只在首次置位时重建一次。
+          if (!_hasVideoFrame) {
+            final playing = _player?.state.playing ?? false;
+            if (playing) {
+              _frameTicks++;
+              if (_frameTicks >= 10) {
+                _hasVideoFrame = true;
+                if (mounted && !_closed) setState(() {});
+                _refreshFullscreen(immediate: true);
+              }
+            } else {
+              _frameTicks = 0;
+            }
+          }
           // 进度 tick 不再整体 setState（0.3.1 性能修复）。
           //
           // 这里每秒会触发多次，而真正需要跟着走的只有：
@@ -2035,6 +2055,15 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           _awaitingFirstFrame = false;
           _firstFrameTicks = 0;
           if (!_closed) setState(() {});
+        }
+        // 0.7.13：起播时若播放器已经报了宽高，直接认定"画面已出"，
+        // 避免正常播放时「正在加载视频…」一直挂着。
+        if (playing &&
+            !_hasVideoFrame &&
+            (_player?.state.width ?? 0) > 0) {
+          _hasVideoFrame = true;
+          if (mounted && !_closed) setState(() {});
+          _refreshFullscreen(immediate: true);
         }
         // 局域网推送（0.6.4）：播放真正开始后回报发送端。
         if (playing && _autoAdvancing) {
@@ -2083,6 +2112,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     }
     if (ratio <= 0) return;
     if (ratio > 100 || ratio < 0.01) return; // 明显异常，忽略
+    // 0.7.13：拿到有效画面比例 → 认定"画面已出"，立刻撤掉加载提示。
+    if (!_hasVideoFrame) {
+      _hasVideoFrame = true;
+      if (mounted && !_closed) setState(() {});
+    }
     if ((ratio - _aspectRatio).abs() < 0.01) return;
     setState(() => _aspectRatio = ratio);
     _refreshFullscreen();
@@ -2714,6 +2748,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     setState(() {
       _loading = true;
       _error = null;
+      // 0.7.13：新一集重新判断"是否已出画面"。
+      _hasVideoFrame = false;
+      _frameTicks = 0;
     });
     // 0.7.7 修复（真机反馈"流量+全屏自动切下一集纯黑、等很久不播"）：
     // 全屏层是独立路由，只跟随 `_fullscreenRevision` 重建。此前进入加载时
@@ -4018,13 +4055,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                     // 避免全屏时出现纯黑无文字。
                     if (_loading ||
                         (_awaitingFirstFrame && !(_player?.state.playing ?? false)) ||
-                        // 0.7.7：**即使显示在播，只要还没拿到画面尺寸就仍算"没出画面"**。
-                        // 弱网下播放器会先报 playing、首帧迟到很久，此前这里排除了
-                        // playing，导致全屏纯黑且没有任何提示，直到健康检查兜底。
-                        (!_userPaused &&
-                            _ready &&
-                            _error == null &&
-                            (_player?.state.width ?? 0) <= 0))
+                        // 0.7.13：改为判断"是否出过画面"。此前看 `width <= 0`，
+                        // 而部分流始终不报宽高 → 正常播放时提示也一直挂着。
+                        (!_userPaused && _ready && _error == null && !_hasVideoFrame))
                       const IgnorePointer(
                         child: LoadingHint(message: '正在加载视频…', dark: true),
                       )
@@ -4486,14 +4519,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // 就显示加载提示，绝不让用户面对一块没有任何文字的黑屏。
         if (_loading ||
             (_awaitingFirstFrame && !(state?.playing ?? false)) ||
-            // 注意：必须排除 `_userPaused`，否则用户暂停后（此时 width 可能为 0）
-            // 会错误地显示"正在加载视频…"。
-            // 0.7.7：不再要求"未在播"——弱网下行器会先报 playing、画面迟到很久，
-            // 此时也应显示加载提示，而不是纯黑无字。
-            (!_userPaused &&
-                _ready &&
-                _error == null &&
-                (state?.width ?? 0) <= 0))
+            // 注意：必须排除 `_userPaused`，否则用户暂停后会错误地显示加载提示。
+            // 0.7.13：改为判断"是否出过画面"，不再看 `width <= 0`
+            // （部分流始终不报宽高，会让提示在正常播放时一直挂着）。
+            (!_userPaused && _ready && _error == null && !_hasVideoFrame))
           const IgnorePointer(
             child: LoadingHint(message: '正在加载视频…', dark: true),
           )
