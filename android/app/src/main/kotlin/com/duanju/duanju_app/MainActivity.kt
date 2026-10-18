@@ -2,6 +2,7 @@ package com.duanju.duanju_app
 
 import io.flutter.embedding.android.FlutterActivity
 import android.app.UiModeManager
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.content.Context
@@ -47,6 +48,11 @@ class MainActivity : FlutterActivity() {
                         "pac" to (proxy != null && proxy.pacFileUrl != Uri.EMPTY)))
                 } else if (call.method == "networkType") {
                     result.success(networkType())
+                } else if (call.method == "systemVolume") {
+                    result.success(systemVolume())
+                } else if (call.method == "setSystemVolume") {
+                    val index = call.argument<Int>("index") ?: -1
+                    result.success(setSystemVolume(index))
                 } else {
                     result.notImplemented()
                 }
@@ -71,6 +77,36 @@ class MainActivity : FlutterActivity() {
     /** 是否已被系统授予「安装未知应用」权限。 */
     private fun canInstallPackages(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()
+
+    /**
+     * 系统媒体音量（0.7.5）。
+     *
+     * 播放器手势要调的是**系统媒体音量**，不是应用内音量；
+     * 返回 {current, max}，由 Dart 侧按比例换算百分比。
+     */
+    private fun systemVolume(): Map<String, Int> {
+        return try {
+            val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+            val current = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+            mapOf("current" to current, "max" to max)
+        } catch (e: Exception) {
+            mapOf("current" to 0, "max" to 1)
+        }
+    }
+
+    /** 设置系统媒体音量档位（0.7.5）。越界自动收敛，不弹系统音量条。 */
+    private fun setSystemVolume(index: Int): Boolean {
+        return try {
+            val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val target = index.coerceIn(0, max)
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     /**
      * 当前网络的粗略类型（0.7.3）。

@@ -21,6 +21,7 @@ import 'playback_preferences.dart';
 import 'playback_preloader.dart';
 import 'playback_recovery.dart';
 import 'player_interactions.dart';
+import 'system_volume.dart';
 import 'widgets.dart';
 
 /// 全屏横屏分区手势的类型（0.7.2，`XQ-0105`）。
@@ -733,18 +734,18 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     return KeyEventResult.ignored;
   }
 
-  void _jump(int delta, {bool auto = false}) {
-    if (_closed) return;
+  bool _jump(int delta, {bool auto = false}) {
+    if (_closed) return false;
     final target = _index + delta;
-    if (target < 0) return;
+    if (target < 0) return false;
     if (target >= _items.length) {
       // 单剧模式（0.2.29）：只有一部剧，不拉取、不跳转。
-      if (widget.singleDrama != null) return;
+      if (widget.singleDrama != null) return false;
       // 已到末尾：继续拉取下一批，拉不到就停在当前页。
       if (_hasMore && !_loadingMore && !_loading) {
         unawaited(_load(more: true));
       }
-      return;
+      return false;
     }
     // 0.7.4 修复（真机反馈"全屏连播下一部仍会弹控件"）：
     // 播完自动跳下一部时，标记"目标页是自动进来的"，新页面据此不弹控件
@@ -758,8 +759,13 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
         duration: const Duration(milliseconds: 260),
         curve: Curves.easeOutCubic,
       );
+      return true;
     }
+    return false;
   }
+
+  /// 供子页竖滑调用：切换上一部/下一部（0.7.5，`XQ-0108`）。
+  bool _jumpForSwipe(int delta) => _jump(delta);
 
   @override
   Widget build(BuildContext context) {
@@ -909,6 +915,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           videoBuilder: widget.videoBuilder,
           onToggleAutoNext: _toggleAutoNext,
           onFinished: () => _jump(1, auto: true),
+          onSwitchDrama: _jumpForSwipe,
           onOpenDetail: () => _openDetail(drama),
           onEpisodeStateChanged: isCurrent ? _onPageEpisodeStateChanged : null,
           // 单剧模式（0.2.29）：起始集 / 本地文件模式 / 续播位置。
@@ -1140,6 +1147,7 @@ class _FeedPage extends StatefulWidget {
     required this.autoNextEpisode,
     required this.onToggleAutoNext,
     required this.onFinished,
+    this.onSwitchDrama,
     required this.onOpenDetail,
     this.playerFactory,
     this.onEpisodeStateChanged,
@@ -1187,6 +1195,12 @@ class _FeedPage extends StatefulWidget {
 
   /// 当前剧播完且不需要连播本剧时回调（由父级滑到下一部）。
   final VoidCallback onFinished;
+
+  /// 竖滑切上一部/下一部（0.7.5，`XQ-0108`）。
+  ///
+  /// 未开「连播本剧」时，全屏上下滑应切**剧**而不是切集；
+  /// 返回值表示是否真的切了（false = 已到边界，交给界面提示）。
+  final bool Function(int delta)? onSwitchDrama;
   final VoidCallback onOpenDetail;
 
   /// 测试用：注入假播放器。
@@ -1948,9 +1962,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         }
         // 局域网推送（0.6.4）：播放真正开始后回报发送端。
         if (playing && _autoAdvancing) {
-          // 0.7.2（XQ-0104）：自动连播已经起播，解除静默状态。
-          // 之后控件恢复正常的"4 秒后自动隐藏"节奏，不会一直挂在屏幕上。
-          _autoAdvancing = false;
+          // 0.7.5：**不再在起播时清静默标记**。
+          // 全屏要一直静默到用户操作；竖屏本就不看该标记（0.7.5 起非全屏保留控件）。
+          // 这里只刷新一次，让全屏层读到 playing 状态。
           _refreshFullscreen(immediate: true);
         }
         if (playing) {
@@ -2018,10 +2032,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       if (_ready && _error == null) {
         _playerReleased = false;
         unawaited(_player?.play());
-        // 0.7.4：自动连播切进来的页面不主动弹控件。
+        // 0.7.5：非全屏（竖屏）连播保留控件显示；全屏靠 `_autoAdvancing` 静默。
         if (_autoAdvancing) {
-          _hideTimer?.cancel();
-          setState(() => _controlsVisible = false);
+          setState(() => _controlsVisible = true);
+          _scheduleHide();
         } else {
           _showControls();
         }
@@ -2115,6 +2129,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _closed = true;
+    // 0.7.5：进度预览与亮度通知器释放（两者都由本页 State 持有）。
+    _seekPreview.dispose();
     // 局域网推送（0.6.4）：注销本页的"正在播放"注册，并回报接收端已退出。
     LanController.current?.detachPlayback(_lanIdentity);
     if (!_handoffFailed) widget.handoff?.fail('接收端已退出播放');
@@ -2221,6 +2237,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// - 返回值是给 `PlayerInteractions` 的轻提示文案。
   String _swipeEpisode(int direction) {
     if (_closed || !widget.active) return '';
+    // 0.7.5（XQ-0108）：竖滑语义按"连播模式"走——
+    // 单剧模式或已开「连播本剧」→ 剧内切集；否则 → 切上一部/下一部。
+    final inSeries = widget.singleDrama || widget.autoNextEpisode;
+    if (!inSeries) {
+      final switchDrama = widget.onSwitchDrama;
+      if (switchDrama == null) return '';
+      final ok = switchDrama(direction);
+      return ok
+          ? (direction > 0 ? '下一部' : '上一部')
+          : (direction > 0 ? '已经是最后一部了' : '已经是第一部了');
+    }
     if (direction > 0) {
       if (canPlayNextEpisode) {
         unawaited(playNextEpisode());
@@ -2698,10 +2725,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 换集时 `_playEpisode` 会把 `_pendingStart` 清空，避免每集都跳。
       final start = _takeStartPosition();
       // 0.7.4 修复（真机反馈"全屏连播下一集仍会弹控件"）：
-      // **必须在 open 之前快照**。播放器 `open(play: true)` 可能在 await 返回前
-      // 就报告 `playing == true`，从而在下面的 setState 之前把 `_autoAdvancing`
-      // 清掉；若这里直接读字段，本轮就会误判为"需要显示控件"（坑 64 的变体）。
-      final autoAdvance = _autoAdvancing;
+      // 0.7.4 修复：`open()` 可能在 await 返回前就报告 playing，
+      // 因此在 open 之前快照本轮"是否自动连播"，避免被异步回调改掉。
+      // 0.7.5：该快照现在只用于决定**竖屏**是否显示控件（全屏用 `_autoAdvancing`）。
       // 0.7.3（XQ-0107）：移动网络下不自动播放（除非开关开启或本次已手动播过）。
       _autoPlayBlocked = await _resolveAutoPlayBlocked();
       await _openMedia(
@@ -2722,7 +2748,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _loading = false;
         _ready = true;
         // 0.7.2（XQ-0104）：自动连播换集时保持控件收起。
-        _controlsVisible = !autoAdvance;
+        // 0.7.5：**竖屏保留控件显示**（非全屏连播也要能看到剧名/按钮）；
+        // 全屏的静默由 `_autoAdvancing` 在控件条件里拦截，与这里无关。
+        _controlsVisible = true;
         // 0.6.9：`open()` 返回 ≠ 已起播。这里开始"等待第一帧"，
         // 期间**保留加载提示**（避免纯黑无反应），并在健康检查里兜底自动恢复。
         // 注意：有错误时不能显示加载提示，否则会盖住"点击重试"。
@@ -2784,6 +2812,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// - 移动网络 → 拦截（只加载首帧，等用户点一下）；
   /// - 无法判断网络（桌面端 / 通道异常）→ 不拦，避免误伤。
   bool _autoPlayBlocked = false;
+
+  /// 水平滑动时的进度预览（0.7.5，`XQ-0108`）。
+  ///
+  /// 拖动中只改这个值，让进度条跟手；松手才真正 `seek`。
+  /// 单独用 `ValueNotifier` 是为了**只重建进度条**，不重建整层视频。
+  final _seekPreview = ValueNotifier<double?>(null);
+
+  /// 系统媒体音量缓存（0.7.5，`XQ-0109`）。
+  int _systemVolumeIndex = 0;
+  int _systemVolumeMax = 15;
+
+  /// 水平滑动手势（全屏与竖屏共用，0.7.5）。
+  int? _hPointer;
+  double? _hOriginX;
+  Duration _hStart = Duration.zero;
+  Duration? _hTarget;
 
   Future<bool> _resolveAutoPlayBlocked() async {
     // 详情页/下载页的主动点播、本地文件播放：与流量无关，不拦。
@@ -3543,7 +3587,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   bool _fsGuarded = false;
   Duration _fsDownAt = Duration.zero;
   double _fsStartBrightness = 1;
-  double _fsStartVolume = 100;
   Duration _fsStartPosition = Duration.zero;
   Duration? _fsSeekTarget;
   _FsGesture _fsGesture = _FsGesture.none;
@@ -3562,8 +3605,19 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _fsSeekTarget = null;
     _fsStartBrightness = _brightness.value;
     final player = _player;
-    _fsStartVolume = player?.state.volume ?? 100;
     _fsStartPosition = player?.state.position ?? Duration.zero;
+    // 0.7.5（XQ-0108/0109）：清进度预览，并把系统媒体音量同步为起点
+    // （用户要求"先同步系统音量，再在此基础上调整"）。
+    _seekPreview.value = null;
+    unawaited(_syncSystemVolume());
+  }
+
+  /// 读取系统媒体音量并缓存（0.7.5）。
+  Future<void> _syncSystemVolume() async {
+    final volume = await SystemVolume.read();
+    if (volume == null || _closed) return;
+    _systemVolumeIndex = volume.current;
+    _systemVolumeMax = volume.max;
   }
 
   void _fsPointerMove(PointerMoveEvent event, Size size) {
@@ -3576,9 +3630,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _fsMoved = true;
     }
     if (_fsGesture == _FsGesture.none) {
+      // 0.7.5（XQ-0109）：分区**只在横屏全屏**生效；
+      // 竖屏全屏不分区——左右滑调进度、上下滑切集/切部。
       _fsGesture = delta.dx.abs() > delta.dy.abs()
           ? _FsGesture.seek
-          : _fsVerticalZone(_fsOrigin!.dx, size.width);
+          : (_landscape
+                ? _fsVerticalZone(_fsOrigin!.dx, size.width)
+                : _FsGesture.episode);
     }
     switch (_fsGesture) {
       case _FsGesture.seek:
@@ -3595,6 +3653,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           ),
         );
         _fsSeekTarget = target;
+        // 0.7.5（XQ-0108）：拖动过程中让进度条跟手（只重建进度条）。
+        _seekPreview.value = target.inMilliseconds / 1000;
         _interactions?.hint(
           '${seconds >= 0 ? '快进至' : '后退至'} ${formatPosition(target.inSeconds.toDouble())}',
         );
@@ -3606,11 +3666,21 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           ),
         );
       case _FsGesture.volume:
-        final value = (_fsStartVolume - delta.dy / (size.height * .7) * 100)
-            .clamp(0.0, 100.0);
-        final player = _player;
-        if (player != null) unawaited(player.setVolume(value));
-        _interactions?.hint(value <= 0 ? '已静音' : '音量 ${value.round()}%');
+        // 0.7.5（XQ-0109）：直接调**系统媒体音量**，不再叠一层应用内音量。
+        final max = _systemVolumeMax <= 0 ? 15 : _systemVolumeMax;
+        final ratio =
+            (_systemVolumeIndex / max - delta.dy / (size.height * .7)).clamp(
+              0.0,
+              1.0,
+            );
+        final index = (ratio * max).round();
+        if (index != _systemVolumeIndex) {
+          _systemVolumeIndex = index;
+          unawaited(SystemVolume.write(index));
+        }
+        _interactions?.hint(
+          index <= 0 ? '已静音' : '音量 ${(ratio * 100).round()}%',
+        );
       case _FsGesture.episode:
       case _FsGesture.none:
         break;
@@ -3640,6 +3710,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final delta = last - origin;
     switch (gesture) {
       case _FsGesture.seek:
+        // 0.7.5（XQ-0108）：松手清掉预览，再真正跳转。
+        _seekPreview.value = null;
         final player = _player;
         if (target == null || player == null) return;
         if (player.state.duration <= Duration.zero) return;
@@ -3670,6 +3742,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _fsGuarded = false;
     _fsGesture = _FsGesture.none;
     _fsSeekTarget = null;
+    _seekPreview.value = null;
   }
 
   _FsGesture _fsVerticalZone(double x, double width) {
@@ -3681,6 +3754,67 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   void _setBrightness(double value) {
     _brightness.value = value;
     _interactions?.hint('亮度 ${(value * 100).round()}%');
+  }
+
+  // ===== 竖屏水平滑调进度（0.7.5，XQ-0108）=====
+  //
+  // 竖屏没有左右方向的手势占用（翻页是上下滑），因此可以在同一层叠加：
+  // 水平主导 → 调进度；竖直主导 → 仍交给 `PlayerInteractions` 切集/翻页。
+  double? _hOriginY;
+
+  void _hPointerDown(PointerDownEvent event) {
+    if (event.buttons != kPrimaryButton || _hPointer != null) return;
+    _hPointer = event.pointer;
+    _hOriginX = event.localPosition.dx;
+    _hOriginY = event.localPosition.dy;
+    _hStart = _player?.state.position ?? Duration.zero;
+    _hTarget = null;
+    _seekPreview.value = null;
+  }
+
+  void _hPointerMove(PointerMoveEvent event, double width) {
+    if (_hPointer != event.pointer || _hOriginX == null) return;
+    final player = _player;
+    if (player == null || player.state.duration <= Duration.zero) return;
+    final dx = event.localPosition.dx - _hOriginX!;
+    final dy = event.localPosition.dy - (_hOriginY ?? event.localPosition.dy);
+    // 只在明确"水平主导"时才接管，避免和上下滑切集抢手势。
+    if (dx.abs() < 24 || dx.abs() <= dy.abs() * 1.2) return;
+    final seconds = dx / width * _fsSeekSecondsPerWidth;
+    final target = Duration(
+      milliseconds:
+          (_hStart + Duration(milliseconds: (seconds * 1000).round()))
+              .inMilliseconds
+              .clamp(0, player.state.duration.inMilliseconds),
+    );
+    _hTarget = target;
+    _seekPreview.value = target.inMilliseconds / 1000;
+    _interactions?.hint(
+      '${seconds >= 0 ? '快进至' : '后退至'} ${formatPosition(target.inSeconds.toDouble())}',
+    );
+  }
+
+  void _hPointerUp(PointerUpEvent event) {
+    if (_hPointer != event.pointer) return;
+    final target = _hTarget;
+    _hPointer = null;
+    _hOriginX = null;
+    _hOriginY = null;
+    _hTarget = null;
+    _seekPreview.value = null;
+    final player = _player;
+    if (target == null || player == null) return;
+    if (player.state.duration <= Duration.zero) return;
+    unawaited(player.seek(target));
+    _showControls();
+  }
+
+  void _hPointerCancel() {
+    _hPointer = null;
+    _hOriginX = null;
+    _hOriginY = null;
+    _hTarget = null;
+    _seekPreview.value = null;
   }
 
   /// 全屏层内容：视频铺满 + 手势 + 可自动隐藏的简洁控件。
@@ -3875,7 +4009,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                   child: Column(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Row(
+                                      ValueListenableBuilder<double?>(
+                                        valueListenable: _seekPreview,
+                                        builder: (context, preview, _) => Row(
                                         children: [
                                           IconButton(
                                             key: const ValueKey(
@@ -3893,7 +4029,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                             ),
                                           ),
                                           Text(
-                                            '${formatPosition((_seekValue ?? position / 1000))} / ${formatPosition(duration / 1000)}',
+                                            '${formatPosition(((preview ?? _seekValue) ?? position / 1000))} / ${formatPosition(duration / 1000)}',
                                             style: const TextStyle(
                                               color: Colors.white70,
                                               fontSize: 12,
@@ -3909,7 +4045,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                                     'fullscreen-progress',
                                                   ),
                                                   value:
-                                                      (_seekValue ??
+                                                      ((preview ?? _seekValue) ??
                                                               position / 1000)
                                                           .clamp(0, total),
                                                   max: total,
@@ -3967,6 +4103,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                             ),
                                           ),
                                         ],
+                                      ),
                                       ),
                                       Row(
                                         mainAxisAlignment:
@@ -4137,8 +4274,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final boosting = _interactions?.boosting ?? false;
     final visible =
         !boosting &&
-        // 0.7.2（XQ-0104）：自动连播换集期间不弹整套控件（只留加载提示）。
-        !_autoAdvancing &&
+        // 0.7.5：**非全屏（竖屏）连播保留控件显示**（用户明确要求），
+        // 静默只在全屏层生效（见全屏 `controlsVisible` 的 `!_autoAdvancing`）。
         (_controlsVisible ||
             _panelOpen ||
             _loading ||
@@ -4163,19 +4300,32 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           const ColoredBox(color: Colors.black)
         else
           const ColoredBox(color: Colors.black),
-        // 手势层：单击显隐控件，双击暂停，长按 3 倍速，上下滑切集。
+        // 手势层：单击显隐控件，双击暂停，长按 3 倍速，上下滑切集；
+        // 0.7.5（XQ-0108）：水平滑调进度（与上下滑互斥判定）。
         Positioned.fill(
           child: Listener(
             behavior: HitTestBehavior.opaque,
-            onPointerDown: (event) => _interactions?.pointerDown(
-              event,
-              // 0.2.31：启用上下滑切集（方案 B：只切集、不切剧）。
-              swipeEnabled: true,
-              height: MediaQuery.sizeOf(context).height,
-            ),
-            onPointerMove: (event) => _interactions?.pointerMove(event),
-            onPointerUp: (event) => _interactions?.pointerUp(event),
-            onPointerCancel: (event) => _interactions?.pointerCancel(event),
+            onPointerDown: (event) {
+              _interactions?.pointerDown(
+                event,
+                // 0.2.31：启用上下滑切集（方案 B：只切集、不切剧）。
+                swipeEnabled: true,
+                height: MediaQuery.sizeOf(context).height,
+              );
+              _hPointerDown(event);
+            },
+            onPointerMove: (event) {
+              _interactions?.pointerMove(event);
+              _hPointerMove(event, MediaQuery.sizeOf(context).width);
+            },
+            onPointerUp: (event) {
+              _interactions?.pointerUp(event);
+              _hPointerUp(event);
+            },
+            onPointerCancel: (event) {
+              _interactions?.pointerCancel(event);
+              _hPointerCancel();
+            },
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _tap,
@@ -4383,7 +4533,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               _titleBar(),
-                              Row(
+                              ValueListenableBuilder<double?>(
+                                valueListenable: _seekPreview,
+                                builder: (context, preview, _) => Row(
                                 children: [
                                   IconButton(
                                     key: const ValueKey('feed-play-toggle'),
@@ -4399,7 +4551,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                     ),
                                   ),
                                   Text(
-                                    '${formatPosition((_seekValue ?? position / 1000))} / ${formatPosition(duration / 1000)}',
+                                    '${formatPosition(((preview ?? _seekValue) ?? position / 1000))} / ${formatPosition(duration / 1000)}',
                                     style: const TextStyle(
                                       color: Colors.white70,
                                       fontSize: 12,
@@ -4413,7 +4565,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                       child: Slider(
                                         key: const ValueKey('feed-progress'),
                                         value:
-                                            (_seekValue ?? position / 1000)
+                                            ((preview ?? _seekValue) ?? position / 1000)
                                                 .clamp(0, total),
                                         max: total,
                                         secondaryTrackValue:
@@ -4463,6 +4615,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                     ),
                                   ),
                                 ],
+                              ),
                               ),
                               Row(
                                 mainAxisAlignment:
