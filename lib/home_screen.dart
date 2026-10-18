@@ -576,7 +576,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       onCatalogChanged: _catalogUpdated,
     )..addListener(_updateChanged);
     _updater.startWatching();
-    // 剧库自适应自动更新：默认 30 分钟，连续无新剧后降级为 6 小时。
+    // 剧库自适应自动更新：打开 App 后延迟 2 分钟，默认每 2 小时一轮，
+    // 连续无新剧后降级为 6 小时；设置里可完全关闭。
     _autoUpdater = CatalogAutoUpdater(widget.repository, widget.store)
       ..addListener(_autoUpdateChanged)
       ..start();

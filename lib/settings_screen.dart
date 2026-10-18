@@ -231,6 +231,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 SwitchListTile(
+                  value: widget.store.autoUpdateCatalog,
+                  title: const Text('后台自动更新剧库'),
+                  subtitle: const Text(
+                    '开启后每 2 小时在后台检查一次新剧（连续没有新剧会延长到 6 小时）；'
+                    '关闭后不再自动更新，只在「站源管理」里手动更新。',
+                  ),
+                  onChanged: _busy
+                      ? null
+                      : (value) => saveUserChange(
+                          context,
+                          () => widget.store.setAutoUpdateCatalog(value),
+                        ),
+                ),
+                SwitchListTile(
                   value: widget.store.autoExport,
                   title: const Text('下载完成后自动导出 Emby'),
                   subtitle: const Text(
