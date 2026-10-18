@@ -16,6 +16,7 @@ import 'lan_models.dart';
 import 'lan_screen.dart';
 import 'local_store.dart';
 import 'models.dart';
+import 'network_state.dart';
 import 'playback_preferences.dart';
 import 'playback_preloader.dart';
 import 'playback_recovery.dart';
@@ -152,6 +153,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   final _controller = PageController();
   final _focus = FocusNode(debugLabel: 'vertical-feed');
   final _random = math.Random();
+
+  /// 本次会话是否手动点过播放（0.7.3，`XQ-0107`）。
+  ///
+  /// 放在父级是为了**跨页共享**：移动网络下第一页要用户点一下才播；
+  /// 点过之后，后续切集/切部不再拦截（用户明确选"本次继续自动连播"）。
+  final _manualPlayed = ValueNotifier<bool>(false);
 
   List<Drama> _items = [];
   final _seen = <String>{};
@@ -319,6 +326,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     unawaited(widget.repository.cancelFeedCatalog());
     // 预载器释放（0.6.9）：取消挂起请求并释放已预取的会话，避免会话泄漏。
     _preloader.dispose();
+    _manualPlayed.dispose();
     _controller.dispose();
     _focus.dispose();
     super.dispose();
@@ -881,6 +889,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           repository: widget.repository,
           store: widget.store,
           preloader: _preloader,
+          manualPlayed: _manualPlayed,
           active: widget.active && isCurrent,
           autoNextEpisode: _autoNextEpisode,
           playerFactory: widget.playerFactory,
@@ -1112,6 +1121,7 @@ class _FeedPage extends StatefulWidget {
     required this.repository,
     required this.store,
     required this.preloader,
+    required this.manualPlayed,
     required this.active,
     required this.autoNextEpisode,
     required this.onToggleAutoNext,
@@ -1146,6 +1156,10 @@ class _FeedPage extends StatefulWidget {
   /// `resolve(甲剧1)` —— 预载**白做还被释放**，用户感觉"完全没有预加载"。
   /// 改为由父级创建并传入后，预载结果可跨页复用。
   final PlaybackPreloader preloader;
+
+  /// 本次会话是否手动点过播放（0.7.3，`XQ-0107`，由父级持有、跨页共享）。
+  final ValueNotifier<bool> manualPlayed;
+
   final bool active;
 
   /// true = 播完自动播本剧下一集；false = 播完跳到下一部。
@@ -1622,6 +1636,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 不预载的情况：本地文件模式、单剧模式、加载中/出错、当前不在播放。
   void _syncPreload() {
     if (_closed) return;
+    // 0.7.3（XQ-0107）：移动网络下不自动播放时也不预加载，避免后台跑流量。
+    if (_autoPlayBlocked) {
+      _preloader.pause();
+      return;
+    }
     // 本地文件不预载（无网络解析成本）。
     // 0.6.9：**不 clear** 共享预载器（它可能正持有别的页面要用的结果）。
     if (widget.localOnly) return;
@@ -2223,6 +2242,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _takeOverHandoff();
     _interactions?.cancel();
     final willPlay = !player.state.playing;
+    if (willPlay) {
+      // 0.7.3（XQ-0107）：用户主动点了播放 → 本次会话内不再拦截自动播放，
+      // 并恢复预加载（移动网络下此前为了省流量暂停了预载）。
+      widget.manualPlayed.value = true;
+      _autoPlayBlocked = false;
+    }
     // 0.6.4 修复（用户反馈"暂停时会多走一帧才停下来"）：
     // 原先统一用 `playOrPause()`，它内部走的是 mpv 的
     // `_command(['cycle','pause'])` —— **"切换"命令**，需要 mpv 先读当前状态再翻转，
@@ -2633,7 +2658,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 续播位置（0.2.29）：只有首次打开、且传入了非零位置时才生效；
       // 换集时 `_playEpisode` 会把 `_pendingStart` 清空，避免每集都跳。
       final start = _takeStartPosition();
-      await _openMedia(player, plan, start);
+      // 0.7.3（XQ-0107）：移动网络下不自动播放（除非开关开启或本次已手动播过）。
+      _autoPlayBlocked = await _resolveAutoPlayBlocked();
+      await _openMedia(
+        player,
+        plan,
+        start,
+        play: widget.active && !_autoPlayBlocked,
+      );
       // 0.3.5：open 之后再次确认播放器仍然有效
       // （用户可能在加载中滑走页面，此时播放器已被释放）。
       if (!_attemptAlive(player)) return;
@@ -2693,12 +2725,35 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 期间用户可能已经滑走页面、播放器已被释放；此时若继续调用
   /// `open()`，media_kit 在 release 包中断言被移除，会**静默什么都不做**，
   /// 页面就永久黑屏。
-  Future<void> _openMedia(Player player, PlaybackPlan plan, Duration? start) {
+  /// 移动网络下是否禁止自动起播（0.7.3，`XQ-0107`）。
+  ///
+  /// 每次换集/换剧时按"当前网络类型 + 设置开关 + 是否手动播过"重新判定：
+  /// - 开关开启 → 不拦（与 Wi-Fi 一致）；
+  /// - 本次已手动播过 → 不拦；
+  /// - 移动网络 → 拦截（只加载首帧，等用户点一下）；
+  /// - 无法判断网络（桌面端 / 通道异常）→ 不拦，避免误伤。
+  bool _autoPlayBlocked = false;
+
+  Future<bool> _resolveAutoPlayBlocked() async {
+    // 详情页/下载页的主动点播、本地文件播放：与流量无关，不拦。
+    if (widget.singleDrama || widget.localOnly) return false;
+    if (widget.store.autoPlayOnMobile) return false;
+    if (widget.manualPlayed.value) return false;
+    final kind = await NetworkState.current();
+    return kind == NetworkKind.mobile;
+  }
+
+  Future<void> _openMedia(
+    Player player,
+    PlaybackPlan plan,
+    Duration? start, {
+    required bool play,
+  }) {
     return _serialize(() async {
       if (!_attemptAlive(player)) return;
       await player.open(
         Media(plan.url, httpHeaders: plan.headers, start: start),
-        play: widget.active,
+        play: play,
       );
     });
   }

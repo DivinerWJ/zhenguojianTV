@@ -33,6 +33,7 @@ class LocalSnapshot {
     'autoExport',
     'exportPosters',
     'autoUpdateCatalog',
+    'autoPlayOnMobile',
   };
   final SharedPreferences preferences;
   Map<String, Object> _values = {};

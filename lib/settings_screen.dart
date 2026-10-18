@@ -245,6 +245,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                 ),
                 SwitchListTile(
+                  key: const ValueKey('setting-auto-play-mobile'),
+                  value: widget.store.autoPlayOnMobile,
+                  title: const Text('移动网络下自动播放'),
+                  subtitle: const Text(
+                    '关闭后，用流量刷剧时不会自动播放，需点一下画面才开始（Wi-Fi 不受影响）；'
+                    '开启后与 Wi-Fi 一样，刷到就播。',
+                  ),
+                  onChanged: _busy
+                      ? null
+                      : (value) => saveUserChange(
+                          context,
+                          () => widget.store.setAutoPlayOnMobile(value),
+                        ),
+                ),
+                SwitchListTile(
                   value: widget.store.autoExport,
                   title: const Text('下载完成后自动导出 Emby'),
                   subtitle: const Text(
