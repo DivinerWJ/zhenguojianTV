@@ -148,7 +148,8 @@ class VerticalFeedScreen extends StatefulWidget {
   State<VerticalFeedScreen> createState() => _VerticalFeedScreenState();
 }
 
-class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
+class _VerticalFeedScreenState extends State<VerticalFeedScreen>
+    with SingleTickerProviderStateMixin {
   /// 红果官方推荐流支持的分类（三类混合随机）。
   static const _hongguoGenres = ['short_play', 'comic_series', 'ai_series'];
 
@@ -168,6 +169,16 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   /// 一旦滑到第 2 个视频，就与"手动点过播放"同等对待，此后全部放开
   /// （双击首页刷新随机也不得重新拦截）。
   final _unlocked = ValueNotifier<bool>(false);
+
+  /// 连播本剧切集滑动动画（0.7.14，`XQ-0123`）。
+  ///
+  /// 用户要求"和连播下一部一样的动画"：手指拖动时画面跟着走，松手滑够就翻过去。
+  /// `PageView` 的页是"一部剧一页"，翻不了"同一部剧的下一集"，
+  /// 所以这里自己实现一套位移：拖动跟手、松手回弹或滑出，滑出结束再切集。
+  late final AnimationController _slideAnimation;
+  final _slideOffset = ValueNotifier<double>(0);
+  Animation<double>? _slideCurve;
+  bool _slideStartedInGuard = false;
 
   /// 「因自动连播而进入」的目标页索引（0.7.4）。
   ///
@@ -283,6 +294,11 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     widget.refreshSignal?.addListener(_onRefreshSignal);
     // 全流共享预载器（0.6.9）：由本页创建、传给所有子页，并在 dispose 释放。
     _preloader = PlaybackPreloader(widget.repository);
+    // 0.7.14（XQ-0123）：连播本剧的切集滑动动画驱动。
+    _slideAnimation = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    )..addListener(_onSlideTick);
     // 单剧模式（0.2.29）：详情页/下载页进入时只播指定的一部剧，
     // 直接构造单元素列表，跳过推荐流拉取。
     final single = widget.singleDrama;
@@ -343,6 +359,8 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     _preloader.dispose();
     _manualPlayed.dispose();
     _unlocked.dispose();
+    _slideAnimation.dispose();
+    _slideOffset.dispose();
     _controller.dispose();
     _focus.dispose();
     super.dispose();
@@ -656,21 +674,16 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   bool _inTopGuard(Offset localPosition) =>
       localPosition.dy < _topGestureGuard;
 
-  void _onVerticalDrag(DragEndDetails details) {
-    if (_closed) return;
-    // 0.6.7：从顶部禁滑区开始的滑动**不切集**，
-    // 让系统手势（拉通知栏 / 控制中心）正常生效。
-    if (_dragStartedInGuard) {
-      _dragStartedInGuard = false;
-      return;
-    }
-    final velocity = details.primaryVelocity ?? 0;
-    if (velocity == 0) return;
+
+  /// 真正执行"上下滑"的语义（0.7.14 从 `_onVerticalDrag` 拆出，供动画结束时调用）。
+  ///
+  /// [direction]：`1` = 上滑（下一集），`-1` = 下滑（上一集）。
+  void _commitVerticalSwipe(int direction) {
     // 单剧模式（0.2.29，用户方案 C）：
     // 只在本剧内滑动。到边界（第一集/最后一集）时**不切剧**，
     // 只给一句提示，避免用户莫名其妙地跳到别的剧去。
     final single = widget.singleDrama != null;
-    if (velocity < 0) {
+    if (direction > 0) {
       // 向上滑 = 下一集。
       if (_autoNextEpisode) {
         final playNext = _pagePlayNextEpisode;
@@ -703,6 +716,70 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
       }
       _jump(-1);
     }
+  }
+
+  void _onSlideTick() => _slideOffset.value = _slideCurve!.value;
+
+  /// 开始跟手拖动（仅「连播本剧」模式注册）。
+  void _onSlideStart(DragStartDetails details) {
+    if (_closed || _slideAnimation.isAnimating) return;
+    _slideStartedInGuard = _inTopGuard(details.localPosition);
+    _slideOffset.value = 0;
+  }
+
+  /// 跟手移动：画面位移 = 手指位移，范围限制在一屏以内。
+  void _onSlideUpdate(DragUpdateDetails details) {
+    if (_closed || _slideStartedInGuard || _slideAnimation.isAnimating) return;
+    final height = MediaQuery.sizeOf(context).height;
+    _slideOffset.value = (_slideOffset.value + details.delta.dy).clamp(
+      -height,
+      height,
+    );
+  }
+
+  /// 松手：滑够一半屏高或够快就继续滑出并切集，否则回弹。
+  void _onSlideEnd(DragEndDetails details) {
+    if (_closed) return;
+    if (_slideStartedInGuard) {
+      _slideStartedInGuard = false;
+      _slideOffset.value = 0;
+      return;
+    }
+    if (_slideAnimation.isAnimating) return;
+    final height = MediaQuery.sizeOf(context).height;
+    final offset = _slideOffset.value;
+    final velocity = details.primaryVelocity ?? 0;
+    final far = offset.abs() > height * 0.25;
+    final fast = velocity.abs() > 600;
+    // 方向优先看甩动速度，其次看拖到了哪一侧。
+    final int direction;
+    if (fast) {
+      direction = velocity < 0 ? 1 : -1;
+    } else if (far) {
+      direction = offset < 0 ? 1 : -1;
+    } else {
+      direction = 0;
+    }
+    if (direction == 0) {
+      _runSlide(end: 0, direction: 0);
+    } else {
+      _runSlide(end: direction > 0 ? -height : height, direction: direction);
+    }
+  }
+
+  /// 跑一段位移动画：[end] 为目标位移，[direction] 非 0 时在动画结束后切集。
+  ///
+  /// 滑出结束时的画面已经全部在屏幕外（露出黑底），此时立刻切集并把
+  /// 位移复位到 0，用户看不到"跳回去"，视觉上就是一页翻过去。
+  void _runSlide({required double end, required int direction}) {
+    _slideCurve = Tween<double>(begin: _slideOffset.value, end: end).animate(
+      CurvedAnimation(parent: _slideAnimation, curve: Curves.easeOutCubic),
+    );
+    _slideAnimation.forward(from: 0).whenCompleteOrCancel(() {
+      if (_closed || !mounted) return;
+      _slideOffset.value = 0;
+      if (direction != 0) _commitVerticalSwipe(direction);
+    });
   }
 
   /// 在连播本剧模式下因到达首/尾集而切部时，自动复位为「连播下一部」。
@@ -972,17 +1049,32 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     // 表现为"重新开始加载视频、加载不成功、无法上下滑动"，
     // 同时 PageView 位置归零，表现为"跳回列表第一部"。
     // 正确做法：树形结构恒定，只改 physics 与是否响应手势。
-    return GestureDetector(
+    return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
       // 只有「连播本剧」模式才接管手势（与上面 physics 条件保持一致）。
       //
-      // 0.6.7：改用 Start/End 组合，以便记录**起点位置**并套用顶部禁滑区。
-      // 原先只有 `onVerticalDragEnd`，拿不到触点坐标，
-      // 无法判断"这次滑动是否从顶部开始"。
-      onVerticalDragStart: _autoNextEpisode
-          ? (details) => _dragStartedInGuard = _inTopGuard(details.localPosition)
-          : null,
-      onVerticalDragEnd: _autoNextEpisode ? _onVerticalDrag : null,
+      // 0.7.14（XQ-0123）：改用「跟手拖动 + 松手回弹/滑出」，手感与连播下一部一致。
+      // 用 `RawGestureDetector` 而非 `GestureDetector` 的 onVerticalDrag*，是为了能设
+      // `dragStartBehavior: DragStartBehavior.down`：起手前那段位移也要计入，
+      // 否则 `start` 行为会把它丢掉，出现"拖了很远却不切集"。
+      gestures: _autoNextEpisode
+          ? <Type, GestureRecognizerFactory>{
+              VerticalDragGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                    VerticalDragGestureRecognizer
+                  >(
+                    () => VerticalDragGestureRecognizer(),
+                    (instance) => instance
+                      ..dragStartBehavior = DragStartBehavior.down
+                      ..gestureSettings = const DeviceGestureSettings(
+                        touchSlop: 12,
+                      )
+                      ..onStart = _onSlideStart
+                      ..onUpdate = _onSlideUpdate
+                      ..onEnd = _onSlideEnd,
+                  ),
+            }
+          : const <Type, GestureRecognizerFactory>{},
       child: Stack(
         // 必须 `expand`：默认的 `loose` 会让非定位子项（`pageView`）
         // 拿到"最小 0"的约束，`PageView` 可能塌缩成 0 高度而整页空白。
@@ -994,11 +1086,20 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           // 拖动识别器会**先**赢下竞技场，页面就开始跟手翻——
           // 页内的水平识别器（阈值 6）再赢也没用。抬高后水平手势总是先到，
           // 纯竖直滑动（位移远超 60）仍照常翻页。
-          MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              gestureSettings: const DeviceGestureSettings(touchSlop: 60),
+          // 0.7.14（XQ-0123）：整页跟着手指上下位移，滑出后切集。
+          // 用 `ValueListenableBuilder` 只重建这一层，避免每帧重建整页。
+          ValueListenableBuilder<double>(
+            valueListenable: _slideOffset,
+            builder: (context, offset, child) => Transform.translate(
+              offset: Offset(0, offset),
+              child: child,
             ),
-            child: pageView,
+            child: MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                gestureSettings: const DeviceGestureSettings(touchSlop: 60),
+              ),
+              child: pageView,
+            ),
           ),
           // 顶部禁滑条（0.6.7，用户要求）。
           //
@@ -1028,11 +1129,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     );
   }
 
-  /// 本次竖向拖拽是否**起点落在顶部禁滑区**（0.6.7）。
-  ///
-  /// 由 `onVerticalDragStart` 置位、`_onVerticalDrag` 读取。
-  bool _dragStartedInGuard = false;
-
+  /// 切换「连播本剧」开关。
   void _toggleAutoNext() {
     if (_closed) return;
     setState(() => _autoNextEpisode = !_autoNextEpisode);
@@ -1383,6 +1480,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   ///
   /// 现在：保留加载提示直到真正起播；超过阈值仍不起播则自动恢复一次。
   bool _awaitingFirstFrame = false;
+
+  /// 上次竖向滑切集的时间（0.7.14，用于两入口去重）。
+  DateTime _lastSwipeCommit = DateTime(2000);
 
   /// 本集是否已经"出过画面"（0.7.13，修复"连播后加载提示常显"）。
   ///
@@ -2355,6 +2455,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// - 返回值是给 `PlayerInteractions` 的轻提示文案。
   String _swipeEpisode(int direction) {
     if (_closed || !widget.active) return '';
+    // 0.7.14（XQ-0123）：竖直滑有两个入口（父级跟手滑动 + 播放器手势判定），
+    // 一次上滑可能两边都响应 → 跳两集。这里做 400ms 去重，只认第一次。
+    final now = DateTime.now();
+    if (now.difference(_lastSwipeCommit) < const Duration(milliseconds: 400)) {
+      return '';
+    }
+    _lastSwipeCommit = now;
     // 0.7.5（XQ-0108）：竖滑语义按"连播模式"走——
     // 单剧模式或已开「连播本剧」→ 剧内切集；否则 → 切上一部/下一部。
     final inSeries = widget.singleDrama || widget.autoNextEpisode;
@@ -4462,7 +4569,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               _interactions?.pointerDown(
                 event,
                 // 0.2.31：启用上下滑切集（方案 B：只切集、不切剧）。
-                swipeEnabled: true,
+                //
+                // 0.7.14（XQ-0123）：连播本剧的竖滑改由父级"跟手滑动动画"
+                // 统一处理，这里必须关掉，否则一次上滑会被两个入口各切一次
+                // （动画结束后再切一集）。其余模式照旧。
+                swipeEnabled: !widget.autoNextEpisode,
                 height: MediaQuery.sizeOf(context).height,
               );
               _hPointerDown(event);
