@@ -975,7 +975,18 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
         // 拿到"最小 0"的约束，`PageView` 可能塌缩成 0 高度而整页空白。
         fit: StackFit.expand,
         children: [
-          pageView,
+          // 0.7.11 修复（真机反馈"横屏视频非全屏时左右滑仍会上下翻"）：
+          // 提高 `PageView` 的翻页触摸阈值（默认 18 → 36）。
+          // 真实手指"左右滑"往往先有十几像素的竖直位移，默认阈值下纵向
+          // 拖动识别器会**先**赢下竞技场，页面就开始跟手翻——
+          // 页内的水平识别器（阈值 6）再赢也没用。抬高后水平手势总是先到，
+          // 纯竖直滑动（位移远超 36）仍照常翻页。
+          MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              gestureSettings: const DeviceGestureSettings(touchSlop: 36),
+            ),
+            child: pageView,
+          ),
           // 顶部禁滑条（0.6.7，用户要求）。
           //
           // 为什么需要它：`PageView` **不支持"只禁用局部区域"的滑动**，
