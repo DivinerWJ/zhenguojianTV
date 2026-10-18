@@ -160,6 +160,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   /// 点过之后，后续切集/切部不再拦截（用户明确选"本次继续自动连播"）。
   final _manualPlayed = ValueNotifier<bool>(false);
 
+  /// 「因自动连播而进入」的目标页索引（0.7.4）。
+  ///
+  /// 播完自动跳下一部时设置；被跳到的页面据此**一开始就静默**（不弹控件）。
+  /// 用户手动切页时置空。
+  int? _autoEnterIndex;
+
   List<Drama> _items = [];
   final _seen = <String>{};
   bool _loading = true;
@@ -727,7 +733,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     return KeyEventResult.ignored;
   }
 
-  void _jump(int delta) {
+  void _jump(int delta, {bool auto = false}) {
     if (_closed) return;
     final target = _index + delta;
     if (target < 0) return;
@@ -740,6 +746,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
       }
       return;
     }
+    // 0.7.4 修复（真机反馈"全屏连播下一部仍会弹控件"）：
+    // 播完自动跳下一部时，标记"目标页是自动进来的"，新页面据此不弹控件
+    // （与自动切集同一套静默逻辑）。用户手动切页时清掉标记。
+    setState(() {
+      _autoEnterIndex = auto ? target : null;
+    });
     if (_controller.hasClients) {
       _controller.animateToPage(
         target,
@@ -890,12 +902,13 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           store: widget.store,
           preloader: _preloader,
           manualPlayed: _manualPlayed,
+          autoEnter: index == _autoEnterIndex,
           active: widget.active && isCurrent,
           autoNextEpisode: _autoNextEpisode,
           playerFactory: widget.playerFactory,
           videoBuilder: widget.videoBuilder,
           onToggleAutoNext: _toggleAutoNext,
-          onFinished: () => _jump(1),
+          onFinished: () => _jump(1, auto: true),
           onOpenDetail: () => _openDetail(drama),
           onEpisodeStateChanged: isCurrent ? _onPageEpisodeStateChanged : null,
           // 单剧模式（0.2.29）：起始集 / 本地文件模式 / 续播位置。
@@ -1122,6 +1135,7 @@ class _FeedPage extends StatefulWidget {
     required this.store,
     required this.preloader,
     required this.manualPlayed,
+    this.autoEnter = false,
     required this.active,
     required this.autoNextEpisode,
     required this.onToggleAutoNext,
@@ -1159,6 +1173,11 @@ class _FeedPage extends StatefulWidget {
 
   /// 本次会话是否手动点过播放（0.7.3，`XQ-0107`，由父级持有、跨页共享）。
   final ValueNotifier<bool> manualPlayed;
+
+  /// 本页是否由「自动连播」切进来（0.7.4）。
+  ///
+  /// true 时本页一开始就静默（不弹控件），直到用户操作或起播后恢复常态。
+  final bool autoEnter;
 
   final bool active;
 
@@ -1442,6 +1461,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _failHandoff('接收用户已变更，推送已取消');
       }
     }
+    // 0.7.4：自动连播切进来的页面一开始就静默（不弹控件）。
+    _autoAdvancing = widget.autoEnter;
     if (widget.active) _prepare();
   }
 
@@ -1805,6 +1826,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       if (_closed || _playerReleased || !widget.active || _error != null) {
         return;
       }
+      // 0.7.4：移动网络下"按设计不自动播"不是故障，健康检查整体跳过，
+      // 避免反复 `_recover()` 切换备用线路。
+      if (_autoPlayBlocked) {
+        _firstFrameTicks = 0;
+        _stalledTicks = 0;
+        return;
+      }
       final current = _player;
       if (current == null) return;
       // 兜底一：地址已交出但迟迟不起播（弱网 / 服务端迟迟不给数据）。
@@ -1979,13 +2007,24 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(covariant _FeedPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 0.7.4：目标页可能在"自动连播跳转"之前就被 PageView 预构建了，
+    // 那时 `initState` 读到的 `autoEnter` 还是 false。这里补一次。
+    if (widget.autoEnter && !oldWidget.autoEnter && !_ready) {
+      _autoAdvancing = true;
+    }
     if (widget.active && !oldWidget.active) {
       // 成为当前页：重新上报能否切下一集，避免沿用上一页的状态。
       _reportEpisodeState();
       if (_ready && _error == null) {
         _playerReleased = false;
         unawaited(_player?.play());
-        _showControls();
+        // 0.7.4：自动连播切进来的页面不主动弹控件。
+        if (_autoAdvancing) {
+          _hideTimer?.cancel();
+          setState(() => _controlsVisible = false);
+        } else {
+          _showControls();
+        }
       } else if (_playerReleased) {
         // 0.3.5：本页曾经被滑走并放弃了一次加载，这里重新建播放器接着加载，
         // 不需要用户"切到别的集再切回来"来绕过。
@@ -2658,6 +2697,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 续播位置（0.2.29）：只有首次打开、且传入了非零位置时才生效；
       // 换集时 `_playEpisode` 会把 `_pendingStart` 清空，避免每集都跳。
       final start = _takeStartPosition();
+      // 0.7.4 修复（真机反馈"全屏连播下一集仍会弹控件"）：
+      // **必须在 open 之前快照**。播放器 `open(play: true)` 可能在 await 返回前
+      // 就报告 `playing == true`，从而在下面的 setState 之前把 `_autoAdvancing`
+      // 清掉；若这里直接读字段，本轮就会误判为"需要显示控件"（坑 64 的变体）。
+      final autoAdvance = _autoAdvancing;
       // 0.7.3（XQ-0107）：移动网络下不自动播放（除非开关开启或本次已手动播过）。
       _autoPlayBlocked = await _resolveAutoPlayBlocked();
       await _openMedia(
@@ -2678,15 +2722,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _loading = false;
         _ready = true;
         // 0.7.2（XQ-0104）：自动连播换集时保持控件收起。
-        _controlsVisible = !_autoAdvancing;
+        _controlsVisible = !autoAdvance;
         // 0.6.9：`open()` 返回 ≠ 已起播。这里开始"等待第一帧"，
         // 期间**保留加载提示**（避免纯黑无反应），并在健康检查里兜底自动恢复。
         // 注意：有错误时不能显示加载提示，否则会盖住"点击重试"。
-        _awaitingFirstFrame = _error == null;
+        //
+        // 0.7.4（真机反馈"移动网络不播放时一直显示正在加载、反复切备用线路"）：
+        // 移动网络拦截自动播放时，播放器是"已就绪但按设计不播"，
+        // **不能**进入"等待首帧"，否则健康检查三道兜底会把它当成故障，
+        // 反复 `_recover()` 切备用线路。
+        _awaitingFirstFrame = !_autoPlayBlocked && _error == null;
         _firstFrameTicks = 0;
         // 0.6.11：新内容开始加载 = 一次全新的播放，
         // 用户之前的暂停意图不再适用（否则新一集会"以为用户暂停"而不恢复）。
-        _userPaused = false;
+        // 0.7.4：但"移动网络下按设计不自动播"要当成**用户主动不播**，
+        // 否则同样会被健康检查判为卡死。
+        _userPaused = _autoPlayBlocked;
         _stalledTicks = 0;
       });
       // 加载成功：复位健康检查与恢复计数（0.6.0）。
