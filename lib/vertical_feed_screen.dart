@@ -22,6 +22,7 @@ import 'playback_preloader.dart';
 import 'playback_recovery.dart';
 import 'player_interactions.dart';
 import 'system_volume.dart';
+import 'screen_brightness.dart';
 import 'widgets.dart';
 
 /// 全屏横屏分区手势的类型（0.7.2，`XQ-0105`）。
@@ -1256,12 +1257,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   bool _panelOpen = false;
   bool _controlsVisible = true;
 
-  /// 画面亮度（0.7.2，`XQ-0105`）：1.0 = 原始画面，最低压到 [_minBrightness]。
-  ///
-  /// 用 `ColorFiltered` 只压暗**视频画面本身**，不动系统屏幕亮度，
-  /// 也不影响控件与文字（否则界面会跟着变得看不清）。
-  static const double _minBrightness = .3;
-  final _brightness = ValueNotifier<double>(1);
+  /// 窗口亮度下限（0.7.8，`XQ-0114`）：避免滑到全黑看不见。
+  static const double _minBrightness = .05;
+
+  /// 当前窗口亮度比例（0.7.8）。窗口亮度**覆盖**系统亮度，
+  /// 因此系统调暗时 App 内仍可调亮（上限是屏幕硬件最亮）。
+  double _screenBrightnessRatio = .5;
 
   /// 「自动连播切到了下一集」进行中（0.7.2，`XQ-0104`）。
   ///
@@ -1487,6 +1488,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _autoAdvancing = widget.autoEnter;
     // 0.7.6：提前读一次系统媒体音量，避免第一次调音量时起点是 0。
     unawaited(_syncSystemVolume());
+    unawaited(_syncScreenBrightness());
     if (widget.active) _prepare();
   }
 
@@ -2209,7 +2211,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     }
     _fullscreenNavigator = null;
     _fullscreenRevision.dispose();
-    _brightness.dispose();
+    unawaited(ScreenBrightness.reset());
     _tick.dispose();
     // 若离开时还锁着横屏，必须恢复竖屏并显示系统栏，否则整个应用会一直横着。
     if (_landscape) {
@@ -3119,26 +3121,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     ),
   );
 
-  /// 对视频画面套一层亮度滤镜（0.7.2，`XQ-0105`）。
-  ///
-  /// 只作用于**画面本身**（`Video`），不影响控件与文字；
-  /// 用 `ValueListenableBuilder` 的 `child` 形式，亮度变化时不重建视频子树。
-  Widget _applyBrightness(Widget child) => ValueListenableBuilder<double>(
-    valueListenable: _brightness,
-    child: child,
-    builder: (context, value, inner) {
-      if (value >= .999) return inner!;
-      return ColorFiltered(
-        colorFilter: ColorFilter.matrix(<double>[
-          value, 0, 0, 0, 0, //
-          0, value, 0, 0, 0, //
-          0, 0, value, 0, 0, //
-          0, 0, 0, 1, 0, //
-        ]),
-        child: inner!,
-      );
-    },
-  );
+  /// 亮度不再用画面滤镜（0.7.8）：改调窗口亮度，滤镜层直接透传。
+  Widget _applyBrightness(Widget child) => child;
 
   Future<void> _setSpeed(double value) async {
     if (_closed) return;
@@ -3603,6 +3587,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   void _exitFullscreen() {
     if (!_fullscreenRouteOpen) return;
     _fullscreenRouteOpen = false;
+    // 0.7.8：退出全屏即恢复窗口亮度为"跟随系统"，避免整个 App 一直停在调过的亮度。
+    unawaited(ScreenBrightness.reset());
     final navigator = _fullscreenNavigator ?? Navigator.maybeOf(context);
     if (navigator != null && navigator.canPop()) navigator.pop();
   }
@@ -3644,7 +3630,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   bool _fsMoved = false;
   bool _fsGuarded = false;
   Duration _fsDownAt = Duration.zero;
-  double _fsStartBrightness = 1;
+
+  /// 亮度手势起点（0.7.8，按当前窗口亮度固定）。
+  double _fsStartBrightRatio = .5;
 
   /// 音量手势的起点比例（0.7.6）——按下时的系统音量，避免拖动中反复重算基准。
   double _fsStartSystemRatio = 0;
@@ -3664,7 +3652,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _fsDownAt = event.timeStamp;
     _fsGesture = _FsGesture.none;
     _fsSeekTarget = null;
-    _fsStartBrightness = _brightness.value;
+    _fsStartBrightRatio = _screenBrightnessRatio;
+    unawaited(_syncScreenBrightness());
     final player = _player;
     _fsStartPosition = player?.state.position ?? Duration.zero;
     // 0.7.5（XQ-0108/0109）：清进度预览，并把系统媒体音量同步为起点
@@ -3724,12 +3713,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           '${seconds >= 0 ? '快进至' : '后退至'} ${formatPosition(target.inSeconds.toDouble())}',
         );
       case _FsGesture.brightness:
-        _setBrightness(
-          (_fsStartBrightness - delta.dy / (size.height * .7)).clamp(
-            _minBrightness,
-            1.0,
-          ),
-        );
+        // 0.7.8（XQ-0114）：改为调**窗口亮度**（覆盖系统亮度，系统暗也能拉亮）。
+        // 灵敏度与音量一致（1.6 屏高走完），并以按下时的亮度为起点。
+        final ratio = (_fsStartBrightRatio - delta.dy / (size.height * 1.6))
+            .clamp(_minBrightness, 1.0);
+        if ((ratio - _screenBrightnessRatio).abs() >= 0.01) {
+          _setBrightness(ratio);
+        }
       case _FsGesture.volume:
         // 0.7.5（XQ-0109）：直接调**系统媒体音量**，不再叠一层应用内音量。
         //
@@ -3818,8 +3808,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   }
 
   void _setBrightness(double value) {
-    _brightness.value = value;
+    _screenBrightnessRatio = value;
+    unawaited(ScreenBrightness.set(value));
     _interactions?.hint('亮度 ${(value * 100).round()}%');
+  }
+
+  /// 读取系统当前亮度并缓存（0.7.8）——用于手势起点。
+  Future<void> _syncScreenBrightness() async {
+    final value = await ScreenBrightness.read();
+    if (value == null || _closed) return;
+    _screenBrightnessRatio = value.clamp(_minBrightness, 1.0);
   }
 
   // ===== 竖屏水平滑调进度（0.7.5，XQ-0108）=====

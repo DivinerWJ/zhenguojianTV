@@ -4,6 +4,8 @@ import io.flutter.embedding.android.FlutterActivity
 import android.app.UiModeManager
 import android.media.AudioManager
 import android.os.Build
+import android.provider.Settings
+import android.view.WindowManager
 import android.os.Bundle
 import android.content.Context
 import android.content.Intent
@@ -53,6 +55,13 @@ class MainActivity : FlutterActivity() {
                 } else if (call.method == "setSystemVolume") {
                     val index = call.argument<Int>("index") ?: -1
                     result.success(setSystemVolume(index))
+                } else if (call.method == "screenBrightness") {
+                    result.success(screenBrightness())
+                } else if (call.method == "setScreenBrightness") {
+                    val value = call.argument<Double>("value") ?: -1.0
+                    result.success(setScreenBrightness(value))
+                } else if (call.method == "resetScreenBrightness") {
+                    result.success(resetScreenBrightness())
                 } else {
                     result.notImplemented()
                 }
@@ -102,6 +111,58 @@ class MainActivity : FlutterActivity() {
             val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             val target = index.coerceIn(0, max)
             audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 读取系统当前亮度比例（0~1，0.7.8）。
+     *
+     * 只读系统设置，**不需要任何权限**；用作手势的起点。
+     */
+    private fun screenBrightness(): Double {
+        return try {
+            val value = Settings.System.getInt(
+                contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+            )
+            (value / 255.0).coerceIn(0.0, 1.0)
+        } catch (e: Exception) {
+            0.5
+        }
+    }
+
+    /**
+     * 设置**本 App 窗口**亮度（0~1，0.7.8）。
+     *
+     * 用窗口亮度覆盖系统亮度：系统调得再暗，App 内也能拉亮，
+     * 且不需要「修改系统设置」特殊权限；退出时会恢复跟随系统。
+     */
+    private fun setScreenBrightness(ratio: Double): Boolean {
+        return try {
+            val value = ratio.coerceIn(0.0, 1.0).toFloat()
+            runOnUiThread {
+                val attrs = window.attributes
+                attrs.screenBrightness = value
+                window.attributes = attrs
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 恢复窗口亮度为"跟随系统"（0.7.8）。 */
+    private fun resetScreenBrightness(): Boolean {
+        return try {
+            runOnUiThread {
+                val attrs = window.attributes
+                attrs.screenBrightness =
+                    WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                window.attributes = attrs
+            }
             true
         } catch (e: Exception) {
             false
