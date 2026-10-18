@@ -3851,7 +3851,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final dx = event.localPosition.dx - _hOriginX!;
     final dy = event.localPosition.dy - (_hOriginY ?? event.localPosition.dy);
     // 只在明确"水平主导"时才接管，避免和上下滑切集抢手势。
-    if (dx.abs() < 24 || dx.abs() <= dy.abs() * 1.2) return;
+    // 0.7.10：起点从 24 降到 12——水平识别器（阈值 6）赢下竞技场后，
+    // 必须保证这里也会开始调进度，否则小幅度滑动会"既没进度也没翻页"。
+    if (dx.abs() < 12 || dx.abs() <= dy.abs() * 1.2) return;
     final seconds = dx / width * _fsSeekSecondsPerWidth;
     final target = Duration(
       milliseconds:
@@ -4421,11 +4423,23 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               // 下层 PageView 的纵向识别器就收不到这次拖动；
               // 竖直滑动时它不 accept，PageView 照常翻页（实测：
               // 把水平拖动和 tap 写在同一个 GestureDetector 里会连竖直翻页一起拦掉）。
+              //
+              // 0.7.10 补修（"横屏视频不全屏时左右滑仍会上下翻"）：
+              // 默认触摸阈值 18 太大，手指略斜时下层 PageView 的纵向识别器会先赢。
+              // 这里把水平识别器的阈值降到 6：水平方向一动就抢下这次手势；
+              // 纯竖直滑动时水平位移几乎为 0，仍不会 accept，翻页不受影响。
               gestures: <Type, GestureRecognizerFactory>{
                 HorizontalDragGestureRecognizer:
                     GestureRecognizerFactoryWithHandlers<
                       HorizontalDragGestureRecognizer
-                    >(() => HorizontalDragGestureRecognizer(), (instance) {}),
+                    >(
+                      () => HorizontalDragGestureRecognizer(),
+                      (instance) {
+                        instance.gestureSettings = const DeviceGestureSettings(
+                          touchSlop: 6,
+                        );
+                      },
+                    ),
               },
               child: Listener(
                 behavior: HitTestBehavior.opaque,
