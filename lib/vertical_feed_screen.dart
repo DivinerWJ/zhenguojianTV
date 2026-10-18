@@ -3568,6 +3568,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         .whenComplete(() {
           // 路由被任何方式关闭后统一复位（含返回键、手势返回）。
           _fullscreenNavigator = null;
+          // 0.7.9 修复（真机反馈"退出全屏不恢复亮度，切视频才恢复"）：
+          // 全屏路由可能被**返回键 / 手势**关闭，这条路不经过 `_exitFullscreen()`，
+          // 之前只在 `_exitFullscreen()` 里恢复亮度 → 漏掉返回键路径。
+          // 这里兜底：无论怎么关的，都恢复"跟随系统"。
+          unawaited(ScreenBrightness.reset());
           if (!mounted || _closed) return;
           if (!_fullscreenRouteOpen) return;
           _fullscreenRouteOpen = false;
@@ -3684,11 +3689,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _fsMoved = true;
     }
     if (_fsGesture == _FsGesture.none) {
-      // 0.7.5（XQ-0109）：分区**只在横屏全屏**生效；
-      // 竖屏全屏不分区——左右滑调进度、上下滑切集/切部。
+      // 0.7.9 修复（真机反馈"竖屏的全屏还有左右亮度音量"）：
+      // 之前用 `_landscape` 判断分区，但**竖屏视频**全屏时 `_toggleLandscape`
+      // 锁的是 `portraitUp`（屏幕仍是竖的），`_landscape` 却为 true →
+      // 竖屏全屏照样分区。这里改为按**实际屏幕宽高**判断：
+      // 宽 > 高（真横屏）才分区；竖屏全屏只保留进度与上下滑切集/切部。
       _fsGesture = delta.dx.abs() > delta.dy.abs()
           ? _FsGesture.seek
-          : (_landscape
+          : (size.width > size.height
                 ? _fsVerticalZone(_fsOrigin!.dx, size.width)
                 : _FsGesture.episode);
     }
@@ -3894,6 +3902,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         if (!didPop) return;
         // 系统返回键关闭全屏路由：同步复位状态位与方向/系统栏。
         _fullscreenRouteOpen = false;
+        // 0.7.9：返回键退出全屏也必须恢复亮度（此前漏了这一步，
+        // 导致只有切视频时才恢复）。
+        unawaited(ScreenBrightness.reset());
         if (_landscape && mounted && !_closed) {
           setState(() {
             _landscape = false;
@@ -3957,6 +3968,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                           behavior: HitTestBehavior.opaque,
                           onTap: _tap,
                           onDoubleTap: _togglePlayback,
+                          // 0.7.9 修复（真机反馈"左右滑调进度时播放器会上下动"）：
+                          // `Listener` 不参与手势竞技场，下层 PageView 的纵向拖动
+                          // 仍能识别到手指的垂直分量 → 进度条在动、页面也在翻。
+                          // 这里显式声明两个方向的拖动，让本层赢下竞技场，
+                          // 下层 PageView 就收不到这次拖动。
+                          onHorizontalDragStart: (_) {},
+                          onHorizontalDragUpdate: (_) {},
+                          onHorizontalDragEnd: (_) {},
+                          onVerticalDragStart: (_) {},
+                          onVerticalDragUpdate: (_) {},
+                          onVerticalDragEnd: (_) {},
                         ),
                       ),
                     ),
@@ -4392,10 +4414,48 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               _interactions?.pointerCancel(event);
               _hPointerCancel();
             },
-            child: GestureDetector(
+            child: RawGestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: _tap,
-              onDoubleTap: _togglePlayback,
+              // 0.7.9 修复（真机反馈"左右滑调进度时播放器会上下动"）：
+              // 只注册**水平**拖动识别器——水平滑动时它赢下竞技场，
+              // 下层 PageView 的纵向识别器就收不到这次拖动；
+              // 竖直滑动时它不 accept，PageView 照常翻页（实测：
+              // 把水平拖动和 tap 写在同一个 GestureDetector 里会连竖直翻页一起拦掉）。
+              gestures: <Type, GestureRecognizerFactory>{
+                HorizontalDragGestureRecognizer:
+                    GestureRecognizerFactoryWithHandlers<
+                      HorizontalDragGestureRecognizer
+                    >(() => HorizontalDragGestureRecognizer(), (instance) {}),
+              },
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (event) {
+                  _interactions?.pointerDown(
+                    event,
+                    // 0.2.31：启用上下滑切集（方案 B：只切集、不切剧）。
+                    swipeEnabled: true,
+                    height: MediaQuery.sizeOf(context).height,
+                  );
+                  _hPointerDown(event);
+                },
+                onPointerMove: (event) {
+                  _interactions?.pointerMove(event);
+                  _hPointerMove(event, MediaQuery.sizeOf(context).width);
+                },
+                onPointerUp: (event) {
+                  _interactions?.pointerUp(event);
+                  _hPointerUp(event);
+                },
+                onPointerCancel: (event) {
+                  _interactions?.pointerCancel(event);
+                  _hPointerCancel();
+                },
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _tap,
+                  onDoubleTap: _togglePlayback,
+                ),
+              ),
             ),
           ),
         ),
