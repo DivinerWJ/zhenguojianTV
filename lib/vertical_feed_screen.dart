@@ -1380,6 +1380,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 起播后停住的容忍轮次（约 10 秒）。
   static const _stalledTicksLimit = 10;
 
+  /// 加载态卡死的轮次（0.7.7，约 25 秒）——弱网下 `open()` 不返回时兜底。
+  int _loadTicks = 0;
+  static const _loadTicksLimit = 25;
+
+  /// 报告在播但拿不到画面尺寸的连续轮次（0.7.7，约 12 秒）。
+  int _noFrameTicks = 0;
+  static const _noFrameTicksLimit = 12;
+
   /// 应用是否在前台。后台时不判定"卡住"，否则会被误判。
   bool _foreground = true;
 
@@ -1868,7 +1876,24 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _firstFrameTicks = 0;
       }
       // 兜底二：已在播放但位置长时间不前进（原有逻辑）。
-      if (_loading) return;
+      //
+      // 0.7.7 修复（真机反馈"流量+全屏自动切下一集纯黑、等很久不播"）：
+      // `_loading` 卡死时（弱网下 `player.open()` 迟迟不返回）必须有自己的超时，
+      // 否则既不恢复也不报错，用户只能一直看黑屏。
+      if (_loading) {
+        _loadTicks++;
+        if (_loadTicks >= _loadTicksLimit && mounted && !_closed) {
+          _loadTicks = 0;
+          setState(() {
+            _loading = false;
+            _awaitingFirstFrame = false;
+            _error = '网络较慢，加载超时，请点击重试';
+          });
+          _refreshFullscreen(immediate: true);
+        }
+        return;
+      }
+      _loadTicks = 0;
       if (_health.stalled(
         position: current.state.position,
         playing: current.state.playing,
@@ -1877,6 +1902,25 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       )) {
         unawaited(_recover());
         return;
+      }
+
+      // 兜底四（0.7.7）：**报告在播但一直拿不到画面尺寸**（弱网首帧迟迟不来）。
+      // 这种状态三条旧兜底都覆盖不到（playing=true 又没过 stalled 阈值），
+      // 表现为纯黑屏长时间不恢复。
+      if (_ready &&
+          _error == null &&
+          _foreground &&
+          !current.state.completed &&
+          current.state.playing &&
+          (current.state.width ?? 0) <= 0) {
+        _noFrameTicks++;
+        if (_noFrameTicks >= _noFrameTicksLimit) {
+          _noFrameTicks = 0;
+          unawaited(_recover());
+          return;
+        }
+      } else {
+        _noFrameTicks = 0;
       }
 
       // 兜底三（0.6.11 新增，用户反馈"偶发下一个视频纯黑无文字、不播放"）：
@@ -1985,6 +2029,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             _episodeIndex + 1 < detail.episodes.length) {
           unawaited(_playEpisode(_episodeIndex + 1, auto: true));
         } else {
+          // 0.7.7（甲，真机反馈"全屏自动切换后纯黑"）：连播下一部会切到**新页面**，
+          // 而全屏路由属于本页；不关掉它，全屏层就停在本页（随后释放播放器）→ 纯黑。
+          if (_fullscreenRouteOpen) _exitFullscreen();
           widget.onFinished();
         }
       }),
@@ -2049,6 +2096,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _prepare();
       }
     } else if (!widget.active && oldWidget.active) {
+      // 0.7.7（甲）：被滑走时先退出全屏。
+      //
+      // 全屏路由由**本页**打开，而滑走后本页会释放播放器；
+      // 若全屏路由还开着，它仍在渲染本页（已黑），新页面在下面播你看不到。
+      if (_fullscreenRouteOpen) _exitFullscreen();
       // 被滑走：先把观看进度落盘，再**彻底释放播放器**（0.3.1 性能修复）。
       //
       // 为什么必须释放（用户反馈"播放卡顿，尤其开倍速后"）：
@@ -2633,6 +2685,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _loading = true;
       _error = null;
     });
+    // 0.7.7 修复（真机反馈"流量+全屏自动切下一集纯黑、等很久不播"）：
+    // 全屏层是独立路由，只跟随 `_fullscreenRevision` 重建。此前进入加载时
+    // 没有立即刷新它 → 全屏看不到「正在加载视频…」，弱网下 open 一卡就是**纯黑无文字**。
+    _refreshFullscreen(immediate: true);
     try {
       final detail = _detail ?? await widget.repository.detail(widget.drama);
       // 0.3.5：除代次外还要确认播放器实例没被替换/释放
@@ -3910,10 +3966,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                     // 避免全屏时出现纯黑无文字。
                     if (_loading ||
                         (_awaitingFirstFrame && !(_player?.state.playing ?? false)) ||
+                        // 0.7.7：**即使显示在播，只要还没拿到画面尺寸就仍算"没出画面"**。
+                        // 弱网下播放器会先报 playing、首帧迟到很久，此前这里排除了
+                        // playing，导致全屏纯黑且没有任何提示，直到健康检查兜底。
                         (!_userPaused &&
                             _ready &&
                             _error == null &&
-                            !(_player?.state.playing ?? false) &&
                             (_player?.state.width ?? 0) <= 0))
                       const IgnorePointer(
                         child: LoadingHint(message: '正在加载视频…', dark: true),
@@ -4356,10 +4414,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             (_awaitingFirstFrame && !(state?.playing ?? false)) ||
             // 注意：必须排除 `_userPaused`，否则用户暂停后（此时 width 可能为 0）
             // 会错误地显示"正在加载视频…"。
+            // 0.7.7：不再要求"未在播"——弱网下行器会先报 playing、画面迟到很久，
+            // 此时也应显示加载提示，而不是纯黑无字。
             (!_userPaused &&
                 _ready &&
                 _error == null &&
-                !(state?.playing ?? false) &&
                 (state?.width ?? 0) <= 0))
           const IgnorePointer(
             child: LoadingHint(message: '正在加载视频…', dark: true),
