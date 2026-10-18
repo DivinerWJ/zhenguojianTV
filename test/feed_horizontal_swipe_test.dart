@@ -128,6 +128,60 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('横屏视频非全屏：先竖直 30px 再横向拖动，不应翻页', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(420, 880);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final repo = _Repo();
+    final platforms = <ScriptedPlayer>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(
+          body: VerticalFeedScreen(
+            key: const ValueKey('feed'),
+            repository: repo,
+            store: store,
+            embedded: true,
+            active: true,
+            playerFactory: () {
+              final p = ScriptedPlayer();
+              platforms.add(p);
+              return Player(platformPlayer: p);
+            },
+            videoBuilder: (controls) => controls,
+          ),
+        ),
+      ),
+    );
+    await _pump(tester, 80);
+    for (final p in platforms) {
+      p.videoSize(1920, 1080);
+    }
+    await _pump(tester, 20);
+
+    String current() {
+      for (final t in ['甲剧', '乙剧', '丙剧']) {
+        if (find.text(t).evaluate().isNotEmpty) return t;
+      }
+      return '?';
+    }
+
+    final first = current();
+    // 真实轨迹：先竖直 30px（未到 PageView 阈值 60），再横向 120px。
+    final gesture = await tester.startGesture(const Offset(210, 440));
+    await gesture.moveBy(const Offset(0, 30));
+    await tester.pump(const Duration(milliseconds: 16));
+    await gesture.moveBy(const Offset(120, -8));
+    await tester.pump(const Duration(milliseconds: 16));
+    await gesture.up();
+    await _pump(tester, 40);
+
+    expect(current(), first, reason: '先竖直 30px 再转横向，不应翻页');
+  });
+
   testWidgets('横屏视频非全屏：竖直滑仍然可以翻页（不得回退）', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(420, 880);

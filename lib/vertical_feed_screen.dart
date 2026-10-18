@@ -162,6 +162,13 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
   /// 点过之后，后续切集/切部不再拦截（用户明确选"本次继续自动连播"）。
   final _manualPlayed = ValueNotifier<bool>(false);
 
+  /// 本次会话是否已经"越过第一个视频"（0.7.12，`XQ-0119`）。
+  ///
+  /// 用户要求：移动网络下的"不自动播、不预载"**只限制启动后的第 1 个视频**；
+  /// 一旦滑到第 2 个视频，就与"手动点过播放"同等对待，此后全部放开
+  /// （双击首页刷新随机也不得重新拦截）。
+  final _unlocked = ValueNotifier<bool>(false);
+
   /// 「因自动连播而进入」的目标页索引（0.7.4）。
   ///
   /// 播完自动跳下一部时设置；被跳到的页面据此**一开始就静默**（不弹控件）。
@@ -335,6 +342,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
     // 预载器释放（0.6.9）：取消挂起请求并释放已预取的会话，避免会话泄漏。
     _preloader.dispose();
     _manualPlayed.dispose();
+    _unlocked.dispose();
     _controller.dispose();
     _focus.dispose();
     super.dispose();
@@ -569,6 +577,10 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
 
   void _onPageChanged(int index) {
     if (_closed) return;
+    // 0.7.12（XQ-0119）：滑到第 2 个及以后的视频 → 本次会话解锁
+    // （移动网络下不再拦自动播放与预载）。必须在 setState 之前置位，
+    // 因为 `_index` 变化会立刻让新页成为当前页并开始 `_prepare`。
+    if (index > 0 && !_unlocked.value) _unlocked.value = true;
     setState(() => _index = index);
     // 单剧模式（0.2.29）：只有一部剧，不存在"加载更多"。
     if (widget.singleDrama != null) return;
@@ -909,6 +921,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
           store: widget.store,
           preloader: _preloader,
           manualPlayed: _manualPlayed,
+          unlocked: _unlocked,
           autoEnter: index == _autoEnterIndex,
           active: widget.active && isCurrent,
           autoNextEpisode: _autoNextEpisode,
@@ -976,14 +989,14 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen> {
         fit: StackFit.expand,
         children: [
           // 0.7.11 修复（真机反馈"横屏视频非全屏时左右滑仍会上下翻"）：
-          // 提高 `PageView` 的翻页触摸阈值（默认 18 → 36）。
+          // 提高 `PageView` 的翻页触摸阈值（默认 18 → 60），给方向判定留足缓冲。
           // 真实手指"左右滑"往往先有十几像素的竖直位移，默认阈值下纵向
           // 拖动识别器会**先**赢下竞技场，页面就开始跟手翻——
           // 页内的水平识别器（阈值 6）再赢也没用。抬高后水平手势总是先到，
-          // 纯竖直滑动（位移远超 36）仍照常翻页。
+          // 纯竖直滑动（位移远超 60）仍照常翻页。
           MediaQuery(
             data: MediaQuery.of(context).copyWith(
-              gestureSettings: const DeviceGestureSettings(touchSlop: 36),
+              gestureSettings: const DeviceGestureSettings(touchSlop: 60),
             ),
             child: pageView,
           ),
@@ -1154,6 +1167,7 @@ class _FeedPage extends StatefulWidget {
     required this.store,
     required this.preloader,
     required this.manualPlayed,
+    required this.unlocked,
     this.autoEnter = false,
     required this.active,
     required this.autoNextEpisode,
@@ -1193,6 +1207,9 @@ class _FeedPage extends StatefulWidget {
 
   /// 本次会话是否手动点过播放（0.7.3，`XQ-0107`，由父级持有、跨页共享）。
   final ValueNotifier<bool> manualPlayed;
+
+  /// 本次会话是否已越过第一个视频（0.7.12，`XQ-0119`，由父级持有）。
+  final ValueNotifier<bool> unlocked;
 
   /// 本页是否由「自动连播」切进来（0.7.4）。
   ///
@@ -2905,6 +2922,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (widget.singleDrama || widget.localOnly) return false;
     if (widget.store.autoPlayOnMobile) return false;
     if (widget.manualPlayed.value) return false;
+    // 0.7.12（XQ-0119）：已滑过第一个视频 → 本次会话解除限制。
+    if (widget.unlocked.value) return false;
     final kind = await NetworkState.current();
     return kind == NetworkKind.mobile;
   }
@@ -4429,57 +4448,29 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             },
             child: RawGestureDetector(
               behavior: HitTestBehavior.opaque,
-              // 0.7.9 修复（真机反馈"左右滑调进度时播放器会上下动"）：
-              // 只注册**水平**拖动识别器——水平滑动时它赢下竞技场，
-              // 下层 PageView 的纵向识别器就收不到这次拖动；
-              // 竖直滑动时它不 accept，PageView 照常翻页（实测：
-              // 把水平拖动和 tap 写在同一个 GestureDetector 里会连竖直翻页一起拦掉）。
+              // 0.7.12（XQ-0120）：改用**方向锁定**识别器，不再靠"调阈值"。
               //
-              // 0.7.10 补修（"横屏视频不全屏时左右滑仍会上下翻"）：
-              // 默认触摸阈值 18 太大，手指略斜时下层 PageView 的纵向识别器会先赢。
-              // 这里把水平识别器的阈值降到 6：水平方向一动就抢下这次手势；
-              // 纯竖直滑动时水平位移几乎为 0，仍不会 accept，翻页不受影响。
+              // 历史教训：0.7.9 用默认水平识别器（阈值 18）、0.7.10 降到 6、
+              // 0.7.11 把 PageView 阈值提到 36 —— 全都没治本。因为人手"左右滑"
+              // 必然带竖直分量，只要竖直位移达到 PageView 的阈值，页面就会跟手。
+              //
+              // 现在按下后**直接比较两个方向的位移**：
+              // - 水平不输（|dx| ≥ 6 且 |dx| ≥ |dy|）→ 立即赢下竞技场，PageView 收不到；
+              // - 竖直明显主导（|dy| ≥ 12 且 |dy| > |dx| × 1.2）→ 立即让给 PageView；
+              // - 松手时仍未定 → 让给 PageView。
               gestures: <Type, GestureRecognizerFactory>{
-                HorizontalDragGestureRecognizer:
+                _DirectionalSeekGestureRecognizer:
                     GestureRecognizerFactoryWithHandlers<
-                      HorizontalDragGestureRecognizer
-                    >(
-                      () => HorizontalDragGestureRecognizer(),
-                      (instance) {
-                        instance.gestureSettings = const DeviceGestureSettings(
-                          touchSlop: 6,
-                        );
-                      },
-                    ),
+                      _DirectionalSeekGestureRecognizer
+                    >(() => _DirectionalSeekGestureRecognizer(), (instance) {}),
               },
-              child: Listener(
+              // 0.7.12：删掉这里重复的一层 `Listener`（0.7.9 误加）。
+              // 它让 `PlayerInteractions.pointerDown` 被调用两次，第二次会
+              // 因"指针已登记"而 `cancel()`，把滑动/长按状态自我清空。
+              child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onPointerDown: (event) {
-                  _interactions?.pointerDown(
-                    event,
-                    // 0.2.31：启用上下滑切集（方案 B：只切集、不切剧）。
-                    swipeEnabled: true,
-                    height: MediaQuery.sizeOf(context).height,
-                  );
-                  _hPointerDown(event);
-                },
-                onPointerMove: (event) {
-                  _interactions?.pointerMove(event);
-                  _hPointerMove(event, MediaQuery.sizeOf(context).width);
-                },
-                onPointerUp: (event) {
-                  _interactions?.pointerUp(event);
-                  _hPointerUp(event);
-                },
-                onPointerCancel: (event) {
-                  _interactions?.pointerCancel(event);
-                  _hPointerCancel();
-                },
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: _tap,
-                  onDoubleTap: _togglePlayback,
-                ),
+                onTap: _tap,
+                onDoubleTap: _togglePlayback,
               ),
             ),
           ),
@@ -4868,4 +4859,70 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       ],
     ),
   );
+}
+
+
+/// 方向锁定手势识别器（0.7.12，`XQ-0120`）。
+///
+/// 为什么需要它：竖屏竖滑流里，「左右滑调进度」与 `PageView` 的「上下翻页」
+/// 天生竞争。靠调阈值治不好——人手横滑必然带竖直分量，竖直位移一达到
+/// `PageView` 的阈值，页面就开始跟手。
+///
+/// 这里改为按下后**比较两个方向的位移**，谁主导就把这次手势判给谁：
+///
+/// - 水平占优（`|dx| >= 6` 且 `|dx| >= |dy| * 0.7`）→ accept：赢下竞技场，
+///   下层 `PageView` 的纵向识别器被淘汰，页面不会跟着动；
+/// - 竖直明显主导（`|dy| >= 12` 且 `|dy| > |dx| * 1.2`）→ reject：
+///   立即让给 `PageView`，翻页动画与手感完全不受影响；
+/// - 松手时仍未判定（例如只是轻点）→ reject。
+class _DirectionalSeekGestureRecognizer extends OneSequenceGestureRecognizer {
+  int? _pointer;
+  Offset _start = Offset.zero;
+  bool _decided = false;
+
+  /// 水平方向判定为「主导」的最小位移。
+  static const double _horizontalWin = 6;
+
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _pointer = event.pointer;
+    _start = event.position;
+    _decided = false;
+    startTrackingPointer(event.pointer, event.transform);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event.pointer != _pointer) return;
+    if (event is PointerMoveEvent) {
+      if (_decided) return;
+      final delta = event.position - _start;
+      final dx = delta.dx.abs();
+      final dy = delta.dy.abs();
+      // 只负责「抢下水平主导」；**不主动 reject**。
+      //
+      // 为什么不能提前 reject：用户"左右滑"往往先有十几二十像素的竖直位移，
+      // 若在 `|dy| >= 12` 就放手，PageView 会立刻接管，页面又开始跟手。
+      // 这里保持"观望"——水平位移占优（|dx| >= |dy| * 0.7）就赢；
+      // 真正的竖直滑动则由 PageView 在它自己的阈值（60）处接管。
+      if (dx >= _horizontalWin && dx >= dy * 0.7) {
+        _decided = true;
+        resolve(GestureDisposition.accepted);
+      }
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      if (!_decided) resolve(GestureDisposition.rejected);
+      stopTrackingPointer(event.pointer);
+      if (event.pointer == _pointer) _pointer = null;
+    }
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {
+    _pointer = null;
+    _decided = false;
+  }
+
+  @override
+  String get debugDescription => 'directionalSeek';
 }
