@@ -180,6 +180,9 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   Animation<double>? _slideCurve;
   bool _slideStartedInGuard = false;
 
+  /// 切集后"等新集就绪再复位位移"的兜底定时器（0.7.15，`XQ-0124`）。
+  Timer? _episodeHoldTimer;
+
   /// 「因自动连播而进入」的目标页索引（0.7.4）。
   ///
   /// 播完自动跳下一部时设置；被跳到的页面据此**一开始就静默**（不弹控件）。
@@ -359,6 +362,8 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     _preloader.dispose();
     _manualPlayed.dispose();
     _unlocked.dispose();
+    _episodeHoldTimer?.cancel();
+    _episodeHoldTimer = null;
     _slideAnimation.dispose();
     _slideOffset.dispose();
     _controller.dispose();
@@ -688,32 +693,38 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       if (_autoNextEpisode) {
         final playNext = _pagePlayNextEpisode;
         if (playNext != null) {
-          unawaited(playNext());
+          // 0.7.15（XQ-0124）：画面先停在屏幕外（纯黑），等新集就绪再复位；
+          // 否则会在"换源完成前"闪一下上一集的最后一帧。
+          _holdUntilEpisodeReady(playNext());
           return;
         }
         if (single) {
           _toast('已经是最后一集了');
+          _slideOffset.value = 0;
           return;
         }
         // 已到最后一集：回落为切下一部剧，并复位连播模式（0.2.27）。
         _resetAutoNextAtBoundary('本剧已看完，已切换为连播下一部');
       }
+      _slideOffset.value = 0;
       _jump(1);
     } else {
       // 向下滑 = 上一集。
       if (_autoNextEpisode) {
         final playPrev = _pagePlayPrevEpisode;
         if (playPrev != null) {
-          unawaited(playPrev());
+          _holdUntilEpisodeReady(playPrev());
           return;
         }
         if (single) {
           _toast('已经是第一集了');
+          _slideOffset.value = 0;
           return;
         }
         // 已到第一集：回落为切上一部剧，并复位连播模式（0.2.27）。
         _resetAutoNextAtBoundary('已是第一集，已切换为连播下一部');
       }
+      _slideOffset.value = 0;
       _jump(-1);
     }
   }
@@ -777,9 +788,37 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     );
     _slideAnimation.forward(from: 0).whenCompleteOrCancel(() {
       if (_closed || !mounted) return;
-      _slideOffset.value = 0;
-      if (direction != 0) _commitVerticalSwipe(direction);
+      if (direction == 0) {
+        _slideOffset.value = 0;
+        return;
+      }
+      // 0.7.15：滑出后**不立刻复位**——交给 `_commitVerticalSwipe` 里的
+      // "等新集就绪再复位"，否则换源完成前会闪一下上一集的最后一帧。
+      _commitVerticalSwipe(direction);
     });
+  }
+
+  /// 切集后让画面停在屏幕外（纯黑），等新集真正就绪再复位（0.7.15，`XQ-0124`）。
+  ///
+  /// 为什么要这样：切集第一步是保存进度（异步写盘），之后才换片源；
+  /// 这期间播放器还在显示上一集的最后一帧。若动画一结束就复位，
+  /// 用户就会看到"上一集最后画面闪一下"。
+  ///
+  /// 10 秒兜底：加载失败或卡住时也必须复位，否则错误提示会被挡在屏幕外。
+  void _holdUntilEpisodeReady(Future<void> loading) {
+    _episodeHoldTimer?.cancel();
+    var released = false;
+    void release() {
+      if (released) return;
+      released = true;
+      _episodeHoldTimer?.cancel();
+      _episodeHoldTimer = null;
+      if (_closed || !mounted) return;
+      _slideOffset.value = 0;
+    }
+
+    loading.whenComplete(release);
+    _episodeHoldTimer = Timer(const Duration(seconds: 10), release);
   }
 
   /// 在连播本剧模式下因到达首/尾集而切部时，自动复位为「连播下一部」。
