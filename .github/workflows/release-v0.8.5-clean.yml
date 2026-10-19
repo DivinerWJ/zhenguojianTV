@@ -60,14 +60,12 @@ jobs:
           from pathlib import Path
           import re
 
-          # 1) Version + remove foreground-notification dependency.
           p = Path('pubspec.yaml')
           s = p.read_text()
           s = re.sub(r'^version:\s*[^\n]+$', 'version: 0.8.5+80', s, flags=re.M)
           s = re.sub(r'^\s*flutter_foreground_task:\s*[^\n]+\n', '', s, flags=re.M)
           p.write_text(s)
 
-          # 2) Android: remove notification/foreground-service/update-install permissions/components.
           p = Path('android/app/src/main/AndroidManifest.xml')
           s = p.read_text()
           for permission in [
@@ -77,18 +75,12 @@ jobs:
               'android.permission.REQUEST_INSTALL_PACKAGES',
           ]:
               s = re.sub(r'\s*<uses-permission android:name="' + re.escape(permission) + r'"/>\n', '\n', s)
-          s = re.sub(
-              r'\s*<service android:name="com\.pravera\.flutter_foreground_task\.service\.ForegroundService"\s*\n\s*android:foregroundServiceType="dataSync" android:exported="false" android:stopWithTask="false"/>\n',
-              '\n', s)
-          s = re.sub(
-              r'\s*<provider\s*\n\s*android:name="androidx\.core\.content\.FileProvider"\s*\n\s*android:authorities="\$\{applicationId\}\.updateprovider"\s*\n\s*android:exported="false"\s*\n\s*android:grantUriPermissions="true">\s*\n\s*<meta-data\s*\n\s*android:name="android\.support\.FILE_PROVIDER_PATHS"\s*\n\s*android:resource="@xml/update_paths"/>\s*\n\s*</provider>\n',
-              '\n', s)
+          s = re.sub(r'\s*<service android:name="com\.pravera\.flutter_foreground_task\.service\.ForegroundService"\s*\n\s*android:foregroundServiceType="dataSync" android:exported="false" android:stopWithTask="false"/>\n', '\n', s)
+          s = re.sub(r'\s*<provider\s*\n\s*android:name="androidx\.core\.content\.FileProvider"\s*\n\s*android:authorities="\$\{applicationId\}\.updateprovider"\s*\n\s*android:exported="false"\s*\n\s*android:grantUriPermissions="true">\s*\n\s*<meta-data\s*\n\s*android:name="android\.support\.FILE_PROVIDER_PATHS"\s*\n\s*android:resource="@xml/update_paths"/>\s*\n\s*</provider>\n', '\n', s)
           p.write_text(s)
 
-          # 3) Foreground notification service becomes an intentional no-op compatibility shim.
-          Path('lib/background_downloads.dart').write_text("""/// Clean TV build: background work never starts an Android foreground service.\n/// Downloads/media work therefore never requests notification permission and never\n/// posts a persistent system notification. Work continues while the app process is active.\nclass BackgroundDownloads {\n  static Future<void> prepare() async {}\n  static Future<void> ensureStarted() async {}\n}\n""")
+          Path('lib/background_downloads.dart').write_text("""/// Clean TV build: Android foreground-service notifications are disabled.\n/// Downloads/media work stays in the app process and never requests notification permission.\nclass BackgroundDownloads {\n  static Future<void> prepare() async {}\n  static Future<void> ensureStarted() async {}\n}\n""")
 
-          # 4) Remove all in-app update code and startup auto-check.
           p = Path('lib/main.dart')
           s = p.read_text().replace("import 'app_updater.dart';\n", '')
           block = """        // 界面就绪后检查更新（仅 Android；失败静默跳过，不阻塞启动）。\n        WidgetsBinding.instance.addPostFrameCallback((_) {\n          final target = navigator.currentContext;\n          if (target != null) {\n            unawaited(AppUpdater.checkOnStartup(target));\n          }\n        });\n"""
@@ -98,8 +90,7 @@ jobs:
 
           p = Path('lib/home_screen.dart')
           lines = p.read_text().replace("import 'app_updater.dart';\n", '').splitlines(keepends=True)
-          key = "about-check-update"
-          idx = next((i for i, line in enumerate(lines) if key in line), None)
+          idx = next((i for i, line in enumerate(lines) if 'about-check-update' in line), None)
           if idx is None:
               raise SystemExit('manual update button not found')
           start = idx
@@ -122,14 +113,9 @@ jobs:
           del lines[start:end + 1]
           p.write_text(''.join(lines))
 
-          # 5) Remove native APK installer/update channel.
           p = Path('android/app/src/main/kotlin/com/duanju/duanju_app/MainActivity.kt')
           s = p.read_text()
-          for imp in [
-              'import android.content.Intent\n',
-              'import androidx.core.content.FileProvider\n',
-              'import java.io.File\n',
-          ]:
+          for imp in ['import android.content.Intent\n', 'import androidx.core.content.FileProvider\n', 'import java.io.File\n']:
               s = s.replace(imp, '')
           start = s.find('        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "duanju/updater")')
           marker = '\n    }\n\n    /** 是否已被系统授予「安装未知应用」权限。 */'
@@ -138,8 +124,7 @@ jobs:
           stop = s.find(marker, start)
           s = s[:start] + s[stop:]
           start = s.find('    /** 是否已被系统授予「安装未知应用」权限。 */')
-          next_marker = '    /**\n     * 系统媒体音量（0.7.5）。'
-          stop = s.find(next_marker, start)
+          stop = s.find('    /**\n     * 系统媒体音量（0.7.5）。', start)
           if start < 0 or stop < 0:
               raise SystemExit('native updater permission helper not found')
           s = s[:start] + s[stop:]
@@ -150,37 +135,33 @@ jobs:
           s = s[:start] + s[close:]
           p.write_text(s)
 
-          # 6) Delete update-only files.
           for name in ['lib/app_updater.dart', 'android/app/src/main/res/xml/update_paths.xml']:
               q = Path(name)
               if q.exists():
                   q.unlink()
 
-          # 7) README: pure UX release, no advertising/notifications/auto update.
           p = Path('README.md')
-          s = p.read_text()
-          s = s.replace('当前版本：**0.8.4+79**', '当前版本：**0.8.5+80**')
-          s = re.sub(
-              r'## 二、本次更新（[^\n]+）\n.*?\n## 三、快速开始',
-              '''## 二、本次更新（0.8.5）\n\n- **纯净体验**：不集成广告 SDK，不展示广告位或推广弹窗。\n- **取消系统通知**：移除通知权限、Android 前台服务及下载常驻通知。\n- **取消应用内更新机制**：启动时不检查版本，不弹更新框，也不申请“安装未知应用”权限。\n- **保留必要交互反馈**：播放失败、下载失败、用户主动操作结果仍会正常提示，避免出现“点了没反应”。\n- **保留 TV / 拼音搜索能力**：遥控器适配、全拼/首字母搜索等 0.8.4 能力不变。\n\n> 后续版本由用户自行在 GitHub Releases 页面查看和下载安装，App 本身不主动检测。\n\n## 三、快速开始''',
-              s,
-              flags=re.S,
-          )
-          s = s.replace('3. 打开即用；之后有新版本时，App 内会提示更新。',
-                        '3. 打开即用；App 不进行自动更新检测，后续版本请自行查看 Releases。')
+          s = p.read_text().replace('当前版本：**0.8.4+79**', '当前版本：**0.8.5+80**')
+          s = re.sub(r'## 二、本次更新（[^\n]+）\n.*?\n## 三、快速开始', '''## 二、本次更新（0.8.5）\n\n- **纯净体验**：不集成广告 SDK，不展示广告位或推广弹窗。\n- **取消系统通知**：移除通知权限、Android 前台服务及下载常驻通知。\n- **取消应用内更新机制**：启动时不检查版本，不弹更新框，也不申请“安装未知应用”权限。\n- **保留必要交互反馈**：播放失败、下载失败、用户主动操作结果仍会正常提示，避免出现“点了没反应”。\n- **保留 TV / 拼音搜索能力**：遥控器适配、全拼/首字母搜索等 0.8.4 能力不变。\n\n> 后续版本由用户自行在 GitHub Releases 页面查看和下载安装，App 本身不主动检测。\n\n## 三、快速开始''', s, flags=re.S)
+          s = s.replace('3. 打开即用；之后有新版本时，App 内会提示更新。', '3. 打开即用；App 不进行自动更新检测，后续版本请自行查看 Releases。')
           p.write_text(s)
           PY
-
           flutter pub get
 
       - name: Audit intrusive mechanisms
         shell: bash
         run: |
           set -euo pipefail
-          test "$(grep -R -nE 'AppUpdater|app_updater|checkOnStartup|duanju/updater|REQUEST_INSTALL_PACKAGES|updateprovider|installApk|openInstallSettings|flutter_foreground_task|POST_NOTIFICATIONS|FOREGROUND_SERVICE|ForegroundService|requestNotificationPermission|notificationTitle|notificationText' lib android pubspec.yaml pubspec.lock 2>/dev/null | wc -l)" = "0"
-          test "$(grep -R -niE 'google_mobile_ads|admob|applovin|unity_ads|unityads|ironsource|pangle|gdtmob|穿山甲|优量汇' lib android pubspec.yaml pubspec.lock 2>/dev/null | wc -l)" = "0"
+          intrusive='AppUpdater|app_updater|checkOnStartup|duanju/updater|REQUEST_INSTALL_PACKAGES|updateprovider|installApk|openInstallSettings|flutter_foreground_task|POST_NOTIFICATIONS|FOREGROUND_SERVICE|ForegroundService|requestNotificationPermission|notificationTitle|notificationText'
+          ads='google_mobile_ads|admob|applovin|unity_ads|unityads|ironsource|pangle|gdtmob|穿山甲|优量汇'
+          echo '--- intrusive matches ---'
+          grep -R -nE "$intrusive" lib android pubspec.yaml pubspec.lock 2>/dev/null || true
+          echo '--- ad SDK matches ---'
+          grep -R -niE "$ads" lib android pubspec.yaml pubspec.lock 2>/dev/null || true
+          if grep -R -qE "$intrusive" lib android pubspec.yaml pubspec.lock 2>/dev/null; then exit 1; fi
+          if grep -R -qiE "$ads" lib android pubspec.yaml pubspec.lock 2>/dev/null; then exit 1; fi
           grep -q '^version: 0.8.5+80$' pubspec.yaml
-          grep -q '无广告' README.md
+          grep -q '不集成广告 SDK' README.md
           grep -q '取消系统通知' README.md
           grep -q '不进行自动更新检测' README.md
 
