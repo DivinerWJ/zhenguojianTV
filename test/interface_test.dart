@@ -96,7 +96,13 @@ void main() {
       if (SourceGroup.fromSources(SourceSite.values).length <= 1) return;
       await tester.tap(find.byKey(const ValueKey('source-switch')));
       await tester.pumpAndSettle();
+      // 0.8.2：站源弹窗是「勾选 + 确定」语义。
+      // 先清空再勾选目标分组，才能得到"只选这一个源"的等价结果。
+      await tester.tap(find.byKey(const ValueKey('source-sheet-clear')));
+      await tester.pumpAndSettle();
       await tester.tap(find.text(name).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('source-sheet-confirm')));
       await tester.pumpAndSettle();
     }
 

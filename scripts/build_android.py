@@ -12,9 +12,17 @@ from app_build import BuildVariant, add_variant_argument
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--abi', action='append', choices=['arm64-v8a', 'armeabi-v7a', 'x86_64'])
+parser.add_argument('--tv', action='store_true',
+                    help='电视版：同时产出 arm64-v8a 与 armeabi-v7a（电视盒子常见 32 位，只发 64 位会装不上）')
+parser.add_argument('--universal', action='store_true',
+                    help='额外产出一个包含所选 ABI 的 all/universal APK')
 parser.add_argument('--cn-mirrors', action='store_true', help='使用 Flutter 中国镜像和阿里云 Maven 镜像')
 add_variant_argument(parser)
 options = parser.parse_args()
+if options.tv:
+    for abi in ('arm64-v8a', 'armeabi-v7a'):
+        if abi not in (options.abi or []):
+            options.abi = [*(options.abi or []), abi]
 variant = BuildVariant(options.all_sources)
 environment = os.environ.copy()
 if platform.system() == 'Darwin':
@@ -32,10 +40,22 @@ with china_mirror_environment(environment, options.cn_mirrors) as env, mirrored_
     subprocess.run([sys.executable, str(root / 'scripts' / 'build_native.py'), '--platform', 'android', *abi_args, *variant.arguments],
                    cwd=root, env=env, check=True)
     subprocess.run([flutter, 'pub', 'get', '--enforce-lockfile'], cwd=root, env=env, check=True)
-    build_args = [flutter, 'build', 'apk', '--release', '--split-per-abi', '--no-pub', *variant.flutter_arguments]
+    targets = {'arm64-v8a': 'android-arm64', 'armeabi-v7a': 'android-arm', 'x86_64': 'android-x64'}
+    target_platform = []
     if options.abi:
-        targets = {'arm64-v8a': 'android-arm64', 'armeabi-v7a': 'android-arm', 'x86_64': 'android-x64'}
-        build_args += ['--target-platform', ','.join(targets[abi] for abi in options.abi)]
+        target_platform = ['--target-platform', ','.join(targets[abi] for abi in options.abi)]
+
+    build_args = [flutter, 'build', 'apk', '--release', '--split-per-abi', '--no-pub',
+                  *variant.flutter_arguments, *target_platform]
     subprocess.run(build_args, cwd=root, env=env, check=True)
-    subprocess.run([sys.executable, str(root / 'scripts' / 'package_release.py'), '--platform', 'android', *abi_args, *variant.arguments],
-                   cwd=root, env=env, check=True)
+
+    if options.universal:
+        universal_args = [flutter, 'build', 'apk', '--release', '--no-pub',
+                          *variant.flutter_arguments, *target_platform]
+        subprocess.run(universal_args, cwd=root, env=env, check=True)
+
+    package_args = [sys.executable, str(root / 'scripts' / 'package_release.py'),
+                    '--platform', 'android', *abi_args, *variant.arguments]
+    if options.universal:
+        package_args.append('--universal')
+    subprocess.run(package_args, cwd=root, env=env, check=True)

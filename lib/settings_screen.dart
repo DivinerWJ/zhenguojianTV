@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'core_bridge.dart';
+import 'app_layout.dart';
 import 'app_theme.dart';
 import 'background_downloads.dart';
 import 'local_store.dart';
@@ -174,6 +175,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: _chooseTheme,
               ),
+              // 电视兼容模式（0.8.3）。
+              //
+              // 放在主题下面而不是管理员区：这是"这台设备播不出来"的自救开关，
+              // 任何用户都可能需要，不该被权限挡住。
+              SwitchListTile(
+                key: const ValueKey('setting-tv-compat'),
+                value: widget.store.tvCompatMode,
+                secondary: const Icon(Icons.tv_off_outlined),
+                title: const Text('电视兼容模式（关闭硬件解码）'),
+                subtitle: const Text(
+                  '电视盒子出现"有声音没画面 / 绿屏 / 纯黑"时打开。'
+                  '改用软件解码后 1080p 基本无感，4K 会更吃性能。',
+                ),
+                onChanged: _busy
+                    ? null
+                    : (value) => saveUserChange(
+                        context,
+                        () => widget.store.setTvCompatMode(value),
+                      ),
+              ),
               ListTile(
                 leading: const Icon(Icons.people_outline),
                 title: const Text('用户管理'),
@@ -259,38 +280,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           () => widget.store.setAutoPlayOnMobile(value),
                         ),
                 ),
-                SwitchListTile(
-                  value: widget.store.autoExport,
-                  title: const Text('下载完成后自动导出 Emby'),
-                  subtitle: const Text(
-                    '在下载目录的 exports 中生成视频和海报 URL 元数据，可将该目录加入 Emby 媒体库。',
+                // Emby 导出（0.8.3）：电视上没有意义，隐藏掉减少误触。
+                // 电视只负责播放，导出元数据是电脑/手机上的整理动作。
+                if (!AppLayout.isTelevision(context)) ...[
+                  SwitchListTile(
+                    value: widget.store.autoExport,
+                    title: const Text('下载完成后自动导出 Emby'),
+                    subtitle: const Text(
+                      '在下载目录的 exports 中生成视频和海报 URL 元数据，可将该目录加入 Emby 媒体库。',
+                    ),
+                    onChanged: _busy
+                        ? null
+                        : (value) async {
+                            try {
+                              if (value) {
+                                await BackgroundDownloads.ensureStarted();
+                              }
+                              await widget.store.setAutoExport(value);
+                            } catch (error) {
+                              if (mounted) {
+                                setState(() => _message = error.toString());
+                              }
+                            }
+                          },
                   ),
-                  onChanged: _busy
-                      ? null
-                      : (value) async {
-                          try {
-                            if (value) {
-                              await BackgroundDownloads.ensureStarted();
-                            }
-                            await widget.store.setAutoExport(value);
-                          } catch (error) {
-                            if (mounted) {
-                              setState(() => _message = error.toString());
-                            }
-                          }
-                        },
-                ),
-                SwitchListTile(
-                  value: widget.store.exportPosters,
-                  title: const Text('同时导出海报文件'),
-                  subtitle: const Text('默认只写海报 URL。源站海报需要解密或外部读取失败时可开启。'),
-                  onChanged: _busy
-                      ? null
-                      : (value) => saveUserChange(
-                          context,
-                          () => widget.store.setExportPosters(value),
-                        ),
-                ),
+                  SwitchListTile(
+                    value: widget.store.exportPosters,
+                    title: const Text('同时导出海报文件'),
+                    subtitle: const Text('默认只写海报 URL。源站海报需要解密或外部读取失败时可开启。'),
+                    onChanged: _busy
+                        ? null
+                        : (value) => saveUserChange(
+                            context,
+                            () => widget.store.setExportPosters(value),
+                          ),
+                  ),
+                ],
                 ListTile(
                   leading: const Icon(Icons.backup_outlined),
                   title: const Text('导出配置备份'),

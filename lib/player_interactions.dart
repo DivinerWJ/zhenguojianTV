@@ -33,6 +33,8 @@ class PlayerInteractions extends ChangeNotifier {
   late final StreamSubscription<bool> _playing;
   Timer? _holdTimer;
   Timer? _hintTimer;
+  /// 长按倍速的兜底释放定时器（0.8.3，遥控器 KeyUp 丢失时防止一直 3 倍速）。
+  Timer? _boostGuard;
   Future<void> _rates = Future<void>.value();
   final Set<int> _pointers = {};
   int? _pointer;
@@ -105,12 +107,21 @@ class PlayerInteractions extends ChangeNotifier {
       _held = true;
       unawaited(_setRate(3));
       hint('3 倍速 · 松开恢复', persistent: true);
+      // 防卡死兜底（0.8.3）：遥控器长按"确定"时，若中途弹了对话框、
+      // 页面被切走或系统吞掉了 KeyUp，倍速会一直停在 3 倍。
+      // 这里给一个上限，超时自动恢复。
+      _boostGuard?.cancel();
+      _boostGuard = Timer(const Duration(seconds: 30), () {
+        if (!_disposed && _boosting) _endHold();
+      });
     });
   }
 
   void _endHold({bool tap = false, bool silent = false}) {
     final wasKeyboard = _keyboardHold;
     final boosted = _boosting;
+    _boostGuard?.cancel();
+    _boostGuard = null;
     _holdTimer?.cancel();
     _holdTimer = null;
     _keyboardHold = false;
@@ -122,6 +133,19 @@ class PlayerInteractions extends ChangeNotifier {
       seek(5);
     }
   }
+
+  /// 遥控长按开始（0.8.3）。
+  ///
+  /// 电视上没有"按住屏幕"这个手势，长按"确定"是最接近的等价物。
+  /// 与触屏长按共用同一套状态机：350ms 后进入 3 倍速，
+  /// 且只在**正在播放**时生效（暂停时长按无意义）。
+  void holdStart() => _beginHold(keyboard: true);
+
+  /// 遥控松开（0.8.3）。
+  ///
+  /// 注意不传 `tap: true`：`tap` 在键盘语义下是"右键轻点 = 前进 5 秒"，
+  /// 而"确定"键轻点已经由播放页的控件显示逻辑消费，不能重复触发。
+  void holdEnd() => _endHold();
 
   void cancel() {
     if (_disposed) return;
@@ -294,6 +318,7 @@ class PlayerInteractions extends ChangeNotifier {
     _disposed = true;
     _holdTimer?.cancel();
     _hintTimer?.cancel();
+    _boostGuard?.cancel();
     if (_boosting) unawaited(_setRate(baseSpeed()));
     _boosting = false;
     _playing.cancel();

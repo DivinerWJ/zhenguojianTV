@@ -32,7 +32,16 @@ android {
 
     defaultConfig {
         applicationId = "com.duanju.duanju_app"
-        minSdk = 26
+        // 0.8.3：26 → 24。
+        //
+        // 电视盒子换代很慢，Android 7.0 / 7.1（API 24 / 25）的机器
+        // （运营商送的魔百和、老款小米盒子、部分投影仪）存量很大，
+        // minSdk 26 会直接把这些设备挡在安装门外（INSTALL_FAILED_OLDER_SDK）。
+        //
+        // 为什么是 24 而不是更低：ffmpeg_kit_flutter_new_min_gpl 的 AAR 声明
+        // minSdkVersion 24，再往下会触发 manifest merger 失败。24 已能覆盖 7.x，
+        // 5.x / 6.x 机器（API 21-23）仍不支持，需要换 FFmpeg 依赖才能再降。
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

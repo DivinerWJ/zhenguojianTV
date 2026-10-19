@@ -88,6 +88,31 @@ class AppBuildTests(unittest.TestCase):
                     self.assertIn('--dart-define=ALL_SOURCES=' + str(enabled).lower(), flutter)
                     self.assertIn('core.buildAllSources=' + str(enabled).lower(), BuildVariant(enabled).linker_flags)
 
+    def test_android_tv_universal_builds_split_and_all_apks(self):
+        root = Path(__file__).resolve().parent
+        script = root / 'build_android.py'
+        arguments = [str(script), '--all-sources', '--tv', '--universal']
+        with mock.patch.object(sys, 'argv', arguments), \
+                mock.patch.dict(os.environ, {'PATH': '/tools'}, clear=True), \
+                mock.patch('shutil.which', return_value='/tools/flutter'), \
+                mock.patch('subprocess.run') as run:
+            runpy.run_path(str(script), run_name='__main__')
+
+        calls = [call.args[0] for call in run.call_args_list]
+        flutter_builds = [call for call in calls if call[:3] == ['/tools/flutter', 'build', 'apk']]
+        self.assertEqual(len(flutter_builds), 2)
+        split = next(call for call in flutter_builds if '--split-per-abi' in call)
+        universal = next(call for call in flutter_builds if '--split-per-abi' not in call)
+        for call in (split, universal):
+            self.assertIn('--dart-define=ALL_SOURCES=true', call)
+            self.assertIn('android-arm64,android-arm', call)
+
+        package = next(call for call in calls if any(str(arg).endswith('package_release.py') for arg in call))
+        self.assertIn('--universal', package)
+        self.assertEqual(package.count('--abi'), 2)
+        self.assertIn('arm64-v8a', package)
+        self.assertIn('armeabi-v7a', package)
+
 
 if __name__ == '__main__':
     unittest.main()

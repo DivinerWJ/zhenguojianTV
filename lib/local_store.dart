@@ -180,26 +180,20 @@ class LocalStore extends ChangeNotifier {
       isFavorite(id) ? _followStates[id] : null;
   bool get hideVip =>
       _configurationError == null ? _bool(_key('hideVip')) ?? true : true;
-  String get displayMode {
-    // 0.2.26：仅保留手机版，暂停 TV 版（用户要求）。
-    //
-    // 历史上「界面模式」允许在 自动/电视/手机 之间切换，电视模式会启用
-    // 遥控器导航、遥控按钮、TV 主题等一整套界面。下个版本只做手机版，
-    // 因此这里**统一强制返回 standard（手机/电脑）**：
-    // - 无论设备是否为电视、无论历史配置是什么，都按手机版渲染；
-    // - readDisplayMode 保留原始值读取能力，便于日后恢复 TV 版；
-    // - TV 相关代码全部保留，不删除（JC-0002）。
-    return 'standard';
-  }
-
-  /// 原始「界面模式」配置值（0.2.26 新增，仅供日后恢复 TV 版使用）。
+  /// 界面模式：`auto` 按设备自动识别、`television` 强制电视布局、
+  /// `standard` 强制手机/电脑布局。
   ///
-  /// 与 [displayMode] 不同：本方法返回用户/设备实际存储的值，
-  /// 不做"仅手机版"的强制转换。
-  String get storedDisplayMode {
+  /// 0.8.0 恢复 TV 版：0.2.26 曾在此**统一强制返回 standard**，
+  /// 导致电视设备即使被原生层识别为 television，也拿不到遥控布局
+  /// （侧边导航、焦点主题、电视网格全部失效）。现在恢复为读取真实配置，
+  /// 未配置时默认 `auto`，由 `AppDevice.detect()` 的结果决定是否电视布局。
+  String get displayMode {
     final value = _configurationError == null ? _string('displayMode') : null;
     return {'auto', 'television', 'standard'}.contains(value) ? value! : 'auto';
   }
+
+  /// 已存储的「界面模式」原始值（与 [displayMode] 相同，保留旧调用点）。
+  String get storedDisplayMode => displayMode;
 
   String get themeMode {
     final value = _configurationError == null ? _string('themeMode') : null;
@@ -219,6 +213,19 @@ class LocalStore extends ChangeNotifier {
   /// 默认 **false**（用户明确要求：用流量时不自动播放）。
   /// 关闭时首页刷到新剧只加载首帧，需用户点一下才开始播；Wi-Fi / 有线不受影响。
   bool get autoPlayOnMobile => !locked && (_bool('autoPlayOnMobile') ?? false);
+
+  /// 电视兼容模式（0.8.3）：强制走**软件解码**。
+  ///
+  /// 背景：部分电视盒子 / 投影仪的硬件解码器（MediaCodec）不完整，
+  /// libmpv 用 `hwdec=auto-safe` 时会"有声音没画面""绿屏""纯黑"，
+  /// 且应用侧拿不到任何错误——`playing` 是 true，只是出不来帧。
+  /// 打开后播放器改用 `hwdec=no`（纯 CPU 解码），代价是 4K 会更吃性能，
+  /// 1080p 短剧基本无感。
+  ///
+  /// 默认关闭：正常设备用硬解更省电、更流畅。
+  /// 播放页还有一层自动降级（连续两次拿不到首帧时自动切软解），
+  /// 这里只是给用户一个"手动强制"的开关。
+  bool get tvCompatMode => !locked && (_bool(_key('tvCompatMode')) ?? false);
   String get source {
     if (locked) return '';
     final value = _string(_key('source')) ?? '';
@@ -404,6 +411,9 @@ class LocalStore extends ChangeNotifier {
       _setting('autoUpdateCatalog', value, admin: true);
   Future<void> setAutoPlayOnMobile(bool value) =>
       _setting('autoPlayOnMobile', value);
+  /// 电视兼容模式开关（0.8.3）。
+  Future<void> setTvCompatMode(bool value) =>
+      _setting(_key('tvCompatMode'), value);
   Future<void> setHideVip(bool value) => _setting(_key('hideVip'), value);
   Future<void> setSource(String value) {
     if (!allowsSource(value)) return Future.error(StateError('当前用户没有此站源权限'));

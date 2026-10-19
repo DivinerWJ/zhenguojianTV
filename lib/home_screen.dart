@@ -15,6 +15,7 @@ import 'catalog_auto_updater.dart';
 import 'catalog_sort.dart';
 import 'catalog_sort_sheet.dart';
 import 'recommendations_screen.dart';
+import 'tv_home.dart';
 import 'vertical_feed_screen.dart';
 import 'rankings_screen.dart';
 import 'detail_screen.dart';
@@ -23,10 +24,12 @@ import 'local_store.dart';
 import 'lan_screen.dart';
 import 'models.dart';
 import 'remote_widgets.dart';
+import 'tv_dialogs.dart';
 import 'widgets.dart';
 import 'vip_icon.dart';
 import 'settings_screen.dart';
 import 'profiles_screen.dart';
+import 'pinyin.dart';
 import 'search_input.dart';
 import 'sources_screen.dart';
 import 'batch_download_screen.dart';
@@ -70,6 +73,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// 多选站源（非空时优先于单源/全部，作为当前浏览范围）。
   List<String> _multiSources = const [];
   List<Drama> _items = [];
+  /// 当前生效的拼音/首字母关键词（0.8.4），空串表示没在用拼音搜索。
+  ///
+  /// 单独存一份而不是复用 `_search.text`：用户敲完 `hjdnz` 之后可能又手动
+  /// 改了输入框但没提交，这时候列表应该保持上一次提交的结果，而不是抖成空。
+  String _pinyinQuery = '';
+  /// 拼音搜索的候选池 = 浏览过的全部剧目（见 `CatalogBrowser.library`）。
+  List<Drama> _pinyinPool = const [];
   bool _loading = true;
   bool _loadingMore = false;
   bool _hasMore = true;
@@ -226,9 +236,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return '筛选本机已更新剧库';
     }
     final names = online.map((source) => source.name).join('、');
+    // 「或拼音/首字母」（0.8.4）：这个能力不写在提示里，用户不会知道。
     return online.length == _group.sources.length
-        ? '搜索${names}短剧'
-        : '搜索${names}及本机剧库';
+        ? '搜索${names}短剧，或拼音/首字母'
+        : '搜索${names}及本机剧库，或拼音/首字母';
   }
 
   String get _category => _categorySelections[_group.id] ?? '';
@@ -372,26 +383,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// 才写回并重载一次，中途可按「取消」或点遮罩放弃。
   Widget _sourceMenu() {
     final enabled = widget.store.sources.isNotEmpty;
-    return InkWell(
+    return SourceSwitchPill(
       key: const ValueKey('source-switch'),
-      borderRadius: BorderRadius.circular(8),
-      onTap: enabled ? _openSourceSheet : null,
-      child: SizedBox(
-        height: 48,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Text(
-                _group.name,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w800),
-              ),
-            ),
-            if (enabled) const Icon(Icons.expand_more_rounded),
-          ],
-        ),
-      ),
+      label: _group.name,
+      count: _group.sources.length,
+      onPressed: enabled ? _openSourceSheet : null,
     );
   }
 
@@ -408,16 +404,51 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           if (_multiSources.contains(site.id)) site.groupId,
       if (_multiSources.isEmpty) _source.groupId,
     };
-    final result = await showModalBottomSheet<Set<String>>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (sheetContext) => _SourcePickerSheet(
-        groups: groups,
-        initial: initial,
-        allSources: widget.store.sources,
-      ),
-    );
+    // TV 上用**居中对话框**而不是底部弹窗：
+    // 底部弹窗在 16:9 电视上离视线中心太远，且容易被底部过扫描裁掉；
+    // 同时遥控器的焦点在居中卡片里横向移动更自然。
+    final television = AppLayout.isTelevision(context);
+    final Set<String>? result;
+    if (television) {
+      result = await showDialog<Set<String>>(
+        context: context,
+        barrierColor: Colors.black.withValues(alpha: .66),
+        builder: (dialogContext) => Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 48,
+            vertical: 32,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: _SourcePickerSheet(
+              groups: groups,
+              initial: initial,
+              allSources: widget.store.sources,
+              television: true,
+            ),
+          ),
+        ),
+      );
+    } else {
+      result = await showModalBottomSheet<Set<String>>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        isScrollControlled: true,
+        builder: (sheetContext) => SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: _SourcePickerSheet(
+              groups: groups,
+              initial: initial,
+              allSources: widget.store.sources,
+            ),
+          ),
+        ),
+      );
+    }
     if (result == null || !mounted) return;
     // 「确定」：把勾选的分组展开成站点 id 列表后应用。
     final ids = <String>[
@@ -457,6 +488,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _allSources = false;
       });
       await widget.store.setMultiSources(const []);
+      if (!mounted) return;
       _changeSource(SourceSite.byId(available.first));
       return;
     }
@@ -602,6 +634,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// 电视搜索的「热门搜索」词（0.8.3）。
+  ///
+  /// 取当前剧库里**真实存在**的片名，而不是写死的营销词——
+  /// 无输入法的盒子上，用户点一下就能搜到眼前这部；写死的词很可能搜不到东西，
+  /// 点了等于白点。
+  List<String> get _televisionHotSearches {
+    final seen = <String>{};
+    final result = <String>[];
+    for (final drama in _items) {
+      final title = drama.title.trim();
+      if (title.isEmpty || !seen.add(title)) continue;
+      result.add(title);
+      if (result.length >= 10) break;
+    }
+    return result;
+  }
+
   Future<void> _televisionSearch() async {
     final query = await showDialog<String>(
       context: context,
@@ -613,6 +662,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ? '搜索${_group.name}短剧'
             : '筛选当前已加载短剧',
         recentSearches: widget.store.recentSearches,
+        hotSearches: _televisionHotSearches,
         onCancel: () => unawaited(widget.repository.cancelSuggestions()),
         suggestions: _searchSuggestions ? widget.repository.suggestions : null,
       ),
@@ -622,14 +672,44 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _televisionBack() {
+  /// 电视返回键（0.8.1）。
+  ///
+  /// 逐层退让，最后才问"是否退出应用"：
+  /// 选择模式 → 退出选择；不在首页 → 回首页；搜索有词 → 清空搜索；
+  /// 都没有 → 弹确认框（电视上误按返回不该直接退到桌面）。
+  Future<void> _televisionBack() async {
     if (_selectionMode) {
       _cancelSelection();
-    } else if (_tab != _feedIndex) {
+      return;
+    }
+    if (_tab != _feedIndex) {
       setState(() => _tab = _feedIndex);
-    } else if (_search.text.isNotEmpty) {
-      _search.clear();
-      _searchChanged('');
+      return;
+    }
+    if (_search.text.isNotEmpty || _pinyinQuery.isNotEmpty) {
+      _clearSearch();
+      return;
+    }
+    await _confirmExit();
+  }
+
+  /// 是否已弹出"退出应用"确认框（防止连续按返回叠出多个对话框）。
+  bool _exitDialogOpen = false;
+
+  Future<void> _confirmExit() async {
+    if (_exitDialogOpen || !mounted) return;
+    _exitDialogOpen = true;
+    try {
+      final exit = await showTvConfirmDialog(
+        context,
+        title: '退出$appName？',
+        message: '按「确定」退出应用，按「返回」或选「继续观看」留在应用内。',
+        confirmLabel: '退出',
+        cancelLabel: '继续观看',
+      );
+      if (exit && mounted) await SystemNavigator.pop();
+    } finally {
+      _exitDialogOpen = false;
     }
   }
 
@@ -716,6 +796,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final generation = ++_generation;
     final group = _group;
     final query = _onlineSearch ? _search.text.trim() : '';
+    // 纯字母关键词既可能是拼音，也可能是站源本身支持的英文标题。
+    // 0.8.4 曾在这里直接 return，只过滤“浏览过的本地缓存”，导致未缓存剧目
+    // 永远搜不到，同时也误伤真正的英文搜索。现在改为双路并行：
+    // 1. 原关键词继续交给站源搜索；
+    // 2. 本地缓存额外做完整拼音 / 首字母匹配，最终在 _visible 中合并去重。
+    final pinyinQuery = isPinyinQuery(query) ? query : '';
+    _pinyinQuery = pinyinQuery;
+    _pinyinPool = pinyinQuery.isEmpty
+        ? const []
+        : _browser.cachedLibrary(group.sources.map((site) => site.id));
     setState(() {
       _error = null;
       if (query.isNotEmpty) _categorySelections[group.id] = '';
@@ -789,6 +879,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _items = [];
       _hasMore = true;
       _submittedQuery = '';
+      _pinyinQuery = '';
+      _pinyinPool = const [];
       _error = null;
     });
     unawaited(
@@ -804,6 +896,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _loadCategories();
   }
 
+  /// 退出搜索态、回到常规首页（0.8.4）。
+  ///
+  /// 电视搜索结果页的「清除搜索」和返回键都走这里。**不走** `_searchChanged`
+  /// 那 300ms 防抖：遥控器上按一下要等三分之一秒才有反应，观感就是"没按上"。
+  void _clearSearch() {
+    _debounce?.cancel();
+    _selectionMode = false;
+    _selectedDramas.clear();
+    _search.clear();
+    setState(() {
+      _pinyinQuery = '';
+      _pinyinPool = const [];
+    });
+    if (_onlineSearch) _load();
+  }
+
   void _searchChanged(String query) {
     _debounce?.cancel();
     _selectionMode = false;
@@ -812,6 +920,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _generation++;
       unawaited(_browser.cancel());
       _loading = _loadingMore = false;
+    }
+    // 关键词被清空（用户手动删光 / 点了取消）就退出搜索态，
+    // 否则 `_pinyinQuery` 会一直把列表钉在旧结果上。
+    if (query.trim().isEmpty && _pinyinQuery.isNotEmpty) {
+      _pinyinQuery = '';
+      _pinyinPool = const [];
     }
     setState(() {});
     if (_onlineSearch && query.trim().isEmpty) {
@@ -836,10 +950,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
       );
     }
+    // 拼音/首字母（0.8.4）：`_load` 会识别纯字母关键词，同时执行站源搜索和
+    // 本地拼音匹配，并在 `_visible` 中合并去重。
     if (_onlineSearch) {
       _load();
+    } else if (isPinyinQuery(_search.text)) {
+      // 不联网的站源本来就在 `_items` 里筛，这里只是把「搜索态」标出来，
+      // 好让电视切到搜索结果页——否则用户看不出搜索到底生效了没有。
+      setState(() => _pinyinQuery = _search.text.trim());
     } else {
-      setState(() {});
+      setState(() {
+        _pinyinQuery = '';
+        _pinyinPool = const [];
+      });
     }
   }
 
@@ -864,6 +987,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           store: widget.store,
           resumeOnOpen: resume,
           downloadOnOpen: download,
+        ),
+      ),
+    );
+  }
+
+  /// 进入竖滑「刷剧」模式（0.8.3）。
+  ///
+  /// 电视首页是横向海报行，竖滑流改由这个独立路由承载：
+  /// 返回键回到电视首页，竖滑流内部还有一层「退出播放」确认框。
+  void _startFeed() {
+    _pauseCatalog();
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => VerticalFeedScreen(
+          repository: widget.repository,
+          store: widget.store,
+          sources: _group.sources,
+          hongguoGenres: _feedHongguoGenres,
+          playerFactory: widget.feedPlayerFactory,
         ),
       ),
     );
@@ -1011,19 +1153,44 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   List<Drama> get _visible {
     final query = _search.text.trim().toLowerCase();
+
+    bool allowed(Drama drama) {
+      if (!widget.store.allowsSource(drama.source)) return false;
+      if (_category.startsWith('local:') &&
+          categoryName(drama.category) != _category.substring(6)) {
+        return false;
+      }
+      if (_hideVip && drama.source == 'huangdou' && drama.vip) return false;
+      return true;
+    }
+
+    // 拼音搜索：在线站源的原始搜索结果 + 本地缓存中的拼音命中结果合并去重。
+    // 这样 `hjdnz` 能本地命中中文标题，`love` 这类纯英文关键词也不会被
+    // 错当成拼音而丢掉服务端真实结果。
+    if (_pinyinQuery.isNotEmpty) {
+      final merged = <String, Drama>{};
+      if (_onlineSearch) {
+        for (final drama in _items) {
+          if (allowed(drama)) merged['${drama.source}/${drama.id}'] = drama;
+        }
+      }
+      final localPool = _onlineSearch ? _pinyinPool : _items;
+      for (final drama in localPool) {
+        if (!allowed(drama) || !matchesPinyin(drama.title, _pinyinQuery)) {
+          continue;
+        }
+        merged.putIfAbsent('${drama.source}/${drama.id}', () => drama);
+      }
+      return sortCatalog(merged.values, widget.store.catalogView);
+    }
+
     return sortCatalog(
       _items.where((drama) {
-        if (!widget.store.allowsSource(drama.source)) return false;
-        if (_category.startsWith('local:') &&
-            categoryName(drama.category) != _category.substring(6)) {
-          return false;
-        }
-        if (_hideVip && drama.source == 'huangdou' && drama.vip) {
-          return false;
-        }
-        return _onlineSearch ||
-            query.isEmpty ||
-            matchesDramaQuery(drama, query);
+        if (!allowed(drama)) return false;
+        if (query.isEmpty) return true;
+        // 在线搜索结果已经由站源筛选；本地站源仍按标题/描述/标签过滤。
+        if (_onlineSearch) return true;
+        return matchesDramaQuery(drama, query);
       }),
       widget.store.catalogView,
     );
@@ -1065,7 +1232,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ] else ...[
                 // 0.7.2（XQ-0106）：首页剧类筛选入口。仅"单独红果"时可用。
-                if (_tab == _feedIndex)
+                // 0.8.3：电视首页是海报行，剧类筛选只对竖滑流有意义，电视隐藏。
+                if (_tab == _feedIndex && !television)
                   IconButton(
                     key: const ValueKey('feed-genre'),
                     tooltip: _feedGenreEnabled
@@ -1104,7 +1272,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         : _openRankings,
                     icon: const Icon(Icons.leaderboard_outlined),
                   ),
+                  // 多选下载（0.8.3）：电视上隐藏。
+                  //
+                  // 电视只适合"挑一部看"，批量下载 20 部短剧是手机/电脑的活；
+                  // 而且选择模式的确认按钮在电视上要跨整个内容区去够，容易误触。
                   if (!_showRecommendations &&
+                      !television &&
                       widget.store.canDownload &&
                       widget.repository.supportsDownloads)
                     IconButton(
@@ -1189,8 +1362,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           ),
                           const AboutCredit(
                             name: '软萌小正太',
-                            role: '本应用改版与维护',
+                            role: '原改版与维护',
                             url: 'https://github.com/kuoluoss/zhenguojian',
+                          ),
+                          const AboutCredit(
+                            name: 'ai0by',
+                            role: 'TV 版适配与维护',
+                            url: 'https://github.com/ai0by',
+                          ),
+                          const AboutCredit(
+                            name: '项目仓库',
+                            role: '真果鉴 TV GitHub',
+                            url: 'https://github.com/ai0by/zhenguojianTV',
                           ),
                           const SizedBox(height: 8),
                           Align(
@@ -1233,12 +1416,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       value: 'settings',
                       child: Text('设置与备份'),
                     ),
-                    // 「界面模式」入口已隐藏（0.2.26）。
+                    // 「界面模式」入口（0.8.0 恢复）。
                     //
-                    // 用户要求：下个版本仅保留手机版，暂停 TV 版。
-                    // 该入口用于手动在「自动/电视/手机」之间切换显示模式，
-                    // 隐藏后应用统一按手机版渲染（相关 TV 代码保留，不删除，
-                    // 便于日后恢复；见 JC-0002 与项目决策记录）。
+                    // 0.2.26 曾隐藏此入口并强制手机版渲染；现恢复 TV 版，
+                    // 需要保留手动切换能力：部分电视盒子（定制 launcher、
+                    // 投影仪、模拟器）不会上报 leanback / television，
+                    // 自动识别失效时用户可在这里强制切到「电视 / 遥控器」。
+                    const PopupMenuItem(value: 'display', child: Text('界面模式')),
                     const PopupMenuItem(
                       value: 'about',
                       child: Text('关于$appName'),
@@ -1277,7 +1461,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 icon: entry.$2.$1,
                                 selected: _tab == entry.$1,
                                 autofocus: entry.$1 == 0,
-                                onPressed: () => _changeTab(entry.$1),
+                                onPressed: () {
+                                  // 电视没有"双击标签"这个手势：
+                                  // 已经在首页时再按一次「首页」= 刷新剧库（0.8.3）。
+                                  if (_tab == entry.$1) {
+                                    if (entry.$1 == _feedIndex &&
+                                        widget.store.sources.isNotEmpty) {
+                                      _refreshCatalog();
+                                    }
+                                    return;
+                                  }
+                                  _changeTab(entry.$1);
+                                },
                               ),
                             ),
                         ],
@@ -1338,18 +1533,46 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   child: IndexedStack(
                     index: _tab,
                     children: [
-                      // 首页：竖滑流。
-                      VerticalFeedScreen(
-                        repository: widget.repository,
-                        store: widget.store,
-                        embedded: true,
-                        sources: _group.sources,
-                        hongguoGenres: _feedHongguoGenres,
-                        playerFactory: widget.feedPlayerFactory,
-                        refreshSignal: _feedRefresh,
-                        onReady: widget.onFeedReady,
-                        active: _tab == _feedIndex,
-                      ),
+                      // 首页（0.8.3）：电视和手机是两个完全不同的东西。
+                      //
+                      // 手机：竖滑短视频流（刷到就播，上下滑换剧）。
+                      // 电视：横向海报行（继续观看 / 热门 / 分类），
+                      //       竖滑流降级为「开始刷剧」按钮推进去的独立页面。
+                      //
+                      // 为什么不在电视上继续用竖滑流：遥控器上下键只能"下一部"，
+                      // 用户既看不到剧库里有什么，也回不到刚才看过的那部；
+                      // 而且一进应用就自动播，电视上很吵。
+                      television
+                          ? TvHomeScreen(
+                              repository: widget.repository,
+                              items: _visible,
+                              history: widget.store.history,
+                              loading: _loading,
+                              searchQuery: _pinyinQuery,
+                              onClearSearch: _clearSearch,
+                              emptyMessage: widget.store.sources.isEmpty
+                                  ? '暂无可用站源，请联系管理员开放'
+                                  : null,
+                              onOpen: _openDrama,
+                              onResume: (entry) =>
+                                  _openDrama(entry.drama, resume: true),
+                              onStartFeed: _startFeed,
+                              onBrowse: () => _changeTab(_discoverIndex),
+                              onSearch: () => unawaited(_televisionSearch()),
+                              onRefresh: _refreshCatalog,
+                              onContentReady: widget.onFeedReady,
+                            )
+                          : VerticalFeedScreen(
+                              repository: widget.repository,
+                              store: widget.store,
+                              embedded: true,
+                              sources: _group.sources,
+                              hongguoGenres: _feedHongguoGenres,
+                              playerFactory: widget.feedPlayerFactory,
+                              refreshSignal: _feedRefresh,
+                              onReady: widget.onFeedReady,
+                              active: _tab == _feedIndex,
+                            ),
                       // 发现页。
                       widget.store.sources.isEmpty
                           ? const StatusPanel(
@@ -1437,13 +1660,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         );
         if (!television && !_selectionMode) return scaffold;
         return PopScope(
-          canPop:
-              !_selectionMode &&
-              (!television ||
-                  _tab == _feedIndex ||
-                  _tab == _discoverIndex && _search.text.isEmpty),
+          // 电视（0.8.1）：所有返回都先交给 `_televisionBack` 逐层退让，
+          // 退到首页且无其它状态时才弹"退出应用"确认框。
+          // 手机保持原行为：不在选择模式时直接交给系统退出。
+          canPop: !_selectionMode && !television,
           onPopInvokedWithResult: (didPop, result) {
-            if (!didPop) _televisionBack();
+            if (didPop) return;
+            unawaited(_televisionBack());
           },
           child: CallbackShortcuts(
             bindings: {
@@ -1906,11 +2129,18 @@ class _SourcePickerSheet extends StatefulWidget {
     required this.groups,
     required this.initial,
     required this.allSources,
+    this.television = false,
   });
 
   final List<SourceGroup> groups;
   final Set<String> initial;
   final List<SourceSite> allSources;
+
+  /// 电视模式：加大字号/点击区，并给每一行挂 RemoteTarget 焦点。
+  ///
+  /// 由调用方显式传入而不是只读 `AppLayout`，这样在纯 widget 测试里
+  /// 也能直接构造电视版弹窗。
+  final bool television;
 
   @override
   State<_SourcePickerSheet> createState() => _SourcePickerSheetState();
@@ -1918,6 +2148,17 @@ class _SourcePickerSheet extends StatefulWidget {
 
 class _SourcePickerSheetState extends State<_SourcePickerSheet> {
   late final Set<String> _selected = {...widget.initial};
+
+  bool get _tv => widget.television || AppLayout.isTelevision(context);
+
+  /// 遥控器初始落点：优先停在**已勾选**的第一个分组上，
+  /// 这样一打开就知道"现在用的是哪个源"，而不是从列表头开始瞎摸。
+  int get _autoFocusIndex {
+    final index = widget.groups.indexWhere(
+      (group) => _selected.contains(group.id),
+    );
+    return index < 0 ? 0 : index;
+  }
 
   void _toggle(String groupId) {
     setState(() {
@@ -1938,99 +2179,299 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final accent = theme.colorScheme.primary;
-    return SafeArea(
-      top: false,
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surface,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '选择站源',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
+    final colors = theme.colorScheme;
+    final tv = _tv;
+    final selectedCount = _selected.length;
+    final groupCount = widget.groups.length;
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(tv ? 24 : 18),
+        border: tv
+            ? Border.all(
+                color: colors.outlineVariant.withValues(alpha: .8),
+                width: 1,
+              )
+            : null,
+        boxShadow: tv
+            ? [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: .45),
+                  blurRadius: 32,
+                  spreadRadius: 4,
+                ),
+              ]
+            : null,
+      ),
+      padding: EdgeInsets.fromLTRB(
+        tv ? 24 : 16,
+        tv ? 20 : 14,
+        tv ? 24 : 16,
+        tv ? 18 : 12,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '选择站源',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: tv ? 26 : 17,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
-                TextButton(
-                  key: const ValueKey('source-sheet-all'),
-                  onPressed: _selectAll,
-                  child: const Text('全选'),
-                ),
-                TextButton(
-                  key: const ValueKey('source-sheet-clear'),
-                  onPressed: _clearAll,
-                  child: const Text('清空'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.sizeOf(context).height * 0.45,
               ),
-              child: SingleChildScrollView(
+              // 已选计数：多选时最容易"忘了自己勾了几个"。
+              Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: tv ? 10 : 8,
+                  vertical: tv ? 4 : 2,
+                ),
+                decoration: BoxDecoration(
+                  color: colors.primary.withValues(alpha: .14),
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                child: Text(
+                  '已选 $selectedCount/$groupCount',
+                  style: TextStyle(
+                    fontSize: tv ? 15 : 12,
+                    fontWeight: FontWeight.w700,
+                    color: colors.primary,
+                  ),
+                ),
+              ),
+              SizedBox(width: tv ? 16 : 6),
+              _quickAction(
+                key: const ValueKey('source-sheet-all'),
+                label: '全选',
+                onPressed: _selectAll,
+              ),
+              SizedBox(width: tv ? 8 : 2),
+              _quickAction(
+                key: const ValueKey('source-sheet-clear'),
+                label: '清空',
+                onPressed: _clearAll,
+              ),
+            ],
+          ),
+          SizedBox(height: tv ? 6 : 2),
+          Text(
+            tv
+                ? '共 ${widget.allSources.length} 个站源，可同时勾选多个聚合浏览'
+                : '可同时勾选多个站源聚合浏览',
+            style: TextStyle(
+              fontSize: tv ? 15 : 12,
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+          SizedBox(height: tv ? 16 : 8),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: tv
+                  ? (MediaQuery.sizeOf(context).height * 0.52).clamp(
+                      200.0,
+                      460.0,
+                    )
+                  : MediaQuery.sizeOf(context).height * 0.45,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var index = 0; index < widget.groups.length; index++)
+                    _groupTile(widget.groups[index], index, tv),
+                ],
+              ),
+            ),
+          ),
+          SizedBox(height: tv ? 16 : 8),
+          Row(
+            children: [
+              Expanded(
+                child: _sheetButton(
+                  key: const ValueKey('source-sheet-cancel'),
+                  label: '取消',
+                  tv: tv,
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ),
+              SizedBox(width: tv ? 16 : 12),
+              Expanded(
+                child: _sheetButton(
+                  key: const ValueKey('source-sheet-confirm'),
+                  label: '确定',
+                  tv: tv,
+                  filled: true,
+                  onPressed: () => Navigator.of(context).pop({..._selected}),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 单行分组：勾选框 + 名称 + 入口列表。
+  ///
+  /// 用 RemoteTarget 而不是 CheckboxListTile：后者在电视上只有一个很淡的
+  /// 焦点色块，遥控器停在上面几乎看不出来；而且它的点击区只有文字那一行。
+  Widget _groupTile(SourceGroup group, int index, bool tv) {
+    final colors = Theme.of(context).colorScheme;
+    final checked = _selected.contains(group.id);
+    final entries = group.sources.map((site) => site.entryName).join(' · ');
+    return Padding(
+      padding: EdgeInsets.only(bottom: tv ? 10 : 6),
+      child: RemoteTarget(
+        key: ValueKey('source-sheet-${group.id}'),
+        onPressed: () => _toggle(group.id),
+        selected: checked,
+        autofocus: tv && index == _autoFocusIndex,
+        label:
+            '${group.name}，${group.sources.length} 个入口，'
+            '${checked ? '已选' : '未选'}',
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: tv ? 12 : 8,
+            vertical: tv ? 12 : 8,
+          ),
+          child: Row(
+            children: [
+              _checkBox(checked, tv),
+              SizedBox(width: tv ? 14 : 10),
+              Expanded(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    for (final group in widget.groups)
-                      CheckboxListTile(
-                        key: ValueKey('source-sheet-${group.id}'),
-                        value: _selected.contains(group.id),
-                        onChanged: (_) => _toggle(group.id),
-                        controlAffinity: ListTileControlAffinity.leading,
-                        activeColor: accent,
-                        dense: true,
-                        title: Text(
-                          group.name,
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        // 分组下有多个站点时，把站点名列出来，
-                        // 避免用户以为"黄果"只是一个源（实际含视频/AI/旧版）。
-                        subtitle: group.sources.length > 1
-                            ? Text(
-                                group.sources
-                                    .map((site) => site.entryName)
-                                    .join(' · '),
-                                style: theme.textTheme.bodySmall,
-                              )
-                            : null,
+                    Text(
+                      group.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: tv ? 19 : 15,
+                        fontWeight: FontWeight.w700,
+                        color: checked ? colors.primary : colors.onSurface,
                       ),
+                    ),
+                    if (group.sources.length > 1) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        '${group.sources.length} 个入口 · $entries',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: tv ? 14 : 11.5,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    key: const ValueKey('source-sheet-cancel'),
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('取消'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    key: const ValueKey('source-sheet-confirm'),
-                    onPressed: () => Navigator.of(context).pop({..._selected}),
-                    child: const Text('确定'),
-                  ),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _checkBox(bool checked, bool tv) {
+    final colors = Theme.of(context).colorScheme;
+    final size = tv ? 30.0 : 22.0;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: checked ? colors.primary : Colors.transparent,
+        borderRadius: BorderRadius.circular(tv ? 9 : 6),
+        border: Border.all(
+          color: checked ? colors.primary : colors.outline,
+          width: 2,
+        ),
+      ),
+      child: checked
+          ? Icon(
+              Icons.check_rounded,
+              size: size - 8,
+              color: colors.onPrimary,
+            )
+          : null,
+    );
+  }
+
+  /// 全选 / 清空：TV 上同样要能聚焦，所以 TV 用 RemoteTarget，
+  /// 手机沿用 TextButton（触屏不需要焦点环，也省一点宽度）。
+  Widget _quickAction({
+    required Key key,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    final tv = _tv;
+    if (!tv) {
+      return TextButton(key: key, onPressed: onPressed, child: Text(label));
+    }
+    final colors = Theme.of(context).colorScheme;
+    return RemoteTarget(
+      key: key,
+      onPressed: onPressed,
+      label: label,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+            color: colors.primary,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sheetButton({
+    required Key key,
+    required String label,
+    required bool tv,
+    required VoidCallback onPressed,
+    bool filled = false,
+  }) {
+    if (!tv) {
+      final child = Text(label);
+      return filled
+          ? FilledButton(key: key, onPressed: onPressed, child: child)
+          : OutlinedButton(key: key, onPressed: onPressed, child: child);
+    }
+    final colors = Theme.of(context).colorScheme;
+    return RemoteTarget(
+      key: key,
+      onPressed: onPressed,
+      label: label,
+      child: Container(
+        height: 52,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: filled ? colors.primary : colors.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+          border: filled
+              ? null
+              : Border.all(color: colors.outlineVariant, width: 1),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            color: filled ? colors.onPrimary : colors.onSurface,
+          ),
         ),
       ),
     );

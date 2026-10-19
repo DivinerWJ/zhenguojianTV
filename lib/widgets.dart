@@ -696,12 +696,13 @@ class LoadingHint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final television = AppLayout.isTelevision(context);
     final color = dark
         ? Colors.white70
         : Theme.of(context).colorScheme.onSurfaceVariant;
     final indicator = SizedBox(
-      width: compact ? 16 : 34,
-      height: compact ? 16 : 34,
+      width: compact ? 16 : (television ? 44 : 34),
+      height: compact ? 16 : (television ? 44 : 34),
       child: CircularProgressIndicator(
         strokeWidth: compact ? 2 : 3,
         color: dark ? Colors.white70 : null,
@@ -710,7 +711,11 @@ class LoadingHint extends StatelessWidget {
     final label = Text(
       message,
       textAlign: TextAlign.center,
-      style: TextStyle(color: color, fontSize: compact ? 12 : 14),
+      style: TextStyle(
+        color: color,
+        // 0.8.1：电视上提示文字放大，10 英尺外也能读。
+        fontSize: compact ? 12 : (television ? 18 : 14),
+      ),
     );
     if (compact) {
       return Row(

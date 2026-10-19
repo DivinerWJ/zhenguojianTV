@@ -1,4 +1,5 @@
 import 'models.dart';
+import 'pinyin.dart';
 
 enum CatalogSort {
   source('默认顺序'),
@@ -72,7 +73,19 @@ bool matchesDramaQuery(Drama drama, String query) {
       .split(RegExp(r'\s+'))
       .map(normalizedSearchText)
       .where((word) => word.isNotEmpty);
-  return terms.every(fields.contains);
+  return terms.every(
+    (term) =>
+        fields.contains(term) ||
+        // 拼音/首字母兜底（0.8.4）。
+        //
+        // 电视上没有输入法时用户只能用遥控器敲字母，敲 `hjdnz` 应当能搜到
+        // 「黄金大逆转」。这里只对**标题**做拼音：描述和标签太长，
+        // 命中噪音大且没有实际意义。
+        //
+        // 非纯字母关键词（中文、数字、混合）在 `matchesPinyin`
+        // 内部直接返回 false，所以原有搜索行为完全不变。
+        matchesPinyin(drama.title, term),
+  );
 }
 
 double? catalogMetric(String text) {

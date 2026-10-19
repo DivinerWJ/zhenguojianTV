@@ -9,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import 'core_bridge.dart';
+import 'app_layout.dart';
 import 'detail_screen.dart';
 import 'follow_state.dart';
 import 'lan_controller.dart';
@@ -20,9 +21,11 @@ import 'network_state.dart';
 import 'playback_preferences.dart';
 import 'playback_preloader.dart';
 import 'playback_recovery.dart';
+import 'remote_widgets.dart';
 import 'player_interactions.dart';
 import 'system_volume.dart';
 import 'screen_brightness.dart';
+import 'tv_dialogs.dart';
 import 'widgets.dart';
 
 /// 全屏横屏分区手势的类型（0.7.2，`XQ-0105`）。
@@ -180,9 +183,6 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   Animation<double>? _slideCurve;
   bool _slideStartedInGuard = false;
 
-  /// 切集后"等新集就绪再复位位移"的兜底定时器（0.7.15，`XQ-0124`）。
-  Timer? _episodeHoldTimer;
-
   /// 「因自动连播而进入」的目标页索引（0.7.4）。
   ///
   /// 播完自动跳下一部时设置；被跳到的页面据此**一开始就静默**（不弹控件）。
@@ -223,6 +223,21 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
 
   /// 当前页「切到上一集」的执行入口（由子页上报）。
   Future<void> Function()? _pagePlayPrevEpisode;
+
+  /// 各页上报的遥控器操作入口（0.8.0 电视支持），键为 `站源-剧集id`。
+  ///
+  /// 用 Map 而不是单个字段：PageView 会同时保活相邻页，
+  /// 翻页时新旧两页的 `didUpdateWidget` 先后顺序不确定，
+  /// 单字段会被"上一页"覆盖成错的页面（遥控器操作作用到别的剧上）。
+  /// 按键时再按当前 `_index` 取对应页的入口，顺序无关。
+  final _remoteActions = <String, _FeedRemoteActions>{};
+
+  /// 当前页的遥控器操作入口。
+  _FeedRemoteActions? get _currentRemoteActions {
+    if (_items.isEmpty || _index < 0 || _index >= _items.length) return null;
+    final drama = _items[_index];
+    return _remoteActions['${drama.source}-${drama.id}'];
+  }
 
   /// 是否已上报过就绪（只回调一次）。
   bool _reportedReady = false;
@@ -362,8 +377,6 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     _preloader.dispose();
     _manualPlayed.dispose();
     _unlocked.dispose();
-    _episodeHoldTimer?.cancel();
-    _episodeHoldTimer = null;
     _slideAnimation.dispose();
     _slideOffset.dispose();
     _controller.dispose();
@@ -636,6 +649,20 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     _pagePlayPrevEpisode = hasPrev ? playPrev : null;
   }
 
+  /// 子页上报遥控器操作入口（0.8.0 电视支持）。
+  ///
+  /// [key] 为 `站源-剧集id`；[actions] 为 null 表示该页已销毁，需要移除。
+  /// 只维护 Map、不 setState：这些动作每次按键才用一次，
+  /// 重建整棵竖滑树没有意义，也会打断播放。
+  void _onPageRemoteActions(String key, _FeedRemoteActions? actions) {
+    if (_closed) return;
+    if (actions == null) {
+      _remoteActions.remove(key);
+    } else {
+      _remoteActions[key] = actions;
+    }
+  }
+
   /// 处理竖向拖拽结束时的滑动判定（仅在 PageView 被禁用滚动时生效）。
   ///
   /// 说明：当「连播本剧」开启且当前剧还有下一集时，PageView 会被设为
@@ -693,38 +720,32 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       if (_autoNextEpisode) {
         final playNext = _pagePlayNextEpisode;
         if (playNext != null) {
-          // 0.7.15（XQ-0124）：画面先停在屏幕外（纯黑），等新集就绪再复位；
-          // 否则会在"换源完成前"闪一下上一集的最后一帧。
-          _holdUntilEpisodeReady(playNext());
+          unawaited(playNext());
           return;
         }
         if (single) {
           _toast('已经是最后一集了');
-          _slideOffset.value = 0;
           return;
         }
         // 已到最后一集：回落为切下一部剧，并复位连播模式（0.2.27）。
         _resetAutoNextAtBoundary('本剧已看完，已切换为连播下一部');
       }
-      _slideOffset.value = 0;
       _jump(1);
     } else {
       // 向下滑 = 上一集。
       if (_autoNextEpisode) {
         final playPrev = _pagePlayPrevEpisode;
         if (playPrev != null) {
-          _holdUntilEpisodeReady(playPrev());
+          unawaited(playPrev());
           return;
         }
         if (single) {
           _toast('已经是第一集了');
-          _slideOffset.value = 0;
           return;
         }
         // 已到第一集：回落为切上一部剧，并复位连播模式（0.2.27）。
         _resetAutoNextAtBoundary('已是第一集，已切换为连播下一部');
       }
-      _slideOffset.value = 0;
       _jump(-1);
     }
   }
@@ -788,37 +809,9 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     );
     _slideAnimation.forward(from: 0).whenCompleteOrCancel(() {
       if (_closed || !mounted) return;
-      if (direction == 0) {
-        _slideOffset.value = 0;
-        return;
-      }
-      // 0.7.15：滑出后**不立刻复位**——交给 `_commitVerticalSwipe` 里的
-      // "等新集就绪再复位"，否则换源完成前会闪一下上一集的最后一帧。
-      _commitVerticalSwipe(direction);
-    });
-  }
-
-  /// 切集后让画面停在屏幕外（纯黑），等新集真正就绪再复位（0.7.15，`XQ-0124`）。
-  ///
-  /// 为什么要这样：切集第一步是保存进度（异步写盘），之后才换片源；
-  /// 这期间播放器还在显示上一集的最后一帧。若动画一结束就复位，
-  /// 用户就会看到"上一集最后画面闪一下"。
-  ///
-  /// 10 秒兜底：加载失败或卡住时也必须复位，否则错误提示会被挡在屏幕外。
-  void _holdUntilEpisodeReady(Future<void> loading) {
-    _episodeHoldTimer?.cancel();
-    var released = false;
-    void release() {
-      if (released) return;
-      released = true;
-      _episodeHoldTimer?.cancel();
-      _episodeHoldTimer = null;
-      if (_closed || !mounted) return;
       _slideOffset.value = 0;
-    }
-
-    loading.whenComplete(release);
-    _episodeHoldTimer = Timer(const Duration(seconds: 10), release);
+      if (direction != 0) _commitVerticalSwipe(direction);
+    });
   }
 
   /// 在连播本剧模式下因到达首/尾集而切部时，自动复位为「连播下一部」。
@@ -835,21 +828,69 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   void _toast(String message) {
     if (_closed || !mounted) return;
     final messenger = ScaffoldMessenger.maybeOf(context);
+    final television = AppLayout.isTelevision(context);
     messenger?.showSnackBar(
       SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 2),
+        content: Text(
+          message,
+          // 0.8.1：电视上提示文字放大。
+          style: TextStyle(fontSize: television ? 17 : 14),
+        ),
+        duration: Duration(seconds: television ? 3 : 2),
         behavior: SnackBarBehavior.floating,
       ),
     );
   }
 
-  /// 遥控器 / 键盘上下键切换。
+  /// 是否为「确定 / OK」键（0.8.3）。
+  ///
+  /// 不同遥控器上报的键值不一样：标准 DPAD_CENTER 是 [select]，
+  /// 部分盒子是 [enter]，蓝牙手柄是 [gameButtonA]。
+  static bool _isConfirmKey(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.select ||
+      key == LogicalKeyboardKey.enter ||
+      key == LogicalKeyboardKey.numpadEnter ||
+      key == LogicalKeyboardKey.gameButtonA;
+
+  /// 遥控器 / 键盘按键处理（0.8.0 恢复电视支持）。
+  ///
+  /// 电视上的键位约定：
+  /// - 上 / 下：上一部 / 下一部（原有行为）；
+  /// - 左 / 右：后退 / 前进 10 秒，按住连续；
+  /// - 确定（OK）/ 回车：轻点显示控件并把焦点交给播放按钮，
+  ///   长按 350ms 进入 3 倍速、松开恢复（0.8.3）；
+  /// - 菜单键：打开选集；
+  /// - 返回：控件可见时先收起控件，否则交给系统返回。
+  ///
+  /// 注意 `node.hasPrimaryFocus` 判断：焦点一旦进入播放控件里的按钮，
+  /// 方向键必须留给 Flutter 的焦点遍历，否则电视上会出现
+  /// "控件抢到焦点后遥控器再也移不动"的死锁。
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    final key = event.logicalKey;
+    final remote = _currentRemoteActions;
+    // 松开「确定」= 结束长按倍速（0.8.3）。
+    //
+    // 必须放在最前面：按下确定后控件会显示、焦点会移到播放键，
+    // 此时 `node.hasPrimaryFocus` 已经是 false；若按下面的守卫提前返回，
+    // KeyUp 就收不到，倍速会卡在 3 倍（虽有 30 秒兜底，但不该依赖它）。
+    if (event is KeyUpEvent) {
+      if (_isConfirmKey(key)) {
+        remote?.holdEnd();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
-    final key = event.logicalKey;
+    // 返回键优先处理：控件可见时先收控件，再让系统退出播放页。
+    if (key == LogicalKeyboardKey.goBack || key == LogicalKeyboardKey.escape) {
+      if (remote != null && remote.hideControlsIfVisible()) {
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+    if (!node.hasPrimaryFocus) return KeyEventResult.ignored;
     if (key == LogicalKeyboardKey.arrowDown ||
         key == LogicalKeyboardKey.mediaTrackNext) {
       _jump(1);
@@ -858,6 +899,32 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     if (key == LogicalKeyboardKey.arrowUp ||
         key == LogicalKeyboardKey.mediaTrackPrevious) {
       _jump(-1);
+      return KeyEventResult.handled;
+    }
+    if (remote == null) return KeyEventResult.ignored;
+    if (_isConfirmKey(key)) {
+      if (event is KeyDownEvent) {
+        // 长按 350ms → 3 倍速；轻点仍然只是显示控件（0.8.3）。
+        remote.holdStart();
+        remote.showControls();
+      }
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      // 长按连续快退：首次 -10 秒，按住后每帧 -5 秒（0.8.1）。
+      remote.seekBy(event is KeyRepeatEvent ? -5 : -10);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      remote.seekBy(event is KeyRepeatEvent ? 5 : 10);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.contextMenu) {
+      if (event is KeyDownEvent) remote.openEpisodes();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.mediaPlayPause) {
+      if (event is KeyDownEvent) remote.togglePlayback();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -905,7 +972,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       child: ColoredBox(color: Colors.black, child: _body()),
     );
     if (widget.embedded) return content;
-    return Scaffold(
+    final scaffold = Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
@@ -916,6 +983,44 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
         ),
       ),
     );
+    // 电视（0.8.1）：遥控器返回键容易误触，直接退出会打断正在看的剧。
+    // 这里拦一层确认框，确认后才真正返回（`Navigator.pop()` 不经过 PopScope）。
+    if (!AppLayout.isTelevision(context)) return scaffold;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        unawaited(_confirmLeavePlayback());
+      },
+      child: scaffold,
+    );
+  }
+
+  /// 是否已弹出"退出播放"确认框（防止连续按返回叠出多个对话框）。
+  bool _leaveDialogOpen = false;
+
+  Future<void> _confirmLeavePlayback() async {
+    if (_leaveDialogOpen || _closed || !mounted) return;
+    _leaveDialogOpen = true;
+    // 弹框期间暂停，避免"对话框挡着画面、声音还在放"。
+    final remote = _currentRemoteActions;
+    remote?.setPaused(true);
+    try {
+      final leave = await showTvConfirmDialog(
+        context,
+        title: '退出播放？',
+        message: '按「返回」或选「继续观看」接着看；选「退出播放」返回上一页。',
+        confirmLabel: '退出播放',
+        cancelLabel: '继续观看',
+      );
+      if (leave && mounted) {
+        Navigator.of(context).pop();
+        return;
+      }
+      remote?.setPaused(false);
+    } finally {
+      _leaveDialogOpen = false;
+    }
   }
 
   Widget _header() => Container(
@@ -1048,6 +1153,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
           onSwitchDrama: _jumpForSwipe,
           onOpenDetail: () => _openDetail(drama),
           onEpisodeStateChanged: isCurrent ? _onPageEpisodeStateChanged : null,
+          // 所有页都上报遥控入口（按剧集 id 归档），父级按键时再按当前页取用。
+          onRemoteActions: (actions) => _onPageRemoteActions(
+            '${drama.source}-${drama.id}',
+            actions,
+          ),
+          onReturnFocus: _focus.requestFocus,
           // 单剧模式（0.2.29）：起始集 / 本地文件模式 / 续播位置。
           // 只在单剧模式（第一页）生效；首页无限流保持原行为。
           initialEpisodeIndex: widget.singleDrama != null
@@ -1294,6 +1405,55 @@ typedef EpisodeStateReporter =
       Future<void> Function()? playPrev,
     });
 
+/// 子页上报给父级的遥控器操作入口（0.8.0 恢复电视支持）。
+///
+/// 父级（`_VerticalFeedScreenState`）持有竖滑流的 [Focus]，
+/// 遥控器按键先在父级的 `_onKey` 里被翻译成这里的动作；
+/// 而"控件显隐、播放器实例、选集面板"这些状态都在子页
+/// （`_FeedPageState`）内部，所以由子页把入口上报上来。
+///
+/// 与 `EpisodeStateReporter` 同一思路：不用 GlobalKey，
+/// 避免当前页切换时 State（含播放器）被 Flutter 整体搬移。
+class _FeedRemoteActions {
+  const _FeedRemoteActions({
+    required this.showControls,
+    required this.hideControlsIfVisible,
+    required this.togglePlayback,
+    required this.seekBy,
+    required this.openEpisodes,
+    required this.holdStart,
+    required this.holdEnd,
+    required this.setPaused,
+  });
+
+  /// 显示控件并把焦点交给播放按钮（电视上按"确定"的效果）。
+  final VoidCallback showControls;
+
+  /// 控件可见时收起；返回是否真的收起了（供返回键判断）。
+  final bool Function() hideControlsIfVisible;
+
+  /// 播放 / 暂停。
+  final VoidCallback togglePlayback;
+
+  /// 前进 / 后退若干秒（负数为后退）。
+  final void Function(int seconds) seekBy;
+
+  /// 打开选集面板。
+  final VoidCallback openEpisodes;
+
+  /// 遥控长按「确定」开始 3 倍速（0.8.3）。
+  final VoidCallback holdStart;
+
+  /// 遥控松开「确定」，恢复原倍速（0.8.3）。
+  final VoidCallback holdEnd;
+
+  /// 弹出确认框期间暂停 / 恢复播放（0.8.1）。
+  ///
+  /// 只暂停"本来在播"的视频，恢复时也只在确实被本次暂停过才继续，
+  /// 避免把用户自己按的暂停改回播放。
+  final void Function(bool paused) setPaused;
+}
+
 /// 单页：一个视频 + 播放控件 + 信息栏。
 class _FeedPage extends StatefulWidget {
   const _FeedPage({
@@ -1313,6 +1473,8 @@ class _FeedPage extends StatefulWidget {
     required this.onOpenDetail,
     this.playerFactory,
     this.onEpisodeStateChanged,
+    this.onRemoteActions,
+    this.onReturnFocus,
     this.videoBuilder,
     this.initialEpisodeIndex = 0,
     this.initialPosition = 0,
@@ -1328,6 +1490,15 @@ class _FeedPage extends StatefulWidget {
 
   /// 上报"本页还能否切到下一集"，并附上切集入口，用于父级决定滑动语义。
   final EpisodeStateReporter? onEpisodeStateChanged;
+
+  /// 上报本页的遥控器操作入口（0.8.0 电视支持，仅当前页非空）。
+  final ValueChanged<_FeedRemoteActions?>? onRemoteActions;
+
+  /// 把焦点还给竖滑流（控件收起后调用，0.8.0）。
+  ///
+  /// 电视上控件按钮一旦获得焦点，收起控件后焦点会掉到根 FocusScope，
+  /// 父级的 `_onKey` 就收不到方向键了；因此必须显式把焦点还回去。
+  final VoidCallback? onReturnFocus;
   final AppRepository repository;
   final LocalStore store;
 
@@ -1420,6 +1591,54 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   bool _ready = false;
   bool _panelOpen = false;
   bool _controlsVisible = true;
+
+  /// 是否电视模式（0.8.0 恢复电视支持）。
+  ///
+  /// 在 `didChangeDependencies` 里缓存：`dispose` 与部分异步回调中
+  /// 不能再用 `context` 读 InheritedWidget（会抛 "deactivated widget"）。
+  bool _television = false;
+
+  /// 是否强制软件解码（0.8.3）。
+  ///
+  /// 两个来源：设置里的「电视兼容模式」，或播放页的自动降级
+  /// （连续两轮拿不到画面帧 → 判定硬解有问题 → 切软解重来一次）。
+  /// 一旦置位，本页后续所有重试都用 `hwdec=no`。
+  bool _softwareDecode = false;
+
+  /// 已经自动降级过几次（0.8.3）。
+  ///
+  /// 只降级一次：软解再失败就不是解码器的问题了，
+  /// 继续降级只会让用户在黑屏上多等几轮。
+  int _decodeEscalations = 0;
+
+  /// 连续"起不来 / 没画面"的轮次（0.8.3），用于判断该不该怀疑硬解。
+  /// 一旦拿到画面就清零，所以偶发的一次卡顿不会触发降级。
+  int _decodeStalls = 0;
+
+  /// 电视模式下播放控件的焦点（默认落在播放/暂停按钮上）。
+  final _playFocus = FocusNode(debugLabel: 'feed-play-button');
+
+  /// 电视模式下"重试"按钮的焦点（0.8.1）。
+  ///
+  /// 加载失败时按确定键应当直接落到"重试"上——此时播放按钮不可用，
+  /// 焦点落在它身上等于遥控器没有反应。
+  final _retryFocus = FocusNode(debugLabel: 'feed-retry');
+
+  /// 控件层的焦点范围（0.8.0）。
+  ///
+  /// `hasFocus` 为 true 表示"焦点落在控件层的任意按钮上"，
+  /// 用于抑制自动隐藏——一隐藏控件层就被 `ExcludeFocus` 排除，
+  /// 焦点掉回根 FocusScope，遥控器方向键随之失效。
+  final _controlsScope = FocusScopeNode(debugLabel: 'feed-controls');
+
+  /// 本页上报给父级的遥控器操作入口（0.8.0）。
+  _FeedRemoteActions? _reportedActions;
+
+  /// 选集弹层里"当前正在播的那一集"的焦点（0.8.3）。
+  ///
+  /// 用一个常驻节点而不是 `autofocus`：当前集可能在视口外，
+  /// autofocus 生效时它还没被构建，焦点会丢。
+  final _episodeCurrentFocus = FocusNode(debugLabel: 'episode-current');
 
   /// 窗口亮度下限（0.7.8，`XQ-0114`）：避免滑到全黑看不见。
   static const double _minBrightness = .05;
@@ -1642,6 +1861,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final preferences = widget.store.playbackPreferences;
     _speed = preferences.speed;
     _quality = preferences.quality;
+    // 电视兼容模式（0.8.3）：用户手动强制软解时，从第一次 open 就生效。
+    _softwareDecode = widget.store.tvCompatMode;
     // 单剧模式（0.2.29）：从指定集开始播放（详情页/下载页点的是第几集）。
     _episodeIndex = widget.initialEpisodeIndex;
     _pendingStart = widget.initialPosition;
@@ -1667,7 +1888,29 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     // 0.7.6：提前读一次系统媒体音量，避免第一次调音量时起点是 0。
     unawaited(_syncSystemVolume());
     unawaited(_syncScreenBrightness());
+    // 0.8.0：把遥控器操作入口上报给父级（父级持有竖滑流的 Focus）。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _closed) return;
+      final actions = _FeedRemoteActions(
+        showControls: _showControlsForRemote,
+        hideControlsIfVisible: _hideControlsForRemote,
+        togglePlayback: _togglePlayback,
+        seekBy: _seekBy,
+        openEpisodes: () => unawaited(_openEpisodes()),
+        holdStart: _holdStartForRemote,
+        holdEnd: _holdEndForRemote,
+        setPaused: _setPausedForDialog,
+      );
+      _reportedActions = actions;
+      widget.onRemoteActions?.call(actions);
+    });
     if (widget.active) _prepare();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _television = AppLayout.isTelevision(context);
   }
 
   /// 播放器操作串行队列（0.3.1）。
@@ -1719,6 +1962,35 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _playerReleased = false;
     _ready = false;
     await _prepare(force: true);
+  }
+
+  /// 自动降级到软件解码（0.8.3）。
+  ///
+  /// 判定时机：健康检查连续两轮"拿不到画面帧"——分别是
+  /// 「open 之后迟迟不起播」和「报告在播但没有视频帧尺寸」两条兜底。
+  /// 这两条在网络正常时几乎不会同时出现，一旦反复出现，
+  /// 最可能的原因就是硬解选到了坏解码器（弱 GPU 盒子 / 老投影仪的典型症状）。
+  ///
+  /// 返回 true 表示本次已经接管恢复流程（调用方不要再走 `_recover()`）。
+  bool _escalateDecode() {
+    if (_softwareDecode || _decodeEscalations >= 1) return false;
+    // 只在电视上自动降级：手机端软解更费电，而且这类盒子问题手机很少见。
+    // 用户显式打开「电视兼容模式」时 `_softwareDecode` 已经是 true，
+    // 会走不到这里，所以不需要额外判断设置。
+    if (!_television) return false;
+    if (_closed || _playerReleased || !widget.active || !_foreground) {
+      return false;
+    }
+    _decodeEscalations++;
+    _softwareDecode = true;
+    // 记录续播点：降级要重建解码器，必须从当前位置接着放。
+    _resumeFrom = _player?.state.position ?? Duration.zero;
+    _health.reset();
+    _firstFrameTicks = 0;
+    _noFrameTicks = 0;
+    if (mounted && !_closed) _toast('画面解码异常，已改用软件解码重试');
+    unawaited(_prepare(force: true));
+    return true;
   }
 
   /// 自动恢复（0.6.0，迁移自老播放器）。
@@ -2032,6 +2304,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       }
       final current = _player;
       if (current == null) return;
+      // 有画面且在播 → 解码是好的，清掉"解码异常"的累计次数（0.8.3）。
+      if (_hasVideoFrame && current.state.playing) _decodeStalls = 0;
       // 兜底一：地址已交出但迟迟不起播（弱网 / 服务端迟迟不给数据）。
       if (_awaitingFirstFrame &&
           _foreground &&
@@ -2042,6 +2316,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           // 重置计数：若这次恢复也没能起播，下一轮仍会再试
           // （总次数由 `_recovery` 限制，超过后会转为显示"点击重试"）。
           _firstFrameTicks = 0;
+          // 连续两轮起不来 → 先怀疑硬解（0.8.3），别急着切备用线路。
+          _decodeStalls++;
+          if (_decodeStalls >= 2 && _escalateDecode()) return;
           unawaited(_recover());
           return;
         }
@@ -2089,6 +2366,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _noFrameTicks++;
         if (_noFrameTicks >= _noFrameTicksLimit) {
           _noFrameTicks = 0;
+          // "报告在播、却拿不到画面尺寸"是硬解坏掉的**强信号**（0.8.3）：
+          // 网络问题不会让播放器报告 playing=true。这里先降级再谈切线路。
+          if (_escalateDecode()) return;
           unawaited(_recover());
           return;
         }
@@ -2414,13 +2694,28 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _fullscreenRevision.dispose();
     unawaited(ScreenBrightness.reset());
     _tick.dispose();
+    // 0.8.0：撤销上报给父级的遥控入口，并释放控件焦点节点。
+    if (_reportedActions != null) {
+      widget.onRemoteActions?.call(null);
+      _reportedActions = null;
+    }
+    _playFocus.dispose();
+    _retryFocus.dispose();
+    _controlsScope.dispose();
+    _episodeCurrentFocus.dispose();
     // 若离开时还锁着横屏，必须恢复竖屏并显示系统栏，否则整个应用会一直横着。
+    // 电视（0.8.0）：电视本身就是横屏设备，锁竖屏会让部分盒子把画面缩成竖条，
+    // 因此电视模式下不做方向恢复。
     if (_landscape) {
       _landscape = false;
-      unawaited(
-        SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]),
-      );
-      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+      if (!_television) {
+        unawaited(
+          SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]),
+        );
+        unawaited(
+          SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+        );
+      }
     }
     _releasePlayer();
     // 预载器（0.2.31）由**父级**持有并释放（0.6.9 改为全流共享），
@@ -2541,6 +2836,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   void _scheduleHide() {
     _hideTimer?.cancel();
     if (_closed || _panelOpen) return;
+    // 电视（0.8.0）：焦点落在控件按钮上时不能自动隐藏。
+    // 一隐藏控件层就被 ExcludeFocus 排除，焦点掉回根 FocusScope，
+    // 遥控器方向键随之失效（用户感受就是"按一下就失灵"）。
+    if (_television && _controlsScope.hasFocus) return;
     // 加速中不自动隐藏（松开后由 _interactionChanged 恢复显示与计时）。
     if (_interactions?.boosting ?? false) return;
     if (!(_player?.state.playing ?? false)) return;
@@ -2549,10 +2848,100 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       if (_seekValue != null) return;
       if (!(_player?.state.playing ?? false)) return;
       if (_interactions?.boosting ?? false) return;
+      if (_television && _controlsScope.hasFocus) return;
       setState(() => _controlsVisible = false);
       // 用户操作，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
     });
+  }
+
+  /// 电视遥控"确定"键：显示控件并把焦点交给播放按钮（0.8.0）。
+  ///
+  /// 不在 [_showControls] 里做焦点转移，是因为它还被自动播放、切集等
+  /// 内部流程调用；那些场景抢走焦点会让遥控器上下键（切剧）失效。
+  /// 只有用户真的按下确定键时才转移焦点。
+  void _showControlsForRemote() {
+    if (_closed) return;
+    _showControls();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _closed) return;
+      // 加载失败时"播放"按钮没有意义，焦点直接给"重试"。
+      if (_error != null) {
+        _retryFocus.requestFocus();
+      } else {
+        _playFocus.requestFocus();
+      }
+    });
+  }
+
+  /// 电视遥控"返回"键：控件可见/有焦点时先收起，返回是否已处理（0.8.0）。
+  bool _hideControlsForRemote() {
+    if (_closed) return false;
+    if (!_controlsVisible && !_controlsScope.hasFocus) return false;
+    _hideTimer?.cancel();
+    if (_controlsVisible) {
+      setState(() => _controlsVisible = false);
+      _refreshFullscreen(immediate: true);
+    }
+    // 焦点还给竖滑流，否则遥控器上下键（切剧）会失效。
+    widget.onReturnFocus?.call();
+    return true;
+  }
+
+  /// 遥控长按「确定」：进入 3 倍速（0.8.3）。
+  ///
+  /// 电视没有"按住屏幕"这个手势，长按确定是最接近的等价物。
+  /// 具体计时、倍速设置与提示都由 [PlayerInteractions] 统一处理，
+  /// 这里只做页面级守卫（已关闭 / 未就绪时忽略）。
+  void _holdStartForRemote() {
+    if (_closed || _loading || _error != null) return;
+    _interactions?.holdStart();
+  }
+
+  /// 遥控松开「确定」：恢复原倍速（0.8.3）。
+  void _holdEndForRemote() {
+    _interactions?.holdEnd();
+  }
+
+  /// 遥控左右键快进/快退（0.8.0）。[seconds] 为负表示后退。
+  void _seekBy(int seconds) {
+    final player = _player;
+    if (player == null || _closed || _loading) return;
+    final duration = player.state.duration;
+    if (duration <= Duration.zero) return;
+    final target = (player.state.position.inMilliseconds + seconds * 1000)
+        .clamp(0, duration.inMilliseconds);
+    unawaited(_seekTo(Duration(milliseconds: target)));
+    _interactions?.hint(
+      '${seconds > 0 ? '快进至' : '后退至'} ${formatPosition(target / 1000)}',
+    );
+    _showControls();
+  }
+
+  /// 是否因"退出确认框"暂停过播放（0.8.1）。
+  bool _dialogPaused = false;
+
+  /// 弹出 / 关闭确认框时暂停、恢复播放（0.8.1）。
+  ///
+  /// 只暂停本来就在播的视频；恢复也只针对本次暂停，
+  /// 不会把用户自己按的暂停改成播放。
+  /// 同时维护 `_userPaused`，避免健康检查把这次暂停当成"卡住"而自动恢复。
+  void _setPausedForDialog(bool paused) {
+    final player = _player;
+    if (player == null || _closed) return;
+    if (paused) {
+      if (_dialogPaused) return;
+      _dialogPaused = player.state.playing;
+      if (_dialogPaused) {
+        _userPaused = true;
+        unawaited(player.pause());
+      }
+      return;
+    }
+    if (!_dialogPaused) return;
+    _dialogPaused = false;
+    _userPaused = false;
+    unawaited(player.play());
   }
 
   void _tap() {
@@ -2965,6 +3354,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             ].join(','),
           );
           await platform.setProperty('network-timeout', '20');
+          // 解码方式（0.8.3）。
+          //
+          // 弱 GPU / 硬解不完整的电视盒子上，libmpv 用 `auto-safe` 选到
+          // 一个坏掉的 MediaCodec 时，表现是**有声音没画面 / 绿屏 / 纯黑**，
+          // 而应用侧一切正常（`playing == true`，只是永远拿不到帧尺寸）。
+          // 这里显式下发给 libmpv：
+          // - 正常：`auto-safe`（libmpv 只在"已知安全"的硬解上启用，
+          //   失败会自动回退软解，比 `auto` 稳）；
+          // - 兼容模式 / 自动降级后：`no`（纯软件解码，一定能出画面）。
+          //
+          // 必须在 `open()` 之前设置，播放中途改这个属性不会重建解码器。
+          try {
+            await platform.setProperty('hwdec', _softwareDecode ? 'no' : 'auto-safe');
+          } catch (_) {
+            // 忽略：个别平台的 libmpv 版本不认这个属性，不影响播放。
+          }
           // 弱网缓冲策略（0.5.0）。
           //
           // 背景：用户实测"开 VPN 就卡"，根因是视频请求全部绕道代理节点
@@ -3201,9 +3606,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             _displayTitle,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
+            style: TextStyle(
               color: Colors.white,
-              fontSize: 17,
+              // 0.8.1：电视上标题放大。
+              fontSize: _television ? 21 : 17,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -3478,12 +3884,19 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     Key? key,
   }) {
     const accent = Color(0xFFFF765F);
-    return InkWell(
+    // 0.8.2：原来的 InkWell 在电视上没有焦点环，遥控器停在 chip 上完全看不出来，
+    // 甚至无法用方向键在选项间移动（InkWell 不参与焦点遍历）。
+    // 换成 RemoteTarget：焦点环 + 外发光 + 1.03 放大，并让当前项自动获得焦点。
+    return RemoteTarget(
       key: key,
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(10),
+      onPressed: onTap,
+      accent: accent,
+      selected: selected,
+      autofocus: selected && _television,
+      label: '$label${selected ? '，当前选项' : ''}',
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 140),
+        alignment: Alignment.center,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         decoration: BoxDecoration(
           color: selected ? accent : const Color(0xFF26272F),
@@ -3494,6 +3907,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         ),
         child: Text(
           label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             color: selected ? Colors.white : const Color(0xFFB9B6C2),
             fontSize: 14,
@@ -3634,6 +4049,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         gridController.position.maxScrollExtent,
       );
       gridController.jumpTo(target);
+      // 电视（0.8.3）：跳完再要焦点。
+      //
+      // 原来只靠 `autofocus`：当前集在视口外时，autofocus 那一刻它**还没被构建**，
+      // 焦点落空 → 遥控器打开选集后方向键完全无效，只能按返回。
+      // 现在先跳到当前集所在行，等它构建出来再显式请求焦点。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_television && _episodeCurrentFocus.context != null) {
+          _episodeCurrentFocus.requestFocus();
+        }
+      });
     });
     final value = await showModalBottomSheet<int>(
       context: context,
@@ -3659,10 +4084,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             itemBuilder: (context, index) {
               final selected = index == _episodeIndex;
               const accent = Color(0xFFFF765F);
-              return InkWell(
+              // 0.8.2：InkWell 在电视上不可聚焦 —— 遥控器打开选集后
+              // 一格都选不了，等于卡死在弹层里。改用 RemoteTarget。
+              return RemoteTarget(
                 key: ValueKey('episode-$index'),
-                onTap: () => Navigator.pop(context, index),
-                borderRadius: BorderRadius.circular(10),
+                onPressed: () => Navigator.pop(context, index),
+                accent: accent,
+                selected: selected,
+                focusNode: index == currentIndex ? _episodeCurrentFocus : null,
+                label:
+                    '第 ${episodes[index].number} 集${selected ? '，正在播放' : ''}',
                 child: Container(
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
@@ -3731,6 +4162,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
     if (!mobile) return;
+    // 电视（0.8.0）：电视本身就是横向设备，锁方向只会让部分盒子把画面
+    // 压成竖条 / 黑边翻倍；全屏与否只切全屏路由，不动方向与系统栏。
+    if (_television) return;
     try {
       // 横屏视频在全屏时切到横向；竖屏视频保持竖向，仅隐藏系统栏。
       final wide = _aspectRatio <= 0 || _wideVideo;
@@ -3813,6 +4247,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
 
   /// 恢复竖屏方向与系统栏（退出全屏收尾）。
   Future<void> _restorePortraitSystemUi() async {
+    // 电视（0.8.0）：不锁竖屏，也不切系统栏模式。
+    if (_television) return;
     final mobile =
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
@@ -4152,7 +4588,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               // （横杆变成居中圆盘，表现为"进度条跑到中间"）。
               color: Colors.black,
               child: Theme(
-                data: _fullscreenTheme,
+                data: _television
+                    ? _fullscreenTvTheme
+                    : _fullscreenTheme,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
@@ -4546,6 +4984,21 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     trackShape: const RectangularSliderTrackShape(),
   );
 
+  /// 电视版全屏主题（0.8.1）：在全屏深色主题上叠加遥控焦点样式。
+  ///
+  /// 全屏路由 push 到 Navigator 之上，**不在** `MaterialApp.builder` 的
+  /// 主题树里，所以电视模式下的焦点环/按钮最小尺寸必须在这里再套一次，
+  /// 否则一进全屏，遥控器就没有可见的焦点提示。
+  static final ThemeData _fullscreenTvTheme = televisionTheme(
+    _fullscreenTheme.copyWith(
+      sliderTheme: fullscreenSliderTheme.copyWith(
+        trackHeight: 6,
+        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 9),
+        overlayShape: const RoundSliderOverlayShape(overlayRadius: 22),
+      ),
+    ),
+  );
+
   /// 让全屏层重建（状态变化时调用）。
   ///
   /// 节流到 250ms（0.3.1 性能修复）：全屏层内容较重（进度条 + 选集），
@@ -4690,6 +5143,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                   ),
                   const SizedBox(height: 12),
                   OutlinedButton(
+                    // 0.8.1：电视上按确定键时焦点落到"重试"。
+                    key: const ValueKey('feed-retry'),
+                    focusNode: _retryFocus,
                     onPressed: () {
                       _ready = false;
                       // 0.3.5：播放器已释放时先重建再加载，避免在已释放实例上操作。
@@ -4750,7 +5206,18 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             },
           ),
         // 控件层。
-        IgnorePointer(
+        //
+        // 0.8.0 电视支持：
+        // - `ExcludeFocus`：控件隐藏时不得获得焦点，否则遥控器方向键会落到
+        //   一排看不见的按钮上（表现为"遥控器乱跳、按了没反应"）；
+        // - `FocusScope.onFocusChange`：记录焦点是否落在控件层内，
+        //   有焦点时不自动隐藏（见 `_scheduleHide`）。
+        ExcludeFocus(
+          excluding: !visible,
+          child: FocusScope(
+            node: _controlsScope,
+            onFocusChange: _onControlsFocusChanged,
+            child: IgnorePointer(
           ignoring: !visible,
           child: AnimatedOpacity(
             opacity: visible ? 1 : 0,
@@ -4861,10 +5328,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                 children: [
                                   IconButton(
                                     key: const ValueKey('feed-play-toggle'),
+                                    // 0.8.0：电视上按"确定"后焦点落到这里，
+                                    // 再按一次确定即暂停/播放。
+                                    focusNode: _playFocus,
                                     tooltip: (state?.playing ?? false)
                                         ? '暂停'
                                         : '播放',
                                     onPressed: _togglePlayback,
+                                    style: _overlayButtonStyle(context),
                                     icon: Icon(
                                       (state?.playing ?? false)
                                           ? Icons.pause_rounded
@@ -4880,10 +5351,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                     ),
                                   ),
                                   Expanded(
-                                    child: SliderTheme(
-                                      data: SliderTheme.of(
-                                        context,
-                                      ).copyWith(trackHeight: 3),
+                                    // 电视上把进度条从焦点链里摘掉（0.8.3）。
+                                    //
+                                    // Slider 被遥控器聚焦后是个**焦点陷阱**：
+                                    // 左右键变成"改数值"而不是"移动焦点"，
+                                    // 用户想按右键去全屏按钮会变成拖动进度条，
+                                    // 而且上下键也未必能跳出去，看起来就像遥控器坏了。
+                                    //
+                                    // 电视上本来就有更合适的做法：控件隐藏时
+                                    // 左右键直接 ±10 秒、按住连续快进，比拖进度条准。
+                                    child: ExcludeFocus(
+                                      excluding: _television,
+                                      child: SliderTheme(
+                                      // 0.8.1：电视上进度条加粗，远看也能看清。
+                                      data: SliderTheme.of(context).copyWith(
+                                        trackHeight: _television ? 6 : 3,
+                                      ),
                                       child: Slider(
                                         key: const ValueKey('feed-progress'),
                                         value:
@@ -4924,11 +5407,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                         },
                                       ),
                                     ),
+                                    ),
                                   ),
                                   IconButton(
                                     key: const ValueKey('feed-landscape'),
                                     tooltip: _landscape ? '退出全屏' : '全屏',
                                     onPressed: _toggleLandscape,
+                                    style: _overlayButtonStyle(context),
                                     icon: Icon(
                                       _landscape
                                           ? Icons.fullscreen_exit_rounded
@@ -4996,9 +5481,23 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               },
             ),
           ),
+            ),
+          ),
         ),
       ],
     );
+  }
+
+  /// 控件层焦点变化（0.8.0 电视支持）。
+  ///
+  /// 焦点进入控件层时停掉自动隐藏计时；离开时恢复计时。
+  /// 只在电视模式下有意义，但记录本身无副作用，非电视模式也一并记录。
+  void _onControlsFocusChanged(bool focused) {
+    if (focused) {
+      _hideTimer?.cancel();
+    } else if (mounted && _controlsVisible && !_closed) {
+      _scheduleHide();
+    }
   }
 
   /// 底部功能按钮（0.6.3：改为等宽，位置固定）。
@@ -5012,6 +5511,33 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   ///
   /// 修法：每个按钮**固定占 1/5 槽位**（`Expanded` + 内容居中），
   /// 与标签文字长短无关，位置恒定；标签仍保留省略号兜底。
+  /// 播放控件里 IconButton 的电视焦点样式（0.8.3）。
+  ///
+  /// 这些按钮是纯白图标压在视频画面 + 深色渐变上，M3 默认的 focusColor
+  /// 只是一层很淡的主题色叠加，3 米外根本看不出"焦点停在哪"。
+  /// 这里改成与列表页 [RemoteTarget] 同一套语言：焦点时填 28% 主题色
+  /// + 2.5px 主题色描边。手机（非电视）返回 null，保持原样。
+  ButtonStyle? _overlayButtonStyle(BuildContext context) {
+    if (!_television) return null;
+    final colors = Theme.of(context).colorScheme;
+    return ButtonStyle(
+      backgroundColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.focused)
+            ? colors.primary.withValues(alpha: .28)
+            : Colors.transparent,
+      ),
+      foregroundColor: const WidgetStatePropertyAll(Colors.white),
+      side: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.focused)
+            ? BorderSide(color: colors.primary, width: 2.5)
+            : BorderSide.none,
+      ),
+      shape: WidgetStatePropertyAll(
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
   Widget _sideButton({
     required Key key,
     required IconData icon,
@@ -5026,11 +5552,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           key: key,
           tooltip: label,
           onPressed: onPressed,
-          icon: Icon(icon, color: color, size: 24),
+          style: _overlayButtonStyle(context),
+          // 0.8.1：电视上图标与标签放大（10 英尺可读）。
+          icon: Icon(icon, color: color, size: _television ? 28 : 24),
         ),
         Text(
           label,
-          style: TextStyle(color: color, fontSize: 11),
+          style: TextStyle(
+            color: color,
+            fontSize: _television ? 14 : 11,
+            fontWeight: _television ? FontWeight.w500 : null,
+          ),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.center,

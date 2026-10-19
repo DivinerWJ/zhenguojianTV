@@ -64,6 +64,24 @@ class CatalogBrowser {
     updateDramas([drama]);
   }
 
+  /// 浏览过的全部剧目（按站源去重汇总），0.8.4 新增。
+  ///
+  /// 给**本地拼音首字母搜索**用：联网搜索返回的永远只是一小撮结果，
+  /// 如果用户先搜中文、再敲拼音首字母，只在那一小撮里过滤就会误判成
+  /// "搜不到"。这里把已经缓存过的剧目全部拉出来当搜索池。
+  ///
+  /// 只读快照，调用方随便改不影响内部缓存。
+  List<Drama> cachedLibrary(Iterable<String> sourceIds) {
+    final seen = <String>{};
+    final result = <Drama>[];
+    for (final id in sourceIds) {
+      for (final drama in _library[id]?.values ?? const <Drama>[]) {
+        if (seen.add('${drama.source}/${drama.id}')) result.add(drama);
+      }
+    }
+    return result;
+  }
+
   void updateDramas(Iterable<Drama> dramas) {
     final updates = {for (final drama in dramas) drama.id: drama};
     for (final drama in updates.values) {

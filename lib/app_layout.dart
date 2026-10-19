@@ -20,7 +20,7 @@ ThemeData televisionTheme(ThemeData theme) {
   final button = ButtonStyle(
     side: focusSide,
     minimumSize: const WidgetStatePropertyAll(Size(52, 48)),
-    textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 17)),
+    textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 18)),
   );
   return theme.copyWith(
     focusColor: colors.primaryContainer,
@@ -37,6 +37,31 @@ ThemeData televisionTheme(ThemeData theme) {
         borderRadius: BorderRadius.circular(16),
         borderSide: BorderSide(color: colors.primary, width: 3),
       ),
+    ),
+    // 0.8.1 电视样式：播放器进度条在 10 英尺外要看得见，
+    // 轨道加粗、滑块与焦点光圈放大（遥控器可把焦点移到进度条上）。
+    sliderTheme: theme.sliderTheme.copyWith(
+      trackHeight: 6,
+      activeTrackColor: colors.primary,
+      inactiveTrackColor: colors.onSurface.withValues(alpha: .24),
+      thumbColor: colors.primary,
+      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 9),
+      overlayShape: const RoundSliderOverlayShape(overlayRadius: 22),
+    ),
+    progressIndicatorTheme: theme.progressIndicatorTheme.copyWith(
+      strokeWidth: 5,
+      color: colors.primary,
+    ),
+    dialogTheme: theme.dialogTheme.copyWith(
+      backgroundColor: theme.colorScheme.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+    ),
+    tooltipTheme: theme.tooltipTheme.copyWith(
+      textStyle: const TextStyle(fontSize: 14),
+    ),
+    chipTheme: theme.chipTheme.copyWith(
+      labelStyle: const TextStyle(fontSize: 15),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
     ),
   );
 }
@@ -74,6 +99,13 @@ class AppLayout extends InheritedWidget {
   });
   final bool television;
   final String version;
+
+  /// 电视过扫描安全边距（0.8.0）。
+  ///
+  /// 电视/投影仪普遍存在 3%~5% 的过扫描（overscan），贴边内容会被裁掉。
+  /// 电视模式下给整个应用留出安全边距，避免侧边导航首项、底部按钮行
+  /// 和进度条两端被屏幕边框吃掉。
+  static const overscan = EdgeInsets.symmetric(horizontal: 24, vertical: 12);
 
   static bool isTelevision(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<AppLayout>()?.television ??

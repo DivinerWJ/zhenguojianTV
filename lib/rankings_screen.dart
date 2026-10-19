@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
 import 'catalog_filters.dart';
 import 'core_bridge.dart';
 import 'detail_screen.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'ranking_models.dart';
+import 'remote_widgets.dart';
 import 'widgets.dart';
 
 class RankingsScreen extends StatefulWidget {
@@ -143,6 +145,95 @@ class _RankingsScreenState extends State<RankingsScreen> {
     _load();
   }
 
+  /// 榜单站源入口（0.8.2）。
+  ///
+  /// 原先是 `PopupMenuButton` 的裸文字：电视上不可聚焦（遥控器停不到），
+  /// 弹出菜单又贴着 AppBar、没有焦点环。现在统一成 [SourceSwitchPill]，
+  /// 电视下按确定打开可聚焦的居中列表。
+  Widget _sourceSwitcher(List<SourceGroup> groups) => SourceSwitchPill(
+    key: const ValueKey('rankings-source-switch'),
+    label: _board == null
+        ? '榜单'
+        : '${SourceSite.byId(_board!.source).groupName}榜单',
+    count: groups.length,
+    onPressed: groups.length > 1 ? () => _pickGroup(groups) : null,
+  );
+
+  Future<void> _pickGroup(List<SourceGroup> groups) async {
+    final options = [
+      for (final group in groups)
+        (group.id, group.name, true),
+    ];
+    String? picked;
+    if (AppLayout.isTelevision(context)) {
+      picked = await showDialog<String>(
+        context: context,
+        barrierColor: Colors.black.withValues(alpha: .66),
+        builder: (dialogContext) => Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 48,
+            vertical: 32,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: RemoteOptionSheet(
+              title: '选择榜单站源',
+              keyPrefix: 'rank-group',
+              options: options,
+            ),
+          ),
+        ),
+      );
+    } else {
+      picked = await showModalBottomSheet<String>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        builder: (sheetContext) => SafeArea(
+          top: false,
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            decoration: BoxDecoration(
+              color: Theme.of(sheetContext).colorScheme.surface,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '选择榜单站源',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 4),
+                for (final group in groups)
+                  ListTile(
+                    key: ValueKey('rank-group-${group.id}'),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(group.name),
+                    trailing: group.id == _board?.groupId
+                        ? const Icon(Icons.check_rounded)
+                        : null,
+                    onTap: () => Navigator.of(sheetContext).pop(group.id),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    if (picked == null || !mounted) return;
+    for (final board in _boards) {
+      if (board.groupId == picked) {
+        _select(board);
+        return;
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final groups = SourceGroup.fromSources(
@@ -169,27 +260,8 @@ class _RankingsScreenState extends State<RankingsScreen> {
         .toList();
     return Scaffold(
       appBar: AppBar(
-        title: PopupMenuButton<SourceGroup>(
-          tooltip: '切换榜单站源',
-          enabled: groups.length > 1,
-          onSelected: (group) =>
-              _select(_boards.firstWhere((board) => board.groupId == group.id)),
-          itemBuilder: (_) => [
-            for (final group in groups)
-              PopupMenuItem(value: group, child: Text(group.name)),
-          ],
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                _board == null
-                    ? '榜单'
-                    : '${SourceSite.byId(_board!.source).groupName}榜单',
-              ),
-              if (groups.length > 1) const Icon(Icons.expand_more_rounded),
-            ],
-          ),
-        ),
+        toolbarHeight: AppLayout.isTelevision(context) ? 64 : null,
+        title: _sourceSwitcher(groups),
         actions: [
           RefreshAction(
             loading: _loading || _more,

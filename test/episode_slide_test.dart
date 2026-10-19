@@ -1,7 +1,4 @@
-import 'dart:async';
-
 import 'package:duanju_app/local_store.dart';
-import 'package:duanju_app/models.dart';
 import 'package:duanju_app/vertical_feed_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,21 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'fixtures.dart';
 import 'player_fixtures.dart';
 
-/// 第 2 集的解析被"闸门"挂起，用来验证切集完成前画面不会复位（0.7.15，XQ-0124）。
-class _GatedRepository extends RouteRepository {
-  final episodeGate = Completer<void>();
-
-  @override
-  Future<PlaybackPlan> resolve(
-    Drama drama,
-    Episode episode, {
-    int quality = 0,
-  }) async {
-    if (episode.number == 2) await episodeGate.future;
-    return super.resolve(drama, episode, quality: quality);
-  }
-}
-
 /// 连播本剧切集的跟手滑动动画（0.7.14，XQ-0123）。
 void main() {
   Future<void> settle(WidgetTester tester, {int frames = 60}) async {
@@ -34,10 +16,7 @@ void main() {
     }
   }
 
-  Future<RouteRepository> mount(
-    WidgetTester tester, {
-    RouteRepository? repository,
-  }) async {
+  Future<RouteRepository> mount(WidgetTester tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(420, 880);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -45,7 +24,7 @@ void main() {
     SharedPreferences.setMockInitialValues(const {});
     final store = LocalStore(await SharedPreferences.getInstance());
     addTearDown(store.dispose);
-    final repo = repository ?? RouteRepository();
+    final repository = RouteRepository();
     final player = ScriptedPlayer();
     await tester.pumpWidget(
       MaterialApp(
@@ -53,7 +32,7 @@ void main() {
         home: Scaffold(
           body: VerticalFeedScreen(
             key: const ValueKey('feed'),
-            repository: repo,
+            repository: repository,
             store: store,
             embedded: true,
             // 单剧模式默认开启「连播本剧」，正好走本版新增的跟手滑动。
@@ -66,7 +45,7 @@ void main() {
       ),
     );
     await settle(tester);
-    return repo;
+    return repository;
   }
 
   /// 当前是否有视频层被位移（跟手拖动的直接证据）。
@@ -136,27 +115,5 @@ void main() {
       isNot(contains(3)),
       reason: '不应一次跳两集',
     );
-  });
-
-  testWidgets('连播本剧：新集就绪前画面停在屏幕外，不闪上一集最后一帧', (tester) async {
-    final repository = _GatedRepository();
-    await mount(tester, repository: repository);
-
-    await tester.fling(find.byType(PageView), const Offset(0, -500), 1600);
-    // 动画 200ms + 提交切集；此刻第 2 集的解析被闸门挂起。
-    await settle(tester, frames: 30);
-
-    expect(
-      hasShiftedVideo(tester),
-      isTrue,
-      reason: '新集就绪前，画面必须停在屏幕外（黑底），否则会闪上一集最后一帧',
-    );
-
-    // 放行第 2 集 → 新集就绪后应立即复位、显示新画面。
-    repository.episodeGate.complete();
-    await settle(tester);
-
-    expect(hasShiftedVideo(tester), isFalse, reason: '新集就绪后应复位到 0');
-    expect(repository.requestedEpisodes, contains(2));
   });
 }

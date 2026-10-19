@@ -23,9 +23,9 @@ import 'markdown_lite.dart';
 class AppUpdater {
   AppUpdater._();
 
-  /// 发布仓库（用户自有仓库，README 已标明原作者 Topkill/guoapp3）。
-  static const _owner = 'kuoluoss';
-  static const _repo = 'zhenguojian';
+  /// 发布仓库（TV 维护版）：GitHub Releases 同时作为版本检查与 APK 下载源。
+  static const _owner = 'ai0by';
+  static const _repo = 'zhenguojianTV';
 
   /// GitHub API 直连地址（国内可能不通，失败即静默跳过）。
   static const _apiUrl =

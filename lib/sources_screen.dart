@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core_bridge.dart';
+import 'app_layout.dart';
 import 'local_store.dart';
 import 'models.dart';
+import 'remote_widgets.dart';
 import 'source_status.dart';
 
 String sourceTimestamp(DateTime? value) {
@@ -243,10 +245,103 @@ class _SourcesScreenState extends State<SourcesScreen> {
     }
   }
 
+  void _toggleHealth(String sourceId) {
+    setState(() {
+      if (!_expandedHealth.remove(sourceId)) _expandedHealth.add(sourceId);
+    });
+  }
+
+  /// 电视端的操作按钮：带焦点环、放大、外发光，遥控器停上去一眼可见。
+  ///
+  /// 手机上沿用 Material 按钮（触屏更贴合系统风格，也让既有测试继续有效）。
+  Widget _tvAction({
+    required Key key,
+    required String label,
+    required IconData icon,
+    required VoidCallback? onPressed,
+    bool filled = false,
+    bool autofocus = false,
+  }) {
+    final colors = Theme.of(context).colorScheme;
+    final enabled = onPressed != null;
+    final foreground = enabled
+        ? (filled ? colors.onPrimary : colors.onSurface)
+        : colors.onSurfaceVariant.withValues(alpha: .5);
+    return RemoteTarget(
+      key: key,
+      onPressed: onPressed,
+      autofocus: autofocus,
+      label: label,
+      child: Container(
+        height: 48,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        decoration: BoxDecoration(
+          color: filled && enabled
+              ? colors.primary
+              : colors.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+          border: filled
+              ? null
+              : Border.all(color: colors.outlineVariant, width: 1),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 20, color: foreground),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: foreground,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// TV 上「更多操作」：用居中对话框代替 PopupMenuButton。
+  Future<void> _openMoreActions(SourceSite source, SourceStatus? status) async {
+    final options = <(String, String, bool)>[
+      ('more', '继续加载一页', status?.hasMore ?? true),
+      ('metadata', '补齐资料', true),
+      if (source.id == 'huangdou')
+        (
+          'vipMetadata',
+          '补齐 VIP 资料（${status?.unknownVip ?? 0} 部）',
+          (status?.unknownVip ?? 0) > 0,
+        ),
+      ('checkCatalog', '仅检测目录', true),
+    ];
+    final picked = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: .66),
+      builder: (dialogContext) => Dialog(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 48, vertical: 32),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: RemoteOptionSheet(
+            title: '${source.name} · 更多操作',
+            options: options,
+            keyPrefix: 'more-option',
+          ),
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await _run(source, picked);
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.store,
     builder: (context, _) {
+      final television = AppLayout.isTelevision(context);
       final sources = widget.store.sources.toList()
         ..sort((a, b) {
           final aFirst = a.id == widget.initialSource ? 0 : 1;
@@ -254,7 +349,10 @@ class _SourcesScreenState extends State<SourcesScreen> {
           return aFirst.compareTo(bFirst);
         });
       return Scaffold(
-        appBar: AppBar(title: const Text('站源管理')),
+        appBar: AppBar(
+          title: const Text('站源管理'),
+          toolbarHeight: television ? 64 : null,
+        ),
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 960),
@@ -276,14 +374,26 @@ class _SourcesScreenState extends State<SourcesScreen> {
                       padding: const EdgeInsets.only(bottom: 16),
                       child: Row(
                         children: [
-                          FilledButton.icon(
-                            key: const ValueKey('update-all-sources'),
-                            onPressed: _runningCount > 0 || _autoUpdating
-                                ? null
-                                : _updateAll,
-                            icon: const Icon(Icons.sync_rounded),
-                            label: const Text('全部更新'),
-                          ),
+                          // TV 上用带焦点环的 RemoteTarget，手机沿用 FilledButton。
+                          if (television)
+                            _tvAction(
+                              key: const ValueKey('update-all-sources'),
+                              label: '全部更新',
+                              icon: Icons.sync_rounded,
+                              filled: true,
+                              onPressed: _runningCount > 0 || _autoUpdating
+                                  ? null
+                                  : _updateAll,
+                            )
+                          else
+                            FilledButton.icon(
+                              key: const ValueKey('update-all-sources'),
+                              onPressed: _runningCount > 0 || _autoUpdating
+                                  ? null
+                                  : _updateAll,
+                              icon: const Icon(Icons.sync_rounded),
+                              label: const Text('全部更新'),
+                            ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
@@ -292,7 +402,9 @@ class _SourcesScreenState extends State<SourcesScreen> {
                                   : _runningCount > 0
                                   ? '正在更新 $_runningCount / ${sources.length} 个站源…'
                                   : '共 ${sources.length} 个站源，可一键依次更新',
-                              style: Theme.of(context).textTheme.bodySmall,
+                              style: television
+                                  ? const TextStyle(fontSize: 15)
+                                  : Theme.of(context).textTheme.bodySmall,
                             ),
                           ),
                         ],
@@ -313,19 +425,25 @@ class _SourcesScreenState extends State<SourcesScreen> {
                             (source) => source.id == widget.initialSource,
                           ),
                           leading: const Icon(Icons.hub_outlined),
-                          title: const Text('黄果'),
+                          title: Text(
+                            '黄果',
+                            style: television
+                                ? const TextStyle(fontSize: 20)
+                                : null,
+                          ),
                           subtitle: Text(
                             '${group.sources.length} 个入口 · ${group.sources.fold<int>(0, (count, source) => count + (_statuses[source.id]?.count ?? 0))} 部',
                           ),
                           childrenPadding: const EdgeInsets.all(8),
                           children: [
                             for (final source in group.sources)
-                              _sourceCard(source),
+                              _sourceCard(source, television: television),
                           ],
                         ),
                       )
                     else
-                      for (final source in group.sources) _sourceCard(source),
+                      for (final source in group.sources)
+                        _sourceCard(source, television: television),
                 ],
               ),
             ),
@@ -335,7 +453,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
     },
   );
 
-  Widget _sourceCard(SourceSite source) {
+  Widget _sourceCard(SourceSite source, {required bool television}) {
     final status = _statuses[source.id];
     final pending = _pending.contains(source.id);
     final busy = pending || status?.running == true;
@@ -350,77 +468,139 @@ class _SourcesScreenState extends State<SourcesScreen> {
       key: ValueKey('source-${source.id}'),
       margin: const EdgeInsets.only(bottom: 16),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.all(television ? 20 : 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                const Icon(Icons.dns_outlined),
-                const SizedBox(width: 12),
+                Icon(
+                  Icons.dns_outlined,
+                  size: television ? 28 : 24,
+                  color: colors.primary,
+                ),
+                SizedBox(width: television ? 14 : 12),
                 Expanded(
                   child: Text(
                     source.name,
-                    style: Theme.of(context).textTheme.titleLarge,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontSize: television ? 24 : null,
+                    ),
                   ),
                 ),
-                Text('${status?.count ?? 0} 部'),
+                Text(
+                  '${status?.count ?? 0} 部',
+                  style: TextStyle(
+                    fontSize: television ? 18 : null,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
-            Text('最近更新：${sourceTimestamp(status?.updatedAt)}'),
+            Text(
+              '最近更新：${sourceTimestamp(status?.updatedAt)}',
+              style: TextStyle(fontSize: television ? 16 : null),
+            ),
             if (status != null && status.count > 0)
               Text(
                 '已加载至第 ${status.page} 页${status.hasMore ? ' · 可继续加载' : ' · 当前分页已加载完'}',
+                style: TextStyle(fontSize: television ? 16 : null),
               ),
             const SizedBox(height: 12),
-            Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                FilledButton.icon(
-                  key: ValueKey('update-${source.id}'),
-                  onPressed: enabled ? () => _run(source, 'update') : null,
-                  icon: const Icon(Icons.sync_rounded),
-                  label: const Text('更新'),
-                ),
-                OutlinedButton.icon(
-                  key: ValueKey('check-${source.id}'),
-                  onPressed: enabled ? () => _run(source, 'check') : null,
-                  icon: const Icon(Icons.network_check),
-                  label: const Text('检测连接与播放'),
-                ),
-                if (status?.running == true)
-                  TextButton(
-                    onPressed: pending ? null : () => _run(source, 'cancel'),
-                    child: const Text('停止'),
+            if (television)
+              Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _tvAction(
+                    key: ValueKey('update-${source.id}'),
+                    label: '更新',
+                    icon: Icons.sync_rounded,
+                    filled: true,
+                    onPressed: enabled ? () => _run(source, 'update') : null,
                   ),
-                PopupMenuButton<String>(
-                  tooltip: '${source.name}更多操作',
-                  enabled: enabled,
-                  onSelected: (operation) => _run(source, operation),
-                  itemBuilder: (_) => [
-                    PopupMenuItem(
-                      value: 'more',
-                      enabled: status?.hasMore ?? true,
-                      child: const Text('继续加载一页'),
+                  _tvAction(
+                    key: ValueKey('check-${source.id}'),
+                    label: '检测连接与播放',
+                    icon: Icons.network_check,
+                    onPressed: enabled ? () => _run(source, 'check') : null,
+                  ),
+                  if (status?.running == true)
+                    _tvAction(
+                      key: ValueKey('stop-${source.id}'),
+                      label: '停止',
+                      icon: Icons.stop_circle_outlined,
+                      onPressed: pending ? null : () => _run(source, 'cancel'),
                     ),
-                    const PopupMenuItem(value: 'metadata', child: Text('补齐资料')),
-                    if (source.id == 'huangdou')
+                  // TV 上 PopupMenuButton 的弹出菜单很难用遥控器操作
+                  // （无焦点环、贴边），改为打开一个可聚焦的居中对话框。
+                  _tvAction(
+                    key: ValueKey('more-${source.id}'),
+                    label: '更多',
+                    icon: Icons.more_horiz_rounded,
+                    onPressed: enabled
+                        ? () => _openMoreActions(source, status)
+                        : null,
+                  ),
+                ],
+              )
+            else
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  FilledButton.icon(
+                    key: ValueKey('update-${source.id}'),
+                    onPressed: enabled ? () => _run(source, 'update') : null,
+                    icon: const Icon(Icons.sync_rounded),
+                    label: const Text('更新'),
+                  ),
+                  OutlinedButton.icon(
+                    key: ValueKey('check-${source.id}'),
+                    onPressed: enabled ? () => _run(source, 'check') : null,
+                    icon: const Icon(Icons.network_check),
+                    label: const Text('检测连接与播放'),
+                  ),
+                  if (status?.running == true)
+                    TextButton(
+                      onPressed: pending ? null : () => _run(source, 'cancel'),
+                      child: const Text('停止'),
+                    ),
+                  PopupMenuButton<String>(
+                    tooltip: '${source.name}更多操作',
+                    enabled: enabled,
+                    onSelected: (operation) => _run(source, operation),
+                    itemBuilder: (_) => [
                       PopupMenuItem(
-                        value: 'vipMetadata',
-                        enabled: (status?.unknownVip ?? 0) > 0,
-                        child: Text('补齐 VIP 资料（${status?.unknownVip ?? 0} 部）'),
+                        value: 'more',
+                        enabled: status?.hasMore ?? true,
+                        child: const Text('继续加载一页'),
                       ),
-                    const PopupMenuItem(
-                      value: 'checkCatalog',
-                      child: Text('仅检测目录'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+                      const PopupMenuItem(
+                        value: 'metadata',
+                        child: Text('补齐资料'),
+                      ),
+                      if (source.id == 'huangdou')
+                        PopupMenuItem(
+                          value: 'vipMetadata',
+                          enabled: (status?.unknownVip ?? 0) > 0,
+                          child: Text(
+                            '补齐 VIP 资料（${status?.unknownVip ?? 0} 部）',
+                          ),
+                        ),
+                      const PopupMenuItem(
+                        value: 'checkCatalog',
+                        child: Text('仅检测目录'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             if (busy) ...[
               const SizedBox(height: 12),
               LinearProgressIndicator(
@@ -464,41 +644,55 @@ class _SourcesScreenState extends State<SourcesScreen> {
                       status.storageError,
                       style: TextStyle(color: colors.error),
                     ),
-                    TextButton.icon(
-                      key: ValueKey('save-${source.id}'),
-                      onPressed:
-                          !busy && widget.repository.supportsSourceManagement
-                          ? () => _run(source, 'retrySave')
-                          : null,
-                      icon: const Icon(Icons.save_outlined),
-                      label: const Text('重试保存'),
-                    ),
+                    if (television)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: _tvAction(
+                          key: ValueKey('save-${source.id}'),
+                          label: '重试保存',
+                          icon: Icons.save_outlined,
+                          onPressed:
+                              !busy &&
+                                  widget.repository.supportsSourceManagement
+                              ? () => _run(source, 'retrySave')
+                              : null,
+                        ),
+                      )
+                    else
+                      TextButton.icon(
+                        key: ValueKey('save-${source.id}'),
+                        onPressed:
+                            !busy && widget.repository.supportsSourceManagement
+                            ? () => _run(source, 'retrySave')
+                            : null,
+                        icon: const Icon(Icons.save_outlined),
+                        label: const Text('重试保存'),
+                      ),
                   ],
                 ),
               ),
             if (health != null) ...[
               const Divider(height: 28),
-              Row(
-                children: [
-                  Expanded(
-                    child: Semantics(
-                      expanded: healthExpanded,
-                      child: Tooltip(
-                        message: healthExpanded ? '收起检测详情' : '展开检测详情',
-                        child: TextButton(
-                          key: ValueKey('health-toggle-${source.id}'),
-                          onPressed: () => setState(() {
-                            if (healthExpanded) {
-                              _expandedHealth.remove(source.id);
-                            } else {
-                              _expandedHealth.add(source.id);
-                            }
-                          }),
-                          style: TextButton.styleFrom(
-                            foregroundColor: colors.onSurface,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 4,
-                              vertical: 8,
+              if (television)
+                Row(
+                  children: [
+                    Expanded(
+                      child: RemoteTarget(
+                        key: ValueKey('health-toggle-${source.id}'),
+                        onPressed: () => _toggleHealth(source.id),
+                        label:
+                            '检测详情，${health.label}，${healthExpanded ? '已展开' : '已收起'}',
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: colors.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: colors.outlineVariant,
+                              width: 1,
                             ),
                           ),
                           child: Row(
@@ -507,12 +701,19 @@ class _SourcesScreenState extends State<SourcesScreen> {
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(health.label),
+                                    Text(
+                                      health.label,
+                                      style: const TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
                                     Text(
                                       sourceTimestamp(health.checkedAt),
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodySmall,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: colors.onSurfaceVariant,
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -522,20 +723,76 @@ class _SourcesScreenState extends State<SourcesScreen> {
                                 healthExpanded
                                     ? Icons.expand_less_rounded
                                     : Icons.expand_more_rounded,
+                                size: 26,
                               ),
                             ],
                           ),
                         ),
                       ),
                     ),
-                  ),
-                  IconButton(
-                    tooltip: '复制诊断信息',
-                    onPressed: () => _copy(source, status!),
-                    icon: const Icon(Icons.copy_rounded),
-                  ),
-                ],
-              ),
+                    const SizedBox(width: 12),
+                    _tvAction(
+                      key: ValueKey('copy-${source.id}'),
+                      label: '复制',
+                      icon: Icons.copy_rounded,
+                      onPressed: () => _copy(source, status!),
+                    ),
+                  ],
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        expanded: healthExpanded,
+                        child: Tooltip(
+                          message: healthExpanded ? '收起检测详情' : '展开检测详情',
+                          child: TextButton(
+                            key: ValueKey('health-toggle-${source.id}'),
+                            onPressed: () => _toggleHealth(source.id),
+                            style: TextButton.styleFrom(
+                              foregroundColor: colors.onSurface,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 8,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(health.label),
+                                      Text(
+                                        sourceTimestamp(health.checkedAt),
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Icon(
+                                  healthExpanded
+                                      ? Icons.expand_less_rounded
+                                      : Icons.expand_more_rounded,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '复制诊断信息',
+                      onPressed: () => _copy(source, status!),
+                      icon: const Icon(Icons.copy_rounded),
+                    ),
+                  ],
+                ),
               if (healthExpanded) ...[
                 if (health.sample.isNotEmpty) Text('检测剧集：${health.sample}'),
                 for (final step in health.steps)

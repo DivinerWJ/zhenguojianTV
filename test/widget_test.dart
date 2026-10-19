@@ -31,7 +31,12 @@ void main() {
       if (allSourcesEnabled) {
         await tester.tap(find.byKey(const ValueKey('source-switch')));
         await tester.pumpAndSettle();
+        // 0.8.2：弹窗是「勾选 + 确定」语义，先清空再勾选，等价于原来的单选切换。
+        await tester.tap(find.byKey(const ValueKey('source-sheet-clear')));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('黄豆'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('source-sheet-confirm')));
         await tester.pumpAndSettle();
         expect(find.text('会员测试剧'), findsNothing);
         expect(find.byTooltip('VIP：隐藏'), findsOneWidget);
