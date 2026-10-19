@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'app_layout.dart';
-import 'app_updater.dart';
 import 'about_credit.dart';
 import 'app_bottom_navigation.dart';
 import 'core_bridge.dart';
@@ -1374,20 +1373,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             name: '项目仓库',
                             role: '真果鉴 TV GitHub',
                             url: 'https://github.com/ai0by/zhenguojianTV',
-                          ),
-                          const SizedBox(height: 8),
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: TextButton.icon(
-                              key: const ValueKey('about-check-update'),
-                              onPressed: () =>
-                                  AppUpdater.checkManually(context),
-                              icon: const Icon(
-                                Icons.system_update_rounded,
-                                size: 18,
-                              ),
-                              label: const Text('检测新版本'),
-                            ),
                           ),
                         ],
                       );

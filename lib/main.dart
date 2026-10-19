@@ -12,7 +12,6 @@ import 'core_bridge.dart';
 import 'app_layout.dart';
 import 'app_splash.dart';
 import 'app_theme.dart';
-import 'app_updater.dart';
 import 'home_screen.dart';
 import 'local_store.dart';
 import 'profiles_screen.dart';
@@ -162,13 +161,6 @@ class _AppBootstrapState extends State<AppBootstrap>
               ),
             );
           };
-        });
-        // 界面就绪后检查更新（仅 Android；失败静默跳过，不阻塞启动）。
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          final target = navigator.currentContext;
-          if (target != null) {
-            unawaited(AppUpdater.checkOnStartup(target));
-          }
         });
       }
     } catch (failure) {

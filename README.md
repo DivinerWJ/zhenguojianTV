@@ -2,7 +2,7 @@
 
 多站源短剧浏览与在线播放应用，Android 手机版。基于开源项目 [Topkill/guoapp3](https://github.com/Topkill/guoapp3) 二次开发与改版。
 
-当前版本：**0.8.4+79** ｜ 平台：Android 7.0+（arm64-v8a / armeabi-v7a） ｜ [下载最新版](https://github.com/ai0by/zhenguojianTV/releases/latest)
+当前版本：**0.8.5+80** ｜ 平台：Android 7.0+（arm64-v8a / armeabi-v7a） ｜ [下载最新版](https://github.com/ai0by/zhenguojianTV/releases/latest)
 
 ---
 
@@ -14,21 +14,21 @@
 - **数据存储**：剧库、追剧、观看历史、下载记录都保存在本机。
 - **账号**：没有云端账号，不需要登录；只有本机用户与权限管理。
 
-## 二、本次更新（0.7.14）
+## 二、本次更新（0.8.5）
 
-- **新增：连播本剧切换上下集的滑动动画**（手感与「连播下一部」一致）
-  - 手指拖动时整页画面跟着上下走，松手滑够就翻过去，不够则回弹；
-  - 上滑 = 下一集，下滑 = 上一集，方向和连播下一部完全相同；
-  - 滑出结束时立刻切集，用户看不到"跳回去"；
-  - 顺手修掉一个隐患：竖滑有两个入口，一次上滑有可能被切两次（跳两集）。
+- **纯净体验**：不集成广告 SDK，不展示广告位或推广弹窗。
+- **取消系统通知**：移除通知权限、Android 前台服务及下载常驻通知。
+- **取消应用内更新机制**：启动时不检查版本，不弹更新框，也不申请“安装未知应用”权限。
+- **保留必要交互反馈**：播放失败、下载失败、用户主动操作结果仍会正常提示，避免出现“点了没反应”。
+- **保留 TV / 拼音搜索能力**：遥控器适配、全拼/首字母搜索等 0.8.4 能力不变。
 
-上一版 0.7.13：修复连播后加载提示常显、预加载提前。更早版本见 [Releases](https://github.com/ai0by/zhenguojianTV/releases)。
+> 后续版本由用户自行在 GitHub Releases 页面查看和下载安装，App 本身不主动检测。
 
 ## 三、快速开始
 
 1. 从 [Releases](https://github.com/ai0by/zhenguojianTV/releases/latest) 下载 `zhenguojian-<版本>-arm64-v8a.apk`。
 2. 手机上安装（需允许「安装未知来源应用」）。
-3. 打开即用；之后有新版本时，App 内会提示更新。
+3. 打开即用；App 不进行自动更新检测，后续版本请自行查看 Releases。
 
 要求：**Android 7.0 及以上（minSdk 24）**；手机建议 64 位（arm64-v8a），电视盒子可用 32 位（armeabi-v7a）。
 若安装提示 `INSTALL_FAILED_NO_MATCHING_ABIS`，表示设备架构与安装包不匹配。
