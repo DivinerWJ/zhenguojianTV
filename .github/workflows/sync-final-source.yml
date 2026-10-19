@@ -1,0 +1,73 @@
+name: Sync final ZhenGuoJian TV source
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  sync-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --single-branch --branch build/zhenguojian-apk-20261019 https://github.com/ai0by/ai0by.git /tmp/carrier
+          cat /tmp/carrier/zhenguojian-build/patch.* > /tmp/zhenguojian.patch
+          echo "8949841d9155acbe3bc97a357f00dc3bfc9754d62a25d4b21a16e9503235a724  /tmp/zhenguojian.patch" | sha256sum -c -
+          git clone https://github.com/kuoluoss/zhenguojian.git /tmp/source
+          cd /tmp/source
+          git checkout c934d1e2aa4f59c6ef93813ba63cd9376cbb159e
+          git apply --check /tmp/zhenguojian.patch
+          git apply /tmp/zhenguojian.patch
+          sed -i 's/huangjindanzhuan/huangjindanizhuan/g' lib/pinyin.dart test/pinyin_test.dart README.md
+          if ! grep -q "^import 'remote_widgets.dart';$" lib/vertical_feed_screen.dart; then
+            sed -i "/^import 'playback_recovery.dart';$/a import 'remote_widgets.dart';" lib/vertical_feed_screen.dart
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('lib/app_updater.dart')
+          s = p.read_text()
+          s = s.replace("static const _owner = 'kuoluoss';", "static const _owner = 'ai0by';")
+          s = s.replace("static const _repo = 'zhenguojian';", "static const _repo = 'zhenguojianTV';")
+          s = s.replace('/// 发布仓库（用户自有仓库，README 已标明原作者 Topkill/guoapp3）。', '/// 发布仓库（TV 维护版）：GitHub Releases 同时作为版本检查与 APK 下载源。')
+          p.write_text(s)
+
+          p = Path('README.md')
+          s = p.read_text().replace('https://github.com/kuoluoss/zhenguojian/releases', 'https://github.com/ai0by/zhenguojianTV/releases')
+          marker = '- 原改版：[kuoluoss/zhenguojian](https://github.com/kuoluoss/zhenguojian)\n'
+          if marker in s and '项目仓库：[ai0by/zhenguojianTV]' not in s:
+              s = s.replace(marker, marker + '- TV 版适配与维护：[ai0by](https://github.com/ai0by)；项目仓库：[ai0by/zhenguojianTV](https://github.com/ai0by/zhenguojianTV)。\n', 1)
+          p.write_text(s)
+
+          p = Path('lib/home_screen.dart')
+          s = p.read_text().replace("role: '本应用改版与维护',", "role: '原改版与维护',", 1)
+          marker = """                          const AboutCredit(\n                            name: '软萌小正太',\n                            role: '原改版与维护',\n                            url: 'https://github.com/kuoluoss/zhenguojian',\n                          ),\n"""
+          addition = marker + """                          const AboutCredit(\n                            name: 'ai0by',\n                            role: 'TV 版适配与维护',\n                            url: 'https://github.com/ai0by',\n                          ),\n                          const AboutCredit(\n                            name: '项目仓库',\n                            role: '真果鉴 TV GitHub',\n                            url: 'https://github.com/ai0by/zhenguojianTV',\n                          ),\n"""
+          if marker not in s:
+              raise SystemExit('about block not found')
+          p.write_text(s.replace(marker, addition, 1))
+          PY
+          grep -q '^version: 0.8.4+79$' pubspec.yaml
+          grep -q "static const _repo = 'zhenguojianTV';" lib/app_updater.dart
+          grep -q 'https://github.com/ai0by/zhenguojianTV' lib/home_screen.dart
+
+      - name: Mirror final source into repository
+        shell: bash
+        run: |
+          rsync -a --delete --exclude='.git' /tmp/source/ "$GITHUB_WORKSPACE"/
+
+      - name: Commit final source
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: '0.8.4+79: TV pinyin search and self-hosted releases'
+          branch: main
