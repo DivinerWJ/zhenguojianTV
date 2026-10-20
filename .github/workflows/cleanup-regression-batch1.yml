@@ -43,7 +43,6 @@ jobs:
               '            store: store,\n            sources: const [SourceSite.hongguo],\n            embedded: true,',
               3,
           )
-
           p = Path('test/feed_preload_reuse_test.dart')
           text = p.read_text(encoding='utf-8')
           old = '          store: store,\n          embedded: true,'
@@ -56,41 +55,91 @@ jobs:
           )
           p.write_text(text, encoding='utf-8')
 
-          # Discover/category tests mount the full app, so inject a fake feed player.
+          # Give widget tests an initial-tab seam. Starting Discover means the inactive
+          # feed does not prepare media_kit, so catalog tests stay focused on catalog UI.
           replace_exact(
-              'test/catalog_categories_test.dart',
-              "import 'package:flutter_test/flutter_test.dart';\nimport 'package:shared_preferences/shared_preferences.dart';\n\nimport 'fixtures.dart';",
-              "import 'package:flutter_test/flutter_test.dart';\nimport 'package:media_kit/media_kit.dart';\nimport 'package:shared_preferences/shared_preferences.dart';\n\nimport 'fixtures.dart';\nimport 'player_fixtures.dart';",
+              'lib/main.dart',
+              '    this.feedPlayerFactory,\n    this.feedReady,\n  });',
+              '    this.feedPlayerFactory,\n    this.feedReady,\n    this.initialTab,\n  });',
+          )
+          replace_exact(
+              'lib/main.dart',
+              '  final Player Function()? feedPlayerFactory;\n\n  /// 首页是否已就绪',
+              '  final Player Function()? feedPlayerFactory;\n\n  /// 测试/深链用：直接打开指定主标签；正常启动为空，仍从首页进入。\n  final int? initialTab;\n\n  /// 首页是否已就绪',
+          )
+          replace_exact(
+              'lib/main.dart',
+              '                    feedPlayerFactory: feedPlayerFactory,\n                    onFeedReady:',
+              '                    initialTab: initialTab,\n                    feedPlayerFactory: feedPlayerFactory,\n                    onFeedReady:',
           )
           replace_exact(
               'test/catalog_categories_test.dart',
-              '    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));',
-              "    await tester.pumpWidget(\n      DuanjuApp(\n        repository: repository,\n        store: store,\n        feedPlayerFactory: () => Player(platformPlayer: ScriptedPlayer()),\n      ),\n    );",
+              '    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));\n    await tester.pumpAndSettle();\n    // 默认打开「首页」，先切到「发现」页。\n    final discover = find.byKey(const ValueKey(\'bottom-nav-1\'));\n    if (discover.evaluate().isNotEmpty) {\n      await tester.tap(discover);\n      await tester.pumpAndSettle();\n    }',
+              '    await tester.pumpWidget(\n      DuanjuApp(repository: repository, store: store, initialTab: 1),\n    );\n    await tester.pumpAndSettle();',
           )
 
-          # App-build test verifies edition behavior, not the retired catalog-first home UI.
+          # Build/edition test does not need to boot a video player at all.
           replace_exact(
               'test/app_build_test.dart',
-              "import 'package:flutter_test/flutter_test.dart';\nimport 'package:shared_preferences/shared_preferences.dart';\n\nimport 'fixtures.dart';",
-              "import 'package:flutter_test/flutter_test.dart';\nimport 'package:media_kit/media_kit.dart';\nimport 'package:shared_preferences/shared_preferences.dart';\n\nimport 'fixtures.dart';\nimport 'player_fixtures.dart';",
+              "import 'package:duanju_app/main.dart';\n",
+              '',
           )
           replace_exact(
               'test/app_build_test.dart',
-              '      await tester.pumpWidget(DuanjuApp(repository: repository, store: store));\n      await tester.pumpAndSettle();\n      expect(find.text(allSourcesEnabled ? \'真果鉴\' : \'红果鉴\'), findsOneWidget);\n      expect(appSlug, allSourcesEnabled ? \'zhenguojian\' : \'hongguojian\');\n      expect(repository.requests, [allSourcesEnabled ? \'huangdou\' : \'hongguo\']);\n      expect(store.sources.length, allSourcesEnabled ? 5 : 1);\n      for (final source in SourceSite.knownValues.skip(1)) {\n        expect(\n          find.text(source.name),\n          allSourcesEnabled ? findsOneWidget : findsNothing,\n        );\n      }\n      expect(store.preferences.getString(\'source\'), \'huangdou\');',
-              '      await tester.pumpWidget(\n        DuanjuApp(\n          repository: repository,\n          store: store,\n          feedPlayerFactory: () => Player(platformPlayer: ScriptedPlayer()),\n        ),\n      );\n      await tester.pumpAndSettle();\n      expect(appName, allSourcesEnabled ? \'真果鉴\' : \'红果鉴\');\n      expect(appSlug, allSourcesEnabled ? \'zhenguojian\' : \'hongguojian\');\n      expect(store.sources.length, SourceSite.values.length);\n      expect(store.source, allSourcesEnabled ? \'huangdou\' : \'hongguo\');\n      expect(store.preferences.getString(\'source\'), \'huangdou\');',
+              "import 'package:flutter/material.dart';\n",
+              '',
           )
+          old_block = '''  testWidgets(
+    'edition branding and restored source match the compiled catalog',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({'source': 'huangdou'});
+      final store = LocalStore(await SharedPreferences.getInstance());
+      final repository = FixtureRepository();
+      await tester.pumpWidget(DuanjuApp(repository: repository, store: store));
+      await tester.pumpAndSettle();
+      expect(find.text(allSourcesEnabled ? '真果鉴' : '红果鉴'), findsOneWidget);
+      expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
+      expect(repository.requests, [allSourcesEnabled ? 'huangdou' : 'hongguo']);
+      expect(store.sources.length, allSourcesEnabled ? 5 : 1);
+      for (final source in SourceSite.knownValues.skip(1)) {
+        expect(
+          find.text(source.name),
+          allSourcesEnabled ? findsOneWidget : findsNothing,
+        );
+      }
+      expect(store.preferences.getString('source'), 'huangdou');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      store.dispose();
+    },
+  );'''
+          new_block = '''  test(
+    'edition branding and restored source match the compiled catalog',
+    () async {
+      SharedPreferences.setMockInitialValues({'source': 'huangdou'});
+      final store = LocalStore(await SharedPreferences.getInstance());
+      expect(appName, allSourcesEnabled ? '真果鉴' : '红果鉴');
+      expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
+      expect(store.sources.length, SourceSite.values.length);
+      expect(store.source, allSourcesEnabled ? 'huangdou' : 'hongguo');
+      expect(store.preferences.getString('source'), 'huangdou');
+      store.dispose();
+    },
+  );'''
+          replace_exact('test/app_build_test.dart', old_block, new_block)
           replace_exact(
               'test/app_build_test.dart',
               "      expect(\n        readJsonList(store.preferences.getString('history')),\n        hasLength(2),\n      );\n      expect(\n        readJsonList(store.preferences.getString('favorites')).single['id'],\n        other.id,\n      );",
               "      expect(store.history, hasLength(2));\n      expect(store.favorites.single.id, other.id);",
           )
 
-          # The test intentionally mutates legacy backup payload fields; remove the sync
-          # trailer so validation reaches the persistence-failure path it is testing.
+          # The test intentionally mutates a backup. Remove both sync/follow state
+          # trailers so the payload is a coherent legacy backup whose favorites can be
+          # migrated, instead of saying simultaneously "favorite next" and "follow none".
           replace_exact(
               'test/local_persistence_test.dart',
               "      library['followStates'] = {};\n      library['history'] = [",
-              "      library['followStates'] = {};\n      library.remove('followSync');\n      library['history'] = [",
+              "      library.remove('followStates');\n      library.remove('followSync');\n      library['history'] = [",
           )
 
           # Current merge policy canonicalizes every AAC segment when audio parameters
@@ -123,7 +172,7 @@ jobs:
         shell: bash
         run: |
           flutter pub get
-          dart format test/feed_horizontal_swipe_test.dart test/feed_preload_reuse_test.dart test/catalog_categories_test.dart test/app_build_test.dart test/local_persistence_test.dart test/media_library_test.dart
+          dart format lib/main.dart test/feed_horizontal_swipe_test.dart test/feed_preload_reuse_test.dart test/catalog_categories_test.dart test/app_build_test.dart test/local_persistence_test.dart test/media_library_test.dart
           flutter test --dart-define=ALL_SOURCES=true --concurrency=1 \
             test/feed_horizontal_swipe_test.dart \
             test/feed_preload_reuse_test.dart \
@@ -138,7 +187,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           rm .github/workflows/cleanup-regression-batch1.yml
-          git add test .github/workflows/cleanup-regression-batch1.yml
+          git add lib/main.dart test .github/workflows/cleanup-regression-batch1.yml
           git diff --cached --quiet && exit 0
           git commit -m "Clean obsolete regression contracts batch 1 verified"
           git pull --rebase origin main
