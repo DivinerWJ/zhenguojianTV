@@ -10,9 +10,11 @@ import 'package:duanju_app/ranking_models.dart';
 import 'package:duanju_app/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fixtures.dart';
+import 'player_fixtures.dart';
 
 class CategoryRepository extends FixtureRepository {
   final categoryRequests = <String>[];
@@ -126,10 +128,13 @@ void main() {
     addTearDown(store.dispose);
     await store.setSource(source);
     await tester.pumpWidget(
-      DuanjuApp(repository: repository, store: store, initialTab: 1),
+      DuanjuApp(
+        repository: repository,
+        store: store,
+        initialTab: 1,
+        feedPlayerFactory: () => Player(platformPlayer: ScriptedPlayer()),
+      ),
     );
-    // 首页内部有自动更新/动画等长期状态，不能用无界 pumpAndSettle 当“加载完成”。
-    // 这里的假仓库同步完成目录请求，固定推进几帧即可稳定进入发现页。
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     return store;
