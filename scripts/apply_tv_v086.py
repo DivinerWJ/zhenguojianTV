@@ -1,0 +1,800 @@
+from pathlib import Path
+import json
+import re
+
+
+def replace_once(path: str, old: str, new: str, label: str) -> None:
+    p = Path(path)
+    text = p.read_text()
+    if old not in text:
+        raise SystemExit(f"{label}: pattern not found in {path}")
+    p.write_text(text.replace(old, new, 1))
+
+
+# Version.
+p = Path("pubspec.yaml")
+s = p.read_text()
+s = re.sub(r"^version:\s*[^\n]+$", "version: 0.8.6+81", s, flags=re.M)
+p.write_text(s)
+
+# Global overscan must not shrink playback routes.
+replace_once(
+    "lib/main.dart",
+    """              child: Padding(\n                // 电视过扫描安全边距（0.8.0）：只在电视模式下生效。\n                padding: tv ? AppLayout.overscan : EdgeInsets.zero,\n                child: Shortcuts(\n                  shortcuts: const {\n                    SingleActivator(\n                      LogicalKeyboardKey.select,\n                      includeRepeats: false,\n                    ): ActivateIntent(),\n                    SingleActivator(\n                      LogicalKeyboardKey.gameButtonA,\n                      includeRepeats: false,\n                    ): ActivateIntent(),\n                    SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),\n                  },\n                  child: FocusTraversalGroup(child: child!),\n                ),\n              ),\n""",
+    """              child: Shortcuts(\n                shortcuts: const {\n                  SingleActivator(\n                    LogicalKeyboardKey.select,\n                    includeRepeats: false,\n                  ): ActivateIntent(),\n                  SingleActivator(\n                    LogicalKeyboardKey.gameButtonA,\n                    includeRepeats: false,\n                  ): ActivateIntent(),\n                  SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),\n                },\n                child: FocusTraversalGroup(child: child!),\n              ),\n""",
+    "remove global TV overscan",
+)
+
+# More conventional TV focus treatment.
+p = Path("lib/remote_widgets.dart")
+s = p.read_text().replace("scale: _focused ? 1.03 : 1,", "scale: _focused ? 1.045 : 1,", 1)
+old = """                    color: _focused || widget.selected\n                        ? accent\n                        : Colors.transparent,\n                    width: _focused ? 3.5 : 3,\n"""
+new = """                    color: _focused\n                        ? Colors.white\n                        : widget.selected\n                        ? accent\n                        : Colors.transparent,\n                    width: _focused ? 3 : 2.5,\n"""
+if old not in s:
+    raise SystemExit("RemoteTarget focus border pattern not found")
+p.write_text(s.replace(old, new, 1))
+
+# TV-specific player settings and episode side panels.
+Path("lib/tv_player_panel.dart").write_text(r'''import 'package:flutter/material.dart';
+
+import 'models.dart';
+import 'remote_widgets.dart';
+
+enum TvPlayerAction { episodes, speed, quality, follow }
+
+const _tvAccent = Color(0xFFFF765F);
+
+Future<T?> _showTvSidePanel<T>(
+  BuildContext context, {
+  required String barrierLabel,
+  required WidgetBuilder builder,
+  double width = 520,
+}) => showGeneralDialog<T>(
+  context: context,
+  useRootNavigator: true,
+  barrierDismissible: true,
+  barrierLabel: barrierLabel,
+  barrierColor: Colors.black.withValues(alpha: .56),
+  transitionDuration: const Duration(milliseconds: 180),
+  pageBuilder: (context, _, __) => Material(
+    type: MaterialType.transparency,
+    child: SafeArea(
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: Container(
+          width: width,
+          height: double.infinity,
+          margin: const EdgeInsets.fromLTRB(0, 16, 18, 16),
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: const Color(0xFF17181D),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withValues(alpha: .14)),
+            boxShadow: const [
+              BoxShadow(color: Colors.black54, blurRadius: 36, spreadRadius: 4),
+            ],
+          ),
+          child: builder(context),
+        ),
+      ),
+    ),
+  ),
+  transitionBuilder: (context, animation, secondary, child) {
+    final offset = Tween<Offset>(
+      begin: const Offset(.12, 0),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
+    return FadeTransition(
+      opacity: animation,
+      child: SlideTransition(position: offset, child: child),
+    );
+  },
+);
+
+Widget _panelHeader(String title, String subtitle) => Padding(
+  padding: const EdgeInsets.fromLTRB(28, 24, 28, 18),
+  child: Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 26,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      const SizedBox(height: 5),
+      Text(
+        subtitle,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: .62),
+          fontSize: 15,
+        ),
+      ),
+    ],
+  ),
+);
+
+Future<TvPlayerAction?> showTvPlayerMenu(
+  BuildContext context, {
+  required String title,
+  required int episode,
+  required int totalEpisodes,
+  required String speedLabel,
+  required String qualityLabel,
+  required bool followed,
+}) {
+  final items = <(TvPlayerAction, IconData, String, String)>[
+    (
+      TvPlayerAction.episodes,
+      Icons.format_list_numbered_rounded,
+      '选集',
+      totalEpisodes > 0 ? '第 $episode 集 / 共 $totalEpisodes 集' : '选择播放集数',
+    ),
+    (TvPlayerAction.speed, Icons.speed_rounded, '倍速', '当前 $speedLabel'),
+    (TvPlayerAction.quality, Icons.hd_rounded, '清晰度', qualityLabel),
+    (
+      TvPlayerAction.follow,
+      followed ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
+      followed ? '取消追剧' : '追剧',
+      followed ? '已加入追剧列表' : '加入追剧列表',
+    ),
+  ];
+  return _showTvSidePanel<TvPlayerAction>(
+    context,
+    barrierLabel: '关闭播放设置',
+    width: 470,
+    builder: (panelContext) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _panelHeader('播放设置', title),
+        Divider(height: 1, color: Colors.white.withValues(alpha: .10)),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 26),
+            itemCount: items.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 10),
+            itemBuilder: (_, index) {
+              final item = items[index];
+              return RemoteTarget(
+                autofocus: index == 0,
+                accent: _tvAccent,
+                label: '${item.$3}，${item.$4}',
+                onPressed: () => Navigator.of(panelContext).pop(item.$1),
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 82),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .07),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: _tvAccent.withValues(alpha: .15),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(item.$2, color: _tvAccent, size: 27),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              item.$3,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              item.$4,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: .58),
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        Icons.chevron_right_rounded,
+                        color: Colors.white.withValues(alpha: .48),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(28, 0, 28, 22),
+          child: Text(
+            'OK 播放/暂停  ·  ←/→ 快退快进  ·  菜单键打开本页  ·  返回关闭',
+            style: TextStyle(color: Colors.white.withValues(alpha: .42), fontSize: 13),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+Future<int?> showTvEpisodePanel(
+  BuildContext context, {
+  required String title,
+  required List<Episode> episodes,
+  required int currentIndex,
+}) {
+  if (episodes.isEmpty) return Future<int?>.value();
+  final safeIndex = currentIndex.clamp(0, episodes.length - 1);
+  final keys = List<String>.generate(episodes.length, (i) => 'episode-$i');
+  return _showTvSidePanel<int>(
+    context,
+    barrierLabel: '关闭选集',
+    width: 610,
+    builder: (panelContext) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _panelHeader('选集', '$title · 当前第 ${episodes[safeIndex].number} 集 · 上下滚动'),
+        Divider(height: 1, color: Colors.white.withValues(alpha: .10)),
+        Expanded(
+          child: RemoteGrid(
+            itemKeys: keys,
+            columns: 3,
+            itemExtent: 72,
+            spacing: 12,
+            padding: const EdgeInsets.fromLTRB(22, 20, 22, 28),
+            initialIndex: safeIndex,
+            autofocus: true,
+            itemBuilder: (_, index, node, onFocus) {
+              final episode = episodes[index];
+              final current = index == safeIndex;
+              return RemoteTarget(
+                focusNode: node,
+                onFocus: onFocus,
+                selected: current,
+                accent: _tvAccent,
+                label: '第 ${episode.number} 集${current ? '，正在播放' : ''}',
+                onPressed: () => Navigator.of(panelContext).pop(index),
+                child: Container(
+                  alignment: Alignment.center,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(
+                    color: current
+                        ? _tvAccent.withValues(alpha: .28)
+                        : Colors.white.withValues(alpha: .07),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (current) ...[
+                        const Icon(Icons.play_arrow_rounded, color: _tvAccent, size: 22),
+                        const SizedBox(width: 3),
+                      ],
+                      Flexible(
+                        child: Text(
+                          '第 ${episode.number} 集',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: current ? FontWeight.w800 : FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+}
+''')
+
+# Player modifications.
+p = Path("lib/vertical_feed_screen.dart")
+s = p.read_text()
+if "import 'tv_player_panel.dart';" not in s:
+    anchor = "import 'tv_dialogs.dart';\n"
+    if anchor not in s:
+        raise SystemExit("tv_dialogs import anchor missing")
+    s = s.replace(anchor, anchor + "import 'tv_player_panel.dart';\n", 1)
+
+old = "  bool _panelOpen = false;\n  bool _controlsVisible = true;\n"
+new = "  bool _panelOpen = false;\n  DateTime _lastPanelClosedAt = DateTime.fromMillisecondsSinceEpoch(0);\n  bool _controlsVisible = true;\n"
+if old not in s:
+    raise SystemExit("panel state anchor missing")
+s = s.replace(old, new, 1)
+
+old = """    if (mounted && !_closed) {\n      setState(() => _panelOpen = false);\n      _showControls();\n    }\n  }\n\n  /// 弹窗统一深色底 + 白色文字。"""
+new = """    if (mounted && !_closed) {\n      _lastPanelClosedAt = DateTime.now();\n      setState(() => _panelOpen = false);\n      _showControls();\n    }\n  }\n\n  /// TV 返回键按层级消费：二级面板 -> 播放控件 -> 全屏 -> 页面退出。\n  bool _consumeBackForRemote() {\n    if (_closed) return false;\n    if (_panelOpen) return true;\n    if (DateTime.now().difference(_lastPanelClosedAt) <\n        const Duration(milliseconds: 500)) {\n      return true;\n    }\n    if (_hideControlsForRemote()) return true;\n    if (_fullscreenRouteOpen) {\n      _exitFullscreen();\n      return true;\n    }\n    return false;\n  }\n\n  /// 弹窗统一深色底 + 白色文字。"""
+if old not in s:
+    raise SystemExit("open panel close anchor missing")
+s = s.replace(old, new, 1)
+
+needle = """    final currentIndex = _episodeIndex.clamp(0, detail.episodes.length - 1);\n    final episodes = detail.episodes;\n"""
+branch = """    final currentIndex = _episodeIndex.clamp(0, detail.episodes.length - 1);\n    final episodes = detail.episodes;\n    if (_television) {\n      final chosen = await showTvEpisodePanel(\n        context,\n        title: widget.drama.title,\n        episodes: episodes,\n        currentIndex: currentIndex,\n      );\n      if (chosen != null && mounted && !_closed) {\n        await _playEpisode(chosen);\n      }\n      return;\n    }\n"""
+if needle not in s:
+    raise SystemExit("episode branch anchor missing")
+s = s.replace(needle, branch, 1)
+
+marker = "  Future<void> _openEpisodes() => _openPanel(() async {"
+if marker not in s:
+    raise SystemExit("openEpisodes marker missing")
+menu_method = r'''  Future<void> _openTvPlayerMenu() async {
+    TvPlayerAction? action;
+    await _openPanel(() async {
+      final detail = _detail;
+      action = await showTvPlayerMenu(
+        context,
+        title: widget.drama.title,
+        episode: _episodeIndex + 1,
+        totalEpisodes: detail?.episodes.length ?? widget.drama.episodes,
+        speedLabel: '${_speed}x',
+        qualityLabel: _qualityLabel,
+        followed: _followed,
+      );
+    });
+    if (!mounted || _closed || action == null) return;
+    switch (action!) {
+      case TvPlayerAction.episodes:
+        await _openEpisodes();
+      case TvPlayerAction.speed:
+        await _openSpeedMenu();
+      case TvPlayerAction.quality:
+        await _openQualityMenu();
+      case TvPlayerAction.follow:
+        await _toggleFollow();
+    }
+  }
+
+'''
+s = s.replace(marker, menu_method + marker, 1)
+
+old = """      openEpisodes: () => unawaited(_openEpisodes()),\n      holdStart: _holdStartForRemote,\n"""
+new = """      openEpisodes: () => unawaited(_openEpisodes()),\n      openMenu: () => unawaited(_openTvPlayerMenu()),\n      consumeBack: _consumeBackForRemote,\n      holdStart: _holdStartForRemote,\n"""
+if old not in s:
+    raise SystemExit("remote actions construction anchor missing")
+s = s.replace(old, new, 1)
+
+old = """    required this.openEpisodes,\n    required this.holdStart,\n"""
+new = """    required this.openEpisodes,\n    required this.openMenu,\n    required this.consumeBack,\n    required this.holdStart,\n"""
+if old not in s:
+    raise SystemExit("remote actions constructor anchor missing")
+s = s.replace(old, new, 1)
+
+old = """  final void Function(int seconds) seekBy;\n\n  /// 打开选集面板。"""
+new = """  final void Function(int seconds) seekBy;\n\n  /// 打开 TV 播放设置抽屉。\n  final VoidCallback openMenu;\n\n  /// 按层级消费返回键。\n  final bool Function() consumeBack;\n\n  /// 打开选集面板。"""
+if old not in s:
+    raise SystemExit("remote actions fields anchor missing")
+s = s.replace(old, new, 1)
+
+key_start = s.find("  KeyEventResult _onKey(FocusNode node, KeyEvent event) {")
+key_end = s.find("\n  Future<bool> _confirmLeavePlayback()", key_start)
+if key_start < 0 or key_end < 0:
+    raise SystemExit("parent _onKey block bounds missing")
+new_key = r'''  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    final key = event.logicalKey;
+    final remote = _currentRemoteActions;
+
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    if (key == LogicalKeyboardKey.goBack || key == LogicalKeyboardKey.escape) {
+      if (remote?.consumeBack() == true) return KeyEventResult.handled;
+      return KeyEventResult.ignored;
+    }
+    if (key == LogicalKeyboardKey.contextMenu) {
+      if (event is KeyDownEvent) remote?.openMenu();
+      return remote == null ? KeyEventResult.ignored : KeyEventResult.handled;
+    }
+
+    if (!node.hasPrimaryFocus) return KeyEventResult.ignored;
+    if (remote == null) return KeyEventResult.ignored;
+
+    if (key == LogicalKeyboardKey.arrowDown ||
+        key == LogicalKeyboardKey.mediaTrackNext) {
+      if (event is KeyDownEvent) _jump(1);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.mediaTrackPrevious) {
+      if (event is KeyDownEvent) _jump(-1);
+      return KeyEventResult.handled;
+    }
+    if (_isConfirmKey(key)) {
+      if (event is KeyDownEvent) remote.togglePlayback();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      remote.seekBy(event is KeyRepeatEvent ? -5 : -10);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      remote.seekBy(event is KeyRepeatEvent ? 5 : 10);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.mediaPlayPause ||
+        key == LogicalKeyboardKey.space) {
+      if (event is KeyDownEvent) remote.togglePlayback();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+'''
+s = s[:key_start] + new_key + s[key_end:]
+
+old = """    final scaffold = Scaffold(\n      backgroundColor: Colors.black,\n      body: SafeArea(\n        child: Column(\n          children: [_header(), Expanded(child: content)],\n        ),\n      ),\n    );\n    if (!AppLayout.isTelevision(context)) return scaffold;\n    return PopScope(\n      canPop: false,\n      onPopInvokedWithResult: (didPop, result) {\n        if (didPop) return;\n        unawaited(_confirmLeavePlayback());\n      },\n      child: scaffold,\n    );\n"""
+new = """    final tv = AppLayout.isTelevision(context);\n    final scaffold = tv\n        ? Scaffold(backgroundColor: Colors.black, body: content)\n        : Scaffold(\n            backgroundColor: Colors.black,\n            body: SafeArea(\n              child: Column(\n                children: [_header(), Expanded(child: content)],\n              ),\n            ),\n          );\n    if (!tv) return scaffold;\n    return PopScope(\n      canPop: false,\n      onPopInvokedWithResult: (didPop, result) {\n        if (didPop) return;\n        if (_currentRemoteActions?.consumeBack() == true) return;\n        unawaited(_confirmLeavePlayback());\n      },\n      child: scaffold,\n    );\n"""
+if old not in s:
+    raise SystemExit("TV scaffold block pattern missing")
+s = s.replace(old, new, 1)
+p.write_text(s)
+
+# Source mirror configuration served by a simple static raw URL.
+config = {
+    "version": 1,
+    "ttlSeconds": 21600,
+    "sources": {
+        "huangguoai": [
+            "https://huangguoai.com",
+            "https://thu.agdkczeyx.cc",
+            "https://ttvoij.ediayikma.cc",
+            "https://thu.ediayikma.cc",
+            "https://pku.ediayikma.cc",
+            "https://fdu.ediayikma.cc",
+        ],
+        "huangguo-video": ["https://huangguoai.fit"],
+        "huangdou": ["https://tideember.cc", "https://xqjurgek.top"],
+        "huangju": ["https://huangju.net"],
+        "huangju-api": ["https://api.huangju.net"],
+        "cloudfront": [
+            "https://d2pypzndaqisk.cloudfront.net",
+            "https://d18ka9rqpfd3lo.cloudfront.net",
+            "https://d37n0wjehmw08f.cloudfront.net",
+        ],
+    },
+}
+Path("config").mkdir(exist_ok=True)
+Path("config/source_mirrors.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+
+Path("native/core/provider_mirrors.go").write_text(r'''package core
+
+import (
+    "context"
+    "encoding/json"
+    "io"
+    "net/http"
+    "net/url"
+    "strings"
+    "sync"
+    "time"
+)
+
+const providerMirrorConfigURL = "https://raw.githubusercontent.com/ai0by/zhenguojianTV/main/config/source_mirrors.json"
+
+type providerMirrorDocument struct {
+    Version    int                 `json:"version"`
+    TTLSeconds int                 `json:"ttlSeconds"`
+    Sources    map[string][]string `json:"sources"`
+}
+
+var providerMirrorCache struct {
+    sync.Mutex
+    expires time.Time
+    sources map[string][]string
+}
+
+func validProviderMirrorOrigin(raw string) string {
+    raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+    parsed, err := url.Parse(raw)
+    if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+        return ""
+    }
+    if parsed.Path != "" && parsed.Path != "/" {
+        return ""
+    }
+    if len(parsed.Host) > 253 {
+        return ""
+    }
+    return parsed.Scheme + "://" + parsed.Host
+}
+
+func parseProviderMirrorDocument(body []byte) (map[string][]string, time.Duration) {
+    var doc providerMirrorDocument
+    if len(body) == 0 || len(body) > 64<<10 || json.Unmarshal(body, &doc) != nil || doc.Version != 1 {
+        return nil, 0
+    }
+    ttl := time.Duration(doc.TTLSeconds) * time.Second
+    if ttl < 10*time.Minute || ttl > 24*time.Hour {
+        ttl = 6 * time.Hour
+    }
+    sources := make(map[string][]string)
+    for source, values := range doc.Sources {
+        if len(source) == 0 || len(source) > 64 {
+            continue
+        }
+        seen := map[string]bool{}
+        for _, raw := range values {
+            origin := validProviderMirrorOrigin(raw)
+            if origin == "" || seen[origin] {
+                continue
+            }
+            seen[origin] = true
+            sources[source] = append(sources[source], origin)
+            if len(sources[source]) >= 16 {
+                break
+            }
+        }
+    }
+    return sources, ttl
+}
+
+func (d *Downloader) remoteProviderMirrors(ctx context.Context) map[string][]string {
+    now := time.Now()
+    providerMirrorCache.Lock()
+    if now.Before(providerMirrorCache.expires) {
+        cached := providerMirrorCache.sources
+        providerMirrorCache.Unlock()
+        return cached
+    }
+    providerMirrorCache.Unlock()
+
+    fetchCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+    defer cancel()
+    req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, providerMirrorConfigURL, nil)
+    if err != nil {
+        return nil
+    }
+    req.Header.Set("Accept", "application/json")
+    req.Header.Set("User-Agent", userAgent)
+    resp, err := d.doCatalogRequestWithTimeout(req, 2500*time.Millisecond)
+    if err != nil {
+        providerMirrorCache.Lock()
+        providerMirrorCache.expires = now.Add(10 * time.Minute)
+        providerMirrorCache.Unlock()
+        return nil
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        providerMirrorCache.Lock()
+        providerMirrorCache.expires = now.Add(10 * time.Minute)
+        providerMirrorCache.Unlock()
+        return nil
+    }
+    body, err := io.ReadAll(io.LimitReader(resp.Body, (64<<10)+1))
+    if err != nil || len(body) > 64<<10 {
+        return nil
+    }
+    sources, ttl := parseProviderMirrorDocument(body)
+    if len(sources) == 0 {
+        providerMirrorCache.Lock()
+        providerMirrorCache.expires = now.Add(10 * time.Minute)
+        providerMirrorCache.Unlock()
+        return nil
+    }
+    providerMirrorCache.Lock()
+    providerMirrorCache.sources = sources
+    providerMirrorCache.expires = now.Add(ttl)
+    providerMirrorCache.Unlock()
+    return sources
+}
+
+func (d *Downloader) providerBaseCandidates(ctx context.Context, source string, builtins []string) []string {
+    seen := map[string]bool{}
+    result := make([]string, 0, len(builtins)+8)
+    add := func(raw string) {
+        origin := validProviderMirrorOrigin(raw)
+        if origin == "" || seen[origin] {
+            return
+        }
+        seen[origin] = true
+        result = append(result, origin)
+    }
+    d.providerMu.Lock()
+    add(d.providerHosts[source])
+    d.providerMu.Unlock()
+    if remote := d.remoteProviderMirrors(ctx); remote != nil {
+        for _, origin := range remote[source] {
+            add(origin)
+        }
+    }
+    for _, origin := range builtins {
+        add(origin)
+    }
+    return result
+}
+
+func (d *Downloader) rememberProviderHost(source, origin string) {
+    origin = validProviderMirrorOrigin(origin)
+    if source == "" || origin == "" {
+        return
+    }
+    d.providerMu.Lock()
+    d.providerHosts[source] = origin
+    d.providerMu.Unlock()
+}
+
+func (d *Downloader) providerURLCandidatesDynamic(ctx context.Context, rawURL string) []string {
+    parsed, err := url.Parse(rawURL)
+    if err != nil || parsed.Host == "" {
+        return []string{rawURL}
+    }
+    source := providerSourceForURL(rawURL)
+    fixed := providerURLCandidates(rawURL)
+    if source == "" {
+        return fixed
+    }
+    origins := make([]string, 0, len(fixed)+4)
+    for _, candidate := range fixed {
+        if value, err := url.Parse(candidate); err == nil && value.Host != "" {
+            origins = append(origins, value.Scheme+"://"+value.Host)
+        }
+    }
+    origins = d.providerBaseCandidates(ctx, source, origins)
+    seen := map[string]bool{}
+    result := make([]string, 0, len(origins)+len(fixed))
+    add := func(candidate string) {
+        if candidate == "" || seen[candidate] {
+            return
+        }
+        seen[candidate] = true
+        result = append(result, candidate)
+    }
+    for _, origin := range origins {
+        add(rehostProviderURL(parsed, origin))
+    }
+    for _, candidate := range fixed {
+        add(candidate)
+    }
+    if len(result) == 0 {
+        return []string{rawURL}
+    }
+    return result
+}
+''')
+
+Path("native/core/provider_mirrors_test.go").write_text(r'''package core
+
+import "testing"
+
+func TestParseProviderMirrorDocument(t *testing.T) {
+    body := []byte(`{"version":1,"ttlSeconds":3600,"sources":{"huangdou":["https://a.example","https://a.example/","http://bad.example","https://b.example/path"]}}`)
+    sources, ttl := parseProviderMirrorDocument(body)
+    if ttl <= 0 {
+        t.Fatal("expected ttl")
+    }
+    got := sources["huangdou"]
+    if len(got) != 1 || got[0] != "https://a.example" {
+        t.Fatalf("unexpected mirrors: %#v", got)
+    }
+}
+
+func TestInvalidProviderMirrorDocumentFallsBack(t *testing.T) {
+    sources, _ := parseProviderMirrorDocument([]byte(`{"version":9,"sources":{"huangdou":["https://a.example"]}}`))
+    if sources != nil {
+        t.Fatalf("unexpected sources: %#v", sources)
+    }
+}
+''')
+
+# Provider-page requests: merge remote origins into the existing candidate race.
+p = Path("native/core/provider_huangguo.go")
+s = p.read_text()
+count = s.count("candidates := d.providerURLCandidates(rawURL)")
+if count != 2:
+    raise SystemExit(f"expected 2 providerURLCandidates call sites, got {count}")
+s = s.replace("candidates := d.providerURLCandidates(rawURL)", "candidates := d.providerURLCandidatesDynamic(ctx, rawURL)")
+p.write_text(s)
+
+# Huangdou API: rotate remembered/remote/built-in hosts on transport failures.
+p = Path("native/core/provider_huangdou.go")
+s = p.read_text()
+start = s.find("func (c *huangdouAPIClient) call(ctx context.Context, path string, data map[string]any, out *any) error {")
+end = s.find("\ntype huangdouAPIError struct {", start)
+if start < 0 or end < 0:
+    raise SystemExit("huangdou call bounds missing")
+replacement = r'''func (c *huangdouAPIClient) call(ctx context.Context, path string, data map[string]any, out *any) error {
+    builtins := []string{c.host, huangdouBaseURL, "https://xqjurgek.top"}
+    hosts := c.d.providerBaseCandidates(ctx, sourceHuangdou, builtins)
+    if len(hosts) == 0 {
+        hosts = builtins
+    }
+    var lastErr error
+    for _, host := range hosts {
+        if err := ctx.Err(); err != nil {
+            return err
+        }
+        c.host = host
+        lastErr = c.callOnce(ctx, path, data, out)
+        if lastErr == nil {
+            c.d.rememberProviderHost(sourceHuangdou, host)
+            return nil
+        }
+        var apiErr *huangdouAPIError
+        if errors.As(lastErr, &apiErr) {
+            return lastErr
+        }
+    }
+    return lastErr
+}
+'''
+s = s[:start] + replacement + s[end:]
+p.write_text(s)
+
+# Legacy CloudFront API already probes candidates; include remote/static configuration.
+p = Path("native/core/provider_discovery.go")
+s = p.read_text()
+old = "candidates := append([]string{configured}, apiFallbackHosts...)"
+new = "candidates := d.providerBaseCandidates(ctx, sourceCloudFront, append([]string{configured}, apiFallbackHosts...))"
+if old not in s:
+    raise SystemExit("cloudfront candidate anchor missing")
+p.write_text(s.replace(old, new, 1))
+
+# Huangju API: wrap its request function with multi-origin routing.
+p = Path("native/core/provider_huangju_client.go")
+s = p.read_text()
+signature = "func (client *huangjuAPIClient) request(ctx context.Context, method, route string, query url.Values, body []byte, token string, retryAuth bool, limit int64) (huangjuAPIResponse, error) {"
+if signature not in s:
+    raise SystemExit("huangju request signature missing")
+wrapper = r'''func (client *huangjuAPIClient) request(ctx context.Context, method, route string, query url.Values, body []byte, token string, retryAuth bool, limit int64) (huangjuAPIResponse, error) {
+    bases := client.downloader.providerBaseCandidates(ctx, "huangju-api", []string{client.base, huangjuAPIBaseURL})
+    if len(bases) == 0 {
+        bases = []string{client.base}
+    }
+    var lastErr error
+    for _, base := range bases {
+        response, err := client.requestBase(ctx, base, method, route, query, body, token, retryAuth, limit)
+        if err == nil {
+            client.base = base
+            client.downloader.rememberProviderHost("huangju-api", base)
+            return response, nil
+        }
+        if errors.Is(err, errHuangjuGuestExpired) {
+            return huangjuAPIResponse{}, err
+        }
+        lastErr = err
+    }
+    return huangjuAPIResponse{}, lastErr
+}
+
+func (client *huangjuAPIClient) requestBase(ctx context.Context, baseAddress, method, route string, query url.Values, body []byte, token string, retryAuth bool, limit int64) (huangjuAPIResponse, error) {'''
+s = s.replace(signature, wrapper, 1)
+s = s.replace("base, err := url.Parse(client.base)", "base, err := url.Parse(baseAddress)", 1)
+s = s.replace("!isProviderHTTPMediaURL(client.base)", "!isProviderHTTPMediaURL(baseAddress)", 1)
+s = s.replace('address := client.base + route', 'address := strings.TrimRight(baseAddress, "/") + route', 1)
+p.write_text(s)
+
+# README.
+p = Path("README.md")
+s = p.read_text().replace("当前版本：**0.8.5+80**", "当前版本：**0.8.6+81**")
+s = re.sub(
+    r"## 二、本次更新（[^\n]+）\n.*?\n## 三、快速开始",
+    """## 二、本次更新（0.8.6）\n\n- **TV 播放页重构**：电视模式播放路由直接铺满屏幕，不再继承全局过扫描边距/顶部标题栏。\n- **遥控返回键状态机**：先关闭二级面板，再收播放控件，再退出全屏，最后才询问退出播放，避免一次返回穿透多层。\n- **OK 键直接播放/暂停**；左右键快退/快进；菜单键打开右侧“播放设置”。\n- **TV 选集改为右侧滚动抽屉**：当前集自动定位，方向键连续上下滚动，焦点改为高对比白色焦点环。\n- **站源多地址**：运行时读取仓库 `config/source_mirrors.json`，自动尝试可用地址并记住成功入口；远程清单访问失败时回退内置默认地址。\n- 继续保持 0.8.5 的纯净策略：无广告、无系统通知、无自动更新检测。\n\n## 三、快速开始""",
+    s,
+    flags=re.S,
+)
+p.write_text(s)
