@@ -1,0 +1,131 @@
+name: Release TV UX v0.8.6 v2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.8.6-tv-ux-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GOPROXY: https://proxy.golang.org,direct
+      GOSUMDB: sum.golang.org
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Go 1.24.1
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.1'
+          cache-dependency-path: native/go.sum
+
+      - name: Set up Flutter 3.47.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" "$ANDROID_HOME/tools" -type f -name sdkmanager -print -quit 2>/dev/null)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+
+      - name: Apply TV UX changes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 scripts/patch_apply_tv_v086.py
+          python3 scripts/apply_tv_v086.py
+          gofmt -w native/core/provider_mirrors.go native/core/provider_mirrors_test.go native/core/provider_huangdou.go native/core/provider_discovery.go native/core/provider_huangju_client.go native/core/provider_huangguo.go
+          flutter pub get
+
+      - name: Audit requested behavior
+        shell: bash
+        run: |
+          set -euxo pipefail
+          grep -q '^version: 0.8.6+81$' pubspec.yaml
+          grep -q 'showTvEpisodePanel' lib/vertical_feed_screen.dart
+          grep -q 'remote.togglePlayback()' lib/vertical_feed_screen.dart
+          grep -q 'remote.openMenu()' lib/vertical_feed_screen.dart
+          grep -q 'providerMirrorConfigURL' native/core/provider_mirrors.go
+          grep -q 'source_mirrors.json' README.md
+          test -s config/source_mirrors.json
+          if grep -q 'padding: tv ? AppLayout.overscan' lib/main.dart; then exit 1; fi
+          if grep -R -nE 'POST_NOTIFICATIONS|flutter_foreground_task|AppUpdater|checkOnStartup' lib android pubspec.yaml pubspec.lock; then exit 1; fi
+
+      - name: Test native core
+        shell: bash
+        working-directory: native
+        run: go test ./...
+
+      - name: Test Flutter source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PYTHONPATH=scripts python3 -m unittest scripts.test_app_build -v
+          flutter test test/pinyin_test.dart test/television_test.dart
+
+      - name: Build real TV APKs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 scripts/build_android.py --tv --universal --all-sources
+
+      - name: Verify APKs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ALL=dist/android/zhenguojian-0.8.6+81-all.apk
+          ARM64=dist/android/zhenguojian-0.8.6+81-arm64-v8a.apk
+          test -s "$ALL"
+          test -s "$ARM64"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$ALL"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$ARM64"
+          python3 scripts/test_apk_abis.py "$ALL" arm64-v8a armeabi-v7a
+          python3 scripts/test_apk_abis.py "$ARM64" arm64-v8a
+
+      - name: Commit verified source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp scripts/release_notes_v086.md /tmp/release_notes_v086.md
+          rm -f .github/workflows/release-v0.8.6-tv-ux.yml .github/workflows/release-v0.8.6-tv-ux-v2.yml
+          rm -f scripts/apply_tv_v086.py scripts/patch_apply_tv_v086.py scripts/release_notes_v086.md scripts/test_apk_abis.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m '0.8.6+81: redesign TV remote UX and source routing'
+          git push origin HEAD:main
+
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ALL=dist/android/zhenguojian-0.8.6+81-all.apk
+          ARM64=dist/android/zhenguojian-0.8.6+81-arm64-v8a.apk
+          cp "$ALL" /tmp/zhenguojian-TV-v0.8.6-all.apk
+          cp "$ARM64" /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk
+          sha256sum /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk > /tmp/SHA256SUMS.txt
+          gh release create v0.8.6 /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk /tmp/SHA256SUMS.txt --repo ai0by/zhenguojianTV --target "$(git rev-parse HEAD)" --title '真果鉴 TV v0.8.6 · TV 遥控体验重构' --notes-file /tmp/release_notes_v086.md
