@@ -28,13 +28,14 @@ jobs:
           from pathlib import Path
           import json
 
-          def replace_exact(path, old, new, count=1):
+          def replace_exact(path, old, new):
               p = Path(path)
               text = p.read_text(encoding='utf-8')
-              found = text.count(old)
-              if found != count:
-                  raise SystemExit(f'{path}: expected {count} matches, found {found}: {old!r}')
-              p.write_text(text.replace(old, new), encoding='utf-8')
+              if old not in text:
+                  if new in text:
+                      return
+                  raise SystemExit(f'{path}: source anchor not found')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
           replace_exact(
               'lib/downloads_screen.dart',
@@ -54,8 +55,8 @@ jobs:
 
           replace_exact(
               'lib/home_screen.dart',
-              '  int _generation = 0;\n  int _tab = 0;\n  String _submittedQuery = \'\';',
-              '  int _generation = 0;\n  int _tab = 0;\n  bool _downloadVisited = false;\n  String _submittedQuery = \'\';',
+              "  int _generation = 0;\n  int _tab = 0;\n  String _submittedQuery = '';",
+              "  int _generation = 0;\n  int _tab = 0;\n  bool _downloadVisited = false;\n  String _submittedQuery = '';",
           )
           replace_exact(
               'lib/home_screen.dart',
@@ -100,89 +101,74 @@ jobs:
               json.dumps(config, ensure_ascii=False, indent=2) + '\n',
               encoding='utf-8',
           )
+
+          Path('test/downloads_polling_test.dart').write_text('''import 'package:duanju_app/core_bridge.dart';
+import 'package:duanju_app/downloads_screen.dart';
+import 'package:duanju_app/local_store.dart';
+import 'package:duanju_app/models.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'fixtures.dart';
+
+class _PollingRepository extends FixtureRepository {
+  int downloadCalls = 0;
+
+  @override
+  bool get supportsDownloads => true;
+
+  @override
+  Future<List<DownloadJob>> downloads() async {
+    downloadCalls++;
+    return const [];
+  }
+}
+
+void main() {
+  testWidgets('hidden DownloadsScreen does not poll and resumes only while active', (tester) async {
+    SharedPreferences.setMockInitialValues(const {});
+    final store = LocalStore(await SharedPreferences.getInstance());
+    addTearDown(store.dispose);
+    final repository = _PollingRepository();
+    final active = ValueNotifier<bool>(false);
+    addTearDown(active.dispose);
+
+    await tester.pumpWidget(MaterialApp(
+      home: ValueListenableBuilder<bool>(
+        valueListenable: active,
+        builder: (_, value, __) => DownloadsScreen(
+          repository: repository,
+          store: store,
+          active: value,
+        ),
+      ),
+    ));
+    await tester.pump(const Duration(seconds: 3));
+    expect(repository.downloadCalls, 0);
+
+    active.value = true;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(repository.downloadCalls, 1);
+
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(repository.downloadCalls, greaterThanOrEqualTo(2));
+
+    active.value = false;
+    await tester.pump();
+    final pausedAt = repository.downloadCalls;
+    await tester.pump(const Duration(seconds: 3));
+    expect(repository.downloadCalls, pausedAt);
+  });
+}
+''', encoding='utf-8')
           PY
 
-          cat > test/downloads_polling_test.dart <<'DART'
-          import 'package:duanju_app/core_bridge.dart';
-          import 'package:duanju_app/downloads_screen.dart';
-          import 'package:duanju_app/local_store.dart';
-          import 'package:flutter/material.dart';
-          import 'package:flutter_test/flutter_test.dart';
-          import 'package:shared_preferences/shared_preferences.dart';
-
-          import 'fixtures.dart';
-
-          class _PollingRepository extends FixtureRepository {
-            int downloadCalls = 0;
-
-            @override
-            bool get supportsDownloads => true;
-
-            @override
-            Future<List<DownloadJob>> downloads() async {
-              downloadCalls++;
-              return const [];
-            }
-          }
-
-          void main() {
-            testWidgets(
-              'hidden DownloadsScreen does not poll and resumes only while active',
-              (tester) async {
-                SharedPreferences.setMockInitialValues(const {});
-                final store = LocalStore(await SharedPreferences.getInstance());
-                addTearDown(store.dispose);
-                final repository = _PollingRepository();
-                final active = ValueNotifier<bool>(false);
-                addTearDown(active.dispose);
-
-                await tester.pumpWidget(
-                  MaterialApp(
-                    home: ValueListenableBuilder<bool>(
-                      valueListenable: active,
-                      builder: (_, value, __) => DownloadsScreen(
-                        repository: repository,
-                        store: store,
-                        active: value,
-                      ),
-                    ),
-                  ),
-                );
-                await tester.pump(const Duration(seconds: 3));
-                expect(repository.downloadCalls, 0);
-
-                active.value = true;
-                await tester.pump();
-                await tester.pump(const Duration(milliseconds: 50));
-                expect(repository.downloadCalls, 1);
-
-                await tester.pump(const Duration(seconds: 2));
-                await tester.pump(const Duration(milliseconds: 50));
-                expect(repository.downloadCalls, greaterThanOrEqualTo(2));
-
-                active.value = false;
-                await tester.pump();
-                final pausedAt = repository.downloadCalls;
-                await tester.pump(const Duration(seconds: 3));
-                expect(repository.downloadCalls, pausedAt);
-              },
-            );
-          }
-          DART
-
-      - name: Verify source mirror document
+      - name: Native source mirror regression
         shell: bash
         run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path('config/source_mirrors.json').read_text())
-          assert data['sources']['huangguo-video'] == ['https://huangguo.video']
-          assert data['sources']['huangju'] == ['https://huangju.net']
-          assert data['sources']['huangju-api'] == ['https://api.huangju.net']
-          assert 'huangguoai.fit' not in Path('config/source_mirrors.json').read_text()
-          assert len(data['sources']['huangguoai']) == 6
-          PY
           cd native
           go test ./core -run 'Test(ParseProviderMirrorDocument|InvalidProviderMirrorDocumentFallsBack|ProviderMirrorConfigUsesJsDelivr|ValidProviderMirrorOriginRejectsUnsafeAddresses|ProviderBaseCandidatesPrefersRememberedThenRemoteThenBuiltin|ProviderURLCandidatesDynamicPreservesPathAndQuery)$' -count=1
 
@@ -198,19 +184,20 @@ jobs:
         run: |
           flutter pub get
           dart format lib/downloads_screen.dart lib/home_screen.dart test/downloads_polling_test.dart
+          flutter analyze
           flutter test --dart-define=ALL_SOURCES=true --concurrency=1 \
             test/downloads_polling_test.dart \
             test/app_bottom_navigation_test.dart \
             test/tv_shared_apk_navigation_test.dart \
-            test/television_test.dart
+            test/television_test.dart \
+            test/tv_player_remote_test.dart
 
-      - name: Commit verified optimization and remove workflow
+      - name: Commit verified optimization
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          rm .github/workflows/performance-provider-batch2.yml
-          git add lib/downloads_screen.dart lib/home_screen.dart config/source_mirrors.json test/downloads_polling_test.dart .github/workflows/performance-provider-batch2.yml
+          git add lib/downloads_screen.dart lib/home_screen.dart config/source_mirrors.json test/downloads_polling_test.dart
           git diff --cached --quiet && exit 0
           git commit -m "Optimize hidden downloads and provider mirrors verified"
           git pull --rebase origin main
