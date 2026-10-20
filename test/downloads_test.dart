@@ -111,6 +111,11 @@ class DownloadRepository extends FixtureRepository {
   }
 }
 
+Finder _jobMenu(String id) => find.descendant(
+  of: find.byKey(ValueKey('download-task-$id')),
+  matching: find.byTooltip('分集操作'),
+);
+
 void main() {
   Future<LocalStore> makeStore() async {
     SharedPreferences.setMockInitialValues({});
@@ -190,6 +195,8 @@ void main() {
         await tester.tap(find.text('全选'));
         await tester.pumpAndSettle();
         expect(find.text('已选 VIP 集可能只能下载试看内容。'), findsOneWidget);
+        await tester.tap(find.byTooltip('选择范围'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('仅非 VIP'));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const ValueKey('download-quality')));
@@ -225,23 +232,44 @@ void main() {
       ),
     );
     await tick(tester);
-    await tester.tap(find.byKey(const ValueKey('pause-1')));
+
+    await tester.tap(find.text('测试短剧'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('download-task-1')), findsOneWidget);
+
+    await tester.tap(_jobMenu('1'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('暂停'));
     await tick(tester);
-    expect(repository.commands, ['pause:1']);
-    await tester.tap(find.byKey(const ValueKey('resume-1')));
+    expect(repository.commands, contains('pause:1'));
+
+    await tester.tap(_jobMenu('1'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('继续 / 重试'));
     await tick(tester);
     expect(repository.commands.last, 'resume:1');
-    await tester.tap(find.text('已下载').first);
-    await tick(tester);
+
+    await tester.tap(find.byTooltip('筛选下载合集'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ChoiceChip, '已下载'));
+    await tester.tap(find.text('应用'));
+    await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('download-task-1')), findsNothing);
-    await tester.tap(find.byKey(const ValueKey('remove-2')));
+    expect(find.byKey(const ValueKey('download-task-2')), findsOneWidget);
+
+    await tester.tap(_jobMenu('2'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除视频'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('保留'));
     await tester.pumpAndSettle();
     expect(repository.commands, isNot(contains('remove:2')));
-    await tester.tap(find.byKey(const ValueKey('remove-2')));
+
+    await tester.tap(_jobMenu('2'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('删除'));
+    await tester.tap(find.text('删除视频'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认删除'));
     await tester.pumpAndSettle();
     expect(repository.commands.last, 'remove:2');
     expect(find.text('暂无符合条件的任务'), findsOneWidget);
@@ -284,7 +312,14 @@ void main() {
         ),
       );
       await tick(tester);
-      await tester.tap(find.byKey(const ValueKey('local-play-3')));
+      await tester.tap(find.text('测试短剧'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('download-task-3')),
+          matching: find.byType(ListTile),
+        ),
+      );
       await tester.pumpAndSettle();
       expect(find.text('offline player'), findsOneWidget);
       expect(repository.detailCalls, 0);
@@ -293,19 +328,8 @@ void main() {
     },
   );
 
-  // 2026-10-17：原有两个用例（"local failure requires manual online choice"
-  // 与 "missing local media exposes online choice"）随老播放器 `player_screen.dart`
-  // 一并删除（XF-0003 / WT-0031）。
-  //
-  // 删除原因：它们断言的是老播放器独有的「改为在线播放」按钮
-  // （`allowOnlineFallback`），新播放器 `vertical_feed_screen.dart` 没有该能力，
-  // 无法迁移。该能力当前生产路径不可达（调用方均传 `localOnly: true`），
-  // 是否补回见 `05-决策与问题.md` 的 `WT-0031` 缺失项 2。
-  //
-  // 备份：`90-归档/GD-0016-老播放器删除前备份/player_screen_test.dart` 等 4 个文件。
-
   testWidgets(
-    'TV download navigation and long queue remain usable with only the remote',
+    'TV download collections and long queues remain usable with only the remote',
     (tester) async {
       size(tester, const Size(960, 540));
       final repository = DownloadRepository();
@@ -324,18 +348,24 @@ void main() {
       );
       await tester.pumpAndSettle();
       focusRemote(tester, find.byKey(const ValueKey('tv-nav-4')));
-      await tester.pumpAndSettle();
       await tester.sendKeyEvent(LogicalKeyboardKey.select);
       await tester.pumpAndSettle();
-      focusRemote(tester, find.byKey(const ValueKey('download-task-1')));
-      await tester.pumpAndSettle();
-      for (var i = 0; i < 12; i++) {
-        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-        await tester.pumpAndSettle();
-      }
+
+      final collection = find.byKey(
+        const ValueKey('download-collection-hongguo:100'),
+      );
+      expect(collection, findsOneWidget);
+      focusRemote(tester, collection);
       await tester.sendKeyEvent(LogicalKeyboardKey.select);
       await tester.pumpAndSettle();
-      expect(find.text('测试短剧 · 第 13 集').last, findsOneWidget);
+
+      final thirteenth = find.byKey(
+        const ValueKey('download-task-primary-13'),
+      );
+      expect(thirteenth, findsOneWidget);
+      focusRemote(tester, thirteenth);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(thirteenth).bottom, lessThanOrEqualTo(540));
       await tester.sendKeyEvent(LogicalKeyboardKey.select);
       await tick(tester);
       expect(repository.commands.last, 'resume:13');
