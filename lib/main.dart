@@ -241,23 +241,19 @@ class DuanjuApp extends StatelessWidget {
             version: version,
             child: Theme(
               data: tv ? televisionTheme(theme) : theme,
-              child: Padding(
-                // 电视过扫描安全边距（0.8.0）：只在电视模式下生效。
-                padding: tv ? AppLayout.overscan : EdgeInsets.zero,
-                child: Shortcuts(
-                  shortcuts: const {
-                    SingleActivator(
-                      LogicalKeyboardKey.select,
-                      includeRepeats: false,
-                    ): ActivateIntent(),
-                    SingleActivator(
-                      LogicalKeyboardKey.gameButtonA,
-                      includeRepeats: false,
-                    ): ActivateIntent(),
-                    SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
-                  },
-                  child: FocusTraversalGroup(child: child!),
-                ),
+              child: Shortcuts(
+                shortcuts: const {
+                  SingleActivator(
+                    LogicalKeyboardKey.select,
+                    includeRepeats: false,
+                  ): ActivateIntent(),
+                  SingleActivator(
+                    LogicalKeyboardKey.gameButtonA,
+                    includeRepeats: false,
+                  ): ActivateIntent(),
+                  SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
+                },
+                child: FocusTraversalGroup(child: child!),
               ),
             ),
           ),

@@ -2,7 +2,7 @@
 
 多站源短剧浏览与在线播放应用，Android 手机版。基于开源项目 [Topkill/guoapp3](https://github.com/Topkill/guoapp3) 二次开发与改版。
 
-当前版本：**0.8.5+80** ｜ 平台：Android 7.0+（arm64-v8a / armeabi-v7a） ｜ [下载最新版](https://github.com/ai0by/zhenguojianTV/releases/latest)
+当前版本：**0.8.6+81** ｜ 平台：Android 7.0+（arm64-v8a / armeabi-v7a） ｜ [下载最新版](https://github.com/ai0by/zhenguojianTV/releases/latest)
 
 ---
 

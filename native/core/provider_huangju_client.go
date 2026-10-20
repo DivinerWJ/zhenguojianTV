@@ -136,8 +136,29 @@ func (client *huangjuAPIClient) get(ctx context.Context, route string, query url
 }
 
 func (client *huangjuAPIClient) request(ctx context.Context, method, route string, query url.Values, body []byte, token string, retryAuth bool, limit int64) (huangjuAPIResponse, error) {
-	base, err := url.Parse(client.base)
-	if err != nil || !isProviderHTTPMediaURL(client.base) || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+	bases := client.downloader.providerBaseCandidates(ctx, "huangju-api", []string{client.base, huangjuAPIBaseURL})
+	if len(bases) == 0 {
+		bases = []string{client.base}
+	}
+	var lastErr error
+	for _, base := range bases {
+		response, err := client.requestBase(ctx, base, method, route, query, body, token, retryAuth, limit)
+		if err == nil {
+			client.base = base
+			client.downloader.rememberProviderHost("huangju-api", base)
+			return response, nil
+		}
+		if errors.Is(err, errHuangjuGuestExpired) {
+			return huangjuAPIResponse{}, err
+		}
+		lastErr = err
+	}
+	return huangjuAPIResponse{}, lastErr
+}
+
+func (client *huangjuAPIClient) requestBase(ctx context.Context, baseAddress, method, route string, query url.Values, body []byte, token string, retryAuth bool, limit int64) (huangjuAPIResponse, error) {
+	base, err := url.Parse(baseAddress)
+	if err != nil || !isProviderHTTPMediaURL(baseAddress) || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
 		return huangjuAPIResponse{}, errors.New("黄剧接口地址无效")
 	}
 	timeout := 15 * time.Second
@@ -146,7 +167,7 @@ func (client *huangjuAPIClient) request(ctx context.Context, method, route strin
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	address := client.base + route
+	address := strings.TrimRight(baseAddress, "/") + route
 	if len(query) > 0 {
 		address += "?" + query.Encode()
 	}

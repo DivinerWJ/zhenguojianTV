@@ -137,32 +137,25 @@ func (d *Downloader) resolveHuangdouPlayback(ctx context.Context, client *huangd
 }
 
 func (c *huangdouAPIClient) call(ctx context.Context, path string, data map[string]any, out *any) error {
-	retries := c.d.cfg.Retries
-	if retries < 1 {
-		retries = 1
+	builtins := []string{c.host, huangdouBaseURL, "https://xqjurgek.top"}
+	hosts := c.d.providerBaseCandidates(ctx, sourceHuangdou, builtins)
+	if len(hosts) == 0 {
+		hosts = builtins
 	}
 	var lastErr error
-	for attempt := 0; attempt < retries; attempt++ {
+	for _, host := range hosts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if attempt > 0 {
-			select {
-			case <-time.After(time.Duration(attempt) * time.Second):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
+		c.host = host
 		lastErr = c.callOnce(ctx, path, data, out)
 		if lastErr == nil {
+			c.d.rememberProviderHost(sourceHuangdou, host)
 			return nil
 		}
 		var apiErr *huangdouAPIError
 		if errors.As(lastErr, &apiErr) {
 			return lastErr
-		}
-		if c.host == huangdouBaseURL && c.d.cfg.HuangdouURL == "" {
-			c.host = "https://xqjurgek.top"
 		}
 	}
 	return lastErr

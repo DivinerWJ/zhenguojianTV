@@ -26,6 +26,7 @@ import 'player_interactions.dart';
 import 'system_volume.dart';
 import 'screen_brightness.dart';
 import 'tv_dialogs.dart';
+import 'tv_player_panel.dart';
 import 'widgets.dart';
 
 /// 全屏横屏分区手势的类型（0.7.2，`XQ-0105`）。
@@ -868,50 +869,39 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     final key = event.logicalKey;
     final remote = _currentRemoteActions;
-    // 松开「确定」= 结束长按倍速（0.8.3）。
-    //
-    // 必须放在最前面：按下确定后控件会显示、焦点会移到播放键，
-    // 此时 `node.hasPrimaryFocus` 已经是 false；若按下面的守卫提前返回，
-    // KeyUp 就收不到，倍速会卡在 3 倍（虽有 30 秒兜底，但不该依赖它）。
-    if (event is KeyUpEvent) {
-      if (_isConfirmKey(key)) {
-        remote?.holdEnd();
-        return KeyEventResult.handled;
-      }
-      return KeyEventResult.ignored;
-    }
+
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
-    // 返回键优先处理：控件可见时先收控件，再让系统退出播放页。
+
     if (key == LogicalKeyboardKey.goBack || key == LogicalKeyboardKey.escape) {
-      if (remote != null && remote.hideControlsIfVisible()) {
-        return KeyEventResult.handled;
-      }
+      if (remote?.consumeBack() == true) return KeyEventResult.handled;
       return KeyEventResult.ignored;
     }
+    if (key == LogicalKeyboardKey.contextMenu) {
+      if (event is KeyDownEvent) remote?.openMenu();
+      return remote == null ? KeyEventResult.ignored : KeyEventResult.handled;
+    }
+
     if (!node.hasPrimaryFocus) return KeyEventResult.ignored;
+    if (remote == null) return KeyEventResult.ignored;
+
     if (key == LogicalKeyboardKey.arrowDown ||
         key == LogicalKeyboardKey.mediaTrackNext) {
-      _jump(1);
+      if (event is KeyDownEvent) _jump(1);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp ||
         key == LogicalKeyboardKey.mediaTrackPrevious) {
-      _jump(-1);
+      if (event is KeyDownEvent) _jump(-1);
       return KeyEventResult.handled;
     }
-    if (remote == null) return KeyEventResult.ignored;
     if (_isConfirmKey(key)) {
-      if (event is KeyDownEvent) {
-        // 长按 350ms → 3 倍速；轻点仍然只是显示控件（0.8.3）。
-        remote.holdStart();
-        remote.showControls();
-      }
+      if (event is KeyDownEvent) remote.togglePlayback();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
-      // 长按连续快退：首次 -10 秒，按住后每帧 -5 秒（0.8.1）。
       remote.seekBy(event is KeyRepeatEvent ? -5 : -10);
       return KeyEventResult.handled;
     }
@@ -919,16 +909,14 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       remote.seekBy(event is KeyRepeatEvent ? 5 : 10);
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.contextMenu) {
-      if (event is KeyDownEvent) remote.openEpisodes();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.mediaPlayPause) {
+    if (key == LogicalKeyboardKey.mediaPlayPause ||
+        key == LogicalKeyboardKey.space) {
       if (event is KeyDownEvent) remote.togglePlayback();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
+
 
   bool _jump(int delta, {bool auto = false}) {
     if (_closed) return false;
@@ -972,29 +960,29 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       child: ColoredBox(color: Colors.black, child: _body()),
     );
     if (widget.embedded) return content;
-    final scaffold = Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _header(),
-            Expanded(child: content),
-          ],
-        ),
-      ),
-    );
-    // 电视（0.8.1）：遥控器返回键容易误触，直接退出会打断正在看的剧。
-    // 这里拦一层确认框，确认后才真正返回（`Navigator.pop()` 不经过 PopScope）。
-    if (!AppLayout.isTelevision(context)) return scaffold;
+    final tv = AppLayout.isTelevision(context);
+    final scaffold = tv
+        ? Scaffold(backgroundColor: Colors.black, body: content)
+        : Scaffold(
+            backgroundColor: Colors.black,
+            body: SafeArea(
+              child: Column(
+                children: [_header(), Expanded(child: content)],
+              ),
+            ),
+          );
+    if (!tv) return scaffold;
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
+        if (_currentRemoteActions?.consumeBack() == true) return;
         unawaited(_confirmLeavePlayback());
       },
       child: scaffold,
     );
   }
+
 
   /// 是否已弹出"退出播放"确认框（防止连续按返回叠出多个对话框）。
   bool _leaveDialogOpen = false;
@@ -1421,6 +1409,8 @@ class _FeedRemoteActions {
     required this.togglePlayback,
     required this.seekBy,
     required this.openEpisodes,
+    required this.openMenu,
+    required this.consumeBack,
     required this.holdStart,
     required this.holdEnd,
     required this.setPaused,
@@ -1437,6 +1427,12 @@ class _FeedRemoteActions {
 
   /// 前进 / 后退若干秒（负数为后退）。
   final void Function(int seconds) seekBy;
+
+  /// 打开 TV 播放设置抽屉。
+  final VoidCallback openMenu;
+
+  /// 按层级消费返回键。
+  final bool Function() consumeBack;
 
   /// 打开选集面板。
   final VoidCallback openEpisodes;
@@ -1590,6 +1586,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   bool _loading = true;
   bool _ready = false;
   bool _panelOpen = false;
+  DateTime _lastPanelClosedAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _controlsVisible = true;
 
   /// 是否电视模式（0.8.0 恢复电视支持）。
@@ -1897,6 +1894,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         togglePlayback: _togglePlayback,
         seekBy: _seekBy,
         openEpisodes: () => unawaited(_openEpisodes()),
+        openMenu: () => unawaited(_openTvPlayerMenu()),
+        consumeBack: _consumeBackForRemote,
         holdStart: _holdStartForRemote,
         holdEnd: _holdEndForRemote,
         setPaused: _setPausedForDialog,
@@ -3780,9 +3779,26 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     });
     await show();
     if (mounted && !_closed) {
+      _lastPanelClosedAt = DateTime.now();
       setState(() => _panelOpen = false);
       _showControls();
     }
+  }
+
+  /// TV 返回键按层级消费：二级面板 -> 播放控件 -> 全屏 -> 页面退出。
+  bool _consumeBackForRemote() {
+    if (_closed) return false;
+    if (_panelOpen) return true;
+    if (DateTime.now().difference(_lastPanelClosedAt) <
+        const Duration(milliseconds: 500)) {
+      return true;
+    }
+    if (_hideControlsForRemote()) return true;
+    if (_fullscreenRouteOpen) {
+      _exitFullscreen();
+      return true;
+    }
+    return false;
   }
 
   /// 弹窗统一深色底 + 白色文字。
@@ -4024,6 +4040,33 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _refreshFullscreen();
   }
 
+  Future<void> _openTvPlayerMenu() async {
+    TvPlayerAction? action;
+    await _openPanel(() async {
+      final detail = _detail;
+      action = await showTvPlayerMenu(
+        context,
+        title: widget.drama.title,
+        episode: _episodeIndex + 1,
+        totalEpisodes: detail?.episodes.length ?? widget.drama.episodes,
+        speedLabel: '${_speed}x',
+        qualityLabel: _qualityLabel,
+        followed: _followed,
+      );
+    });
+    if (!mounted || _closed || action == null) return;
+    switch (action!) {
+      case TvPlayerAction.episodes:
+        await _openEpisodes();
+      case TvPlayerAction.speed:
+        await _openSpeedMenu();
+      case TvPlayerAction.quality:
+        await _openQualityMenu();
+      case TvPlayerAction.follow:
+        await _toggleFollow();
+    }
+  }
+
   Future<void> _openEpisodes() => _openPanel(() async {
     // 剧集信息可能尚未就绪（正在解析播放地址），此时给出明确提示而不是静默无反应。
     final detail = _detail;
@@ -4037,6 +4080,18 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     // 0.2.31 改版：从"标题列表"改为"数字网格"（每集一个方块，选中项高亮）。
     // 好处：一屏能看更多集、定位当前集更直观；横屏时列数更多、不浪费横向空间。
     final episodes = detail.episodes;
+    if (_television) {
+      final chosen = await showTvEpisodePanel(
+        context,
+        title: widget.drama.title,
+        episodes: episodes,
+        currentIndex: currentIndex,
+      );
+      if (chosen != null && mounted && !_closed) {
+        await _playEpisode(chosen);
+      }
+      return;
+    }
     final columns = _episodeGridColumns;
     // 让网格滚动到当前集附近（网格高度固定，先按行号估算偏移）。
     final gridController = ScrollController();

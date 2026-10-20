@@ -36,7 +36,7 @@ func (d *Downloader) apiEndpoint(ctx context.Context) (string, error) {
 		d.apiBase = configured
 		return configured, nil
 	}
-	candidates := append([]string{configured}, apiFallbackHosts...)
+	candidates := d.providerBaseCandidates(ctx, sourceCloudFront, append([]string{configured}, apiFallbackHosts...))
 	seen := map[string]bool{}
 	var lastErr error
 	for pass := 0; pass < 2; pass++ {

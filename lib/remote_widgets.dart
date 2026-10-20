@@ -205,7 +205,7 @@ class _RemoteTargetState extends State<RemoteTarget> {
             behavior: HitTestBehavior.opaque,
             onTap: widget.onPressed,
             child: AnimatedScale(
-              scale: _focused ? 1.03 : 1,
+              scale: _focused ? 1.045 : 1,
               duration: const Duration(milliseconds: 140),
               curve: Curves.easeOutCubic,
               child: AnimatedContainer(
@@ -217,10 +217,12 @@ class _RemoteTargetState extends State<RemoteTarget> {
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: _focused || widget.selected
+                    color: _focused
+                        ? Colors.white
+                        : widget.selected
                         ? accent
                         : Colors.transparent,
-                    width: _focused ? 3.5 : 3,
+                    width: _focused ? 3 : 2.5,
                   ),
                   boxShadow: _focused
                       ? [

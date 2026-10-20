@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "ttlSeconds": 21600,
+  "sources": {
+    "huangguoai": [
+      "https://huangguoai.com",
+      "https://thu.agdkczeyx.cc",
+      "https://ttvoij.ediayikma.cc",
+      "https://thu.ediayikma.cc",
+      "https://pku.ediayikma.cc",
+      "https://fdu.ediayikma.cc"
+    ],
+    "huangguo-video": [
+      "https://huangguoai.fit"
+    ],
+    "huangdou": [
+      "https://tideember.cc",
+      "https://xqjurgek.top"
+    ],
+    "huangju": [
+      "https://huangju.net"
+    ],
+    "huangju-api": [
+      "https://api.huangju.net"
+    ],
+    "cloudfront": [
+      "https://d2pypzndaqisk.cloudfront.net",
+      "https://d18ka9rqpfd3lo.cloudfront.net",
+      "https://d37n0wjehmw08f.cloudfront.net"
+    ]
+  }
+}

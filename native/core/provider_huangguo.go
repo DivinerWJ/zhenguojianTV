@@ -337,7 +337,7 @@ func (d *Downloader) fetchProviderText(ctx context.Context, rawURL, referer stri
 	if referer == "" {
 		referer = rawURL
 	}
-	candidates := d.providerURLCandidates(rawURL)
+	candidates := d.providerURLCandidatesDynamic(ctx, rawURL)
 	if len(candidates) > 1 {
 		// 多镜像域名（目前只有黄果AI）时通时不通：串行逐个等 5 秒既慢，
 		// 又容易在"这一次刚好都不通"时整源判失败。改为并行竞速，任一可用即成功。
@@ -437,7 +437,7 @@ func (d *Downloader) fetchProviderText(ctx context.Context, rawURL, referer stri
 // “点进去一直转圈要转很久”。这里改成并行竞速：
 // 所有候选同时发起，谁先返回有效内容就用谁，最坏耗时约等于单次超时。
 func (d *Downloader) fetchProviderTextRacing(ctx context.Context, rawURL, referer string) (string, error) {
-	candidates := d.providerURLCandidates(rawURL)
+	candidates := d.providerURLCandidatesDynamic(ctx, rawURL)
 	if len(candidates) <= 1 {
 		return d.fetchProviderText(ctx, rawURL, referer)
 	}
