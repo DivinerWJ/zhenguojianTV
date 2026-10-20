@@ -1,10 +1,10 @@
 import 'package:duanju_app/core_bridge.dart';
 import 'package:duanju_app/detail_screen.dart';
 import 'package:duanju_app/downloads_screen.dart';
-import 'package:duanju_app/home_screen.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/models.dart';
 import 'package:duanju_app/playback_loader.dart';
+import 'package:duanju_app/remote_widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -111,10 +111,7 @@ class DownloadRepository extends FixtureRepository {
   }
 }
 
-Finder _jobMenu(String id) => find.descendant(
-  of: find.byKey(ValueKey('download-task-$id')),
-  matching: find.byTooltip('分集操作'),
-);
+Finder _jobMenu(String id) => find.byKey(ValueKey('download-task-menu-$id'));
 
 void main() {
   Future<LocalStore> makeStore() async {
@@ -137,38 +134,31 @@ void main() {
     }
   }
 
-  test(
-    'local-only loader never falls through to online; explicit online bypasses it',
-    () async {
-      final repository = DownloadRepository()..missing = true;
-      final loader = PlaybackLoader(repository);
-      await expectLater(
-        loader.load(
-          FixtureRepository.free,
-          repository.episode(1),
-          localOnly: true,
-        ),
-        throwsA(
-          isA<AppFailure>().having(
-            (error) => error.code,
-            'code',
-            'local_media',
-          ),
-        ),
-      );
-      expect(repository.onlineCalls, 0);
-      final plan = await loader.load(
+  test('local-only loader never falls through to online; explicit online bypasses it', () async {
+    final repository = DownloadRepository()..missing = true;
+    final loader = PlaybackLoader(repository);
+    await expectLater(
+      loader.load(
         FixtureRepository.free,
         repository.episode(1),
         localOnly: true,
-        online: true,
-      );
-      expect(plan!.local, isFalse);
-      expect(repository.localCalls, 1);
-      expect(repository.onlineCalls, 1);
-      await loader.close();
-    },
-  );
+      ),
+      throwsA(
+        isA<AppFailure>().having((error) => error.code, 'code', 'local_media'),
+      ),
+    );
+    expect(repository.onlineCalls, 0);
+    final plan = await loader.load(
+      FixtureRepository.free,
+      repository.episode(1),
+      localOnly: true,
+      online: true,
+    );
+    expect(plan!.local, isFalse);
+    expect(repository.localCalls, 1);
+    expect(repository.onlineCalls, 1);
+    await loader.close();
+  });
 
   for (final added in [2, 0]) {
     testWidgets(
@@ -337,31 +327,30 @@ void main() {
         20,
         (index) => repository.job(index + 1, 'paused'),
       );
+      final store = await makeStore();
       await tester.pumpWidget(
         televisionHost(
-          child: HomeScreen(
-            repository: repository,
-            store: await makeStore(),
-            initialTab: 1,
-          ),
+          child: DownloadsScreen(repository: repository, store: store),
         ),
       );
-      await tester.pumpAndSettle();
-      focusRemote(tester, find.byKey(const ValueKey('tv-nav-4')));
-      await tester.sendKeyEvent(LogicalKeyboardKey.select);
       await tester.pumpAndSettle();
 
       final collection = find.byKey(
         const ValueKey('download-collection-hongguo:100'),
       );
       expect(collection, findsOneWidget);
+      expect(tester.widget<RemoteTarget>(collection).label, contains('展开分集'));
       focusRemote(tester, collection);
+      await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.select);
       await tester.pumpAndSettle();
-
-      final thirteenth = find.byKey(
-        const ValueKey('download-task-primary-13'),
+      expect(
+        tester.widget<RemoteTarget>(collection).label,
+        contains('收起分集'),
+        reason: 'OK 必须先真正展开下载合集',
       );
+
+      final thirteenth = find.byKey(const ValueKey('download-task-primary-13'));
       expect(thirteenth, findsOneWidget);
       focusRemote(tester, thirteenth);
       await tester.pumpAndSettle();

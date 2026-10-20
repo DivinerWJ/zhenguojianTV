@@ -31,6 +31,33 @@ class TelevisionRepository extends FixtureRepository {
 }
 
 void main() {
+  testWidgets(
+    'RemoteTarget handles TV confirm keys without ancestor Shortcuts',
+    (tester) async {
+      var activations = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: RemoteTarget(
+              key: const ValueKey('standalone-remote-target'),
+              autofocus: true,
+              label: '独立遥控目标',
+              onPressed: () => activations++,
+              child: const SizedBox(width: 120, height: 64),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pump();
+      expect(activations, 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(activations, 2);
+    },
+  );
+
   Future<LocalStore> makeStore() async {
     SharedPreferences.setMockInitialValues({});
     final store = LocalStore(await SharedPreferences.getInstance());
@@ -137,7 +164,10 @@ void main() {
           );
           await tester.pumpAndSettle();
           await press(tester, LogicalKeyboardKey.select);
-          focusRemote(tester, find.byKey(const ValueKey('source-sheet-confirm')));
+          focusRemote(
+            tester,
+            find.byKey(const ValueKey('source-sheet-confirm')),
+          );
           await tester.pumpAndSettle();
           await press(tester, LogicalKeyboardKey.select);
           expect(find.text('选择站源'), findsNothing);

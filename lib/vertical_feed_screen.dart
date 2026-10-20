@@ -208,6 +208,11 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   int _generation = 0;
   bool _closed = false;
 
+  /// 首页竖滑流被 IndexedStack 保活但当前不可见时，延迟网络重载。
+  /// 这能避免用户在发现/追剧页切站源时，隐藏首页同时抢网络、解析和 rebuild，
+  /// 手机底部导航切换会更轻；重新回到首页时再按最新站源一次性加载。
+  bool _deferredReload = false;
+
   /// 连播模式：true = 连播本剧下一集，false = 连播下一部（默认）。
   bool _autoNextEpisode = false;
 
@@ -336,8 +341,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       // 这样上滑=下一集、下滑=上一集，符合用户"看这部剧"的直觉，
       // 不必先点「连播本剧」按钮。
       _autoNextEpisode = true;
-    } else {
+    } else if (widget.active) {
       _load();
+    } else {
+      // IndexedStack 会在发现/追剧页也保留首页。不可见时不要抢首屏网络与 CPU。
+      _loading = false;
+      _deferredReload = true;
     }
   }
 
@@ -348,28 +357,43 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       oldWidget.refreshSignal?.removeListener(_onRefreshSignal);
       widget.refreshSignal?.addListener(_onRefreshSignal);
     }
-    if (_signatureOf(oldWidget.sources) != _signatureOf(widget.sources)) {
-      // 0.2.27：切源时带上目标站源名，让加载页显示"正在切换到 XX…"，
-      // 避免用户产生"切了却没反应"的错觉（用户真机反馈第 5 条）。
-      final names = widget.sources.isEmpty
-          ? widget.store.sources
-          : widget.sources;
-      final label = names.length > 1
-          ? '全部站源'
-          : (names.isEmpty ? '' : names.first.name);
-      _reset(switchTo: label.isEmpty ? null : label);
-    }
-    // 0.7.2（XQ-0106）：剧类筛选变化 → 换一批内容。
+    final sourceChanged =
+        _signatureOf(oldWidget.sources) != _signatureOf(widget.sources);
     final oldGenres = (oldWidget.hongguoGenres ?? const <String>[]).join(',');
     final newGenres = (widget.hongguoGenres ?? const <String>[]).join(',');
-    if (oldGenres != newGenres) {
-      _reset(force: true);
+    final genresChanged = oldGenres != newGenres;
+    if (sourceChanged || genresChanged) {
+      if (widget.active) {
+        _deferredReload = false;
+        final names = widget.sources.isEmpty
+            ? widget.store.sources
+            : widget.sources;
+        final label = names.length > 1
+            ? '全部站源'
+            : (names.isEmpty ? '' : names.first.name);
+        _reset(
+          force: genresChanged,
+          switchTo: sourceChanged && label.isNotEmpty ? label : null,
+        );
+      } else {
+        // 隐藏页只记录脏状态；回到首页后再加载最新源。
+        _generation++;
+        _stopSwitchTicker();
+        _deferredReload = true;
+      }
+    } else if (!oldWidget.active && widget.active && _deferredReload) {
+      _deferredReload = false;
+      _reset();
     }
   }
 
   /// 双击首页标签：换一批新的随机内容。
   void _onRefreshSignal() {
     if (_closed) return;
+    if (!widget.active) {
+      _deferredReload = true;
+      return;
+    }
     _reset(force: true);
   }
 

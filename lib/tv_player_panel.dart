@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'models.dart';
 import 'remote_widgets.dart';
@@ -128,7 +129,11 @@ Future<TvPlayerAction?> showTvPlayerMenu(
     if (canPush)
       (TvPlayerAction.push, Icons.cast_rounded, '推送播放', '发送到局域网内的另一台设备'),
   ];
-  return _showTvSidePanel<TvPlayerAction>(
+  final focusNodes = List<FocusNode>.generate(
+    items.length,
+    (index) => FocusNode(debugLabel: 'tv-player-menu-$index'),
+  );
+  final dialog = _showTvSidePanel<TvPlayerAction>(
     context,
     barrierLabel: '关闭播放设置',
     width: 470,
@@ -143,70 +148,85 @@ Future<TvPlayerAction?> showTvPlayerMenu(
             child: Column(
               children: [
                 for (var index = 0; index < items.length; index++) ...[
-                  RemoteTarget(
-                    key: ValueKey('tv-player-menu-${items[index].$1.name}'),
-                    autofocus: index == 0,
-                    accent: _tvAccent,
-                    label: '${items[index].$3}，${items[index].$4}',
-                    onPressed: () =>
-                        Navigator.of(panelContext).pop(items[index].$1),
-                    child: Container(
-                      constraints: const BoxConstraints(minHeight: 82),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 12,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: .07),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 48,
-                            height: 48,
-                            decoration: BoxDecoration(
-                              color: _tvAccent.withValues(alpha: .15),
-                              borderRadius: BorderRadius.circular(12),
+                  CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+                        if (index > 0) focusNodes[index - 1].requestFocus();
+                      },
+                      const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+                        if (index + 1 < focusNodes.length) {
+                          focusNodes[index + 1].requestFocus();
+                        }
+                      },
+                    },
+                    child: RemoteTarget(
+                      key: ValueKey('tv-player-menu-${items[index].$1.name}'),
+                      focusNode: focusNodes[index],
+                      autofocus: index == 0,
+                      accent: _tvAccent,
+                      label: '${items[index].$3}，${items[index].$4}',
+                      onPressed: () =>
+                          Navigator.of(panelContext).pop(items[index].$1),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 82),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: .07),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: _tvAccent.withValues(alpha: .15),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(
+                                items[index].$2,
+                                color: _tvAccent,
+                                size: 27,
+                              ),
                             ),
-                            child: Icon(
-                              items[index].$2,
-                              color: _tvAccent,
-                              size: 27,
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  items[index].$3,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w700,
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    items[index].$3,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w700,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  items[index].$4,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: .58),
-                                    fontSize: 14,
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    items[index].$4,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: Colors.white.withValues(
+                                        alpha: .58,
+                                      ),
+                                      fontSize: 14,
+                                    ),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
-                          ),
-                          Icon(
-                            Icons.chevron_right_rounded,
-                            color: Colors.white.withValues(alpha: .48),
-                          ),
-                        ],
+                            Icon(
+                              Icons.chevron_right_rounded,
+                              color: Colors.white.withValues(alpha: .48),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -229,6 +249,11 @@ Future<TvPlayerAction?> showTvPlayerMenu(
       ],
     ),
   );
+  return dialog.whenComplete(() {
+    for (final node in focusNodes) {
+      node.dispose();
+    }
+  });
 }
 
 Future<int?> showTvEpisodePanel(

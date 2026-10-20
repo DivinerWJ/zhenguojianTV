@@ -178,24 +178,25 @@ void main() {
     },
   );
 
-  testWidgets('TV rapid opposite episode keys are not swallowed by touch debounce', (
-    tester,
-  ) async {
-    final (_, repo, _) = await _mount(tester);
-    expect(repo.requestedEpisodes.last, 1);
+  testWidgets(
+    'TV rapid opposite episode keys are not swallowed by touch debounce',
+    (tester) async {
+      final (_, repo, _) = await _mount(tester);
+      expect(repo.requestedEpisodes.last, 1);
 
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-    await tester.pump(const Duration(milliseconds: 120));
-    expect(repo.requestedEpisodes.last, 2);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(repo.requestedEpisodes.last, 2);
 
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-    await _pumpFrames(tester, 12);
-    expect(
-      repo.requestedEpisodes.last,
-      1,
-      reason: '遥控器是离散按键，不能复用触屏 400ms 防重复窗口吞掉反向操作',
-    );
-  });
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await _pumpFrames(tester, 12);
+      expect(
+        repo.requestedEpisodes.last,
+        1,
+        reason: '遥控器是离散按键，不能复用触屏 400ms 防重复窗口吞掉反向操作',
+      );
+    },
+  );
 
   testWidgets('TV left/right seek works from root playback focus', (
     tester,
@@ -245,11 +246,8 @@ void main() {
   testWidgets('TV 960x540 menu D-pad reaches and scrolls to bottom actions', (
     tester,
   ) async {
-    await _mount(
-      tester,
-      singleDrama: false,
-      size: const Size(960, 540),
-    );
+    await _mount(tester, singleDrama: false, size: const Size(960, 540));
+    final semanticsHandle = tester.ensureSemantics();
 
     await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
     await tester.pumpAndSettle();
@@ -261,9 +259,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 160));
     }
 
-    final semantics = tester.getSemantics(
-      find.bySemanticsLabel('剧集详情，查看简介、剧集和更多信息'),
-    );
+    final semantics = tester.getSemantics(detail);
     expect(
       semantics.hasFlag(SemanticsFlag.isFocused),
       isTrue,
@@ -272,6 +268,7 @@ void main() {
     final rect = tester.getRect(detail);
     expect(rect.top, greaterThanOrEqualTo(0));
     expect(rect.bottom, lessThanOrEqualTo(540));
+    semanticsHandle.dispose();
   });
 
   testWidgets('TV back hierarchy hides controls before exit confirmation', (

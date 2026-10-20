@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'app_layout.dart';
 import 'search_input.dart';
 import 'tv_keyboard.dart';
+
 import 'package:flutter/services.dart';
 
 /// 「切换站源」胶囊入口（0.8.2）。
@@ -168,6 +169,16 @@ class _RemoteTargetState extends State<RemoteTarget> {
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
       enabled: widget.onPressed != null,
+      shortcuts: const <ShortcutActivator, Intent>{
+        SingleActivator(LogicalKeyboardKey.select, includeRepeats: false):
+            ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.enter, includeRepeats: false):
+            ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadEnter, includeRepeats: false):
+            ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.gameButtonA, includeRepeats: false):
+            ActivateIntent(),
+      },
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
@@ -827,10 +838,7 @@ class _TelevisionSearchDialogState extends State<TelevisionSearchDialog> {
           onPressed: () => Navigator.pop(context, ''),
           child: const Text('清空'),
         ),
-        FilledButton(
-          onPressed: _submit,
-          child: const Text('搜索'),
-        ),
+        FilledButton(onPressed: _submit, child: const Text('搜索')),
       ],
     );
   }

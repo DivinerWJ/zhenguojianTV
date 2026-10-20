@@ -10,6 +10,7 @@ import 'download_collections.dart';
 import 'local_store.dart';
 import 'local_media_screen.dart';
 import 'models.dart';
+import 'remote_widgets.dart';
 import 'settings_screen.dart';
 import 'vertical_feed_screen.dart';
 import 'widgets.dart';
@@ -131,9 +132,8 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
 
   void _message(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -452,12 +452,52 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     ),
   ];
 
+  void _toggleCollection(DownloadCollection collection) {
+    setState(() {
+      if (_expanded.remove(collection.drama.id)) return;
+      // TV 只展开一个合集：避免一次构建几百个焦点节点，也让上下方向键顺序稳定。
+      if (AppLayout.isTelevision(context)) _expanded.clear();
+      _expanded.add(collection.drama.id);
+    });
+  }
+
+  PopupMenuButton<String> _collectionMenu(DownloadCollection collection) =>
+      PopupMenuButton<String>(
+        tooltip: '${collection.drama.title} · 合集操作',
+        enabled: !_busy,
+        onSelected: (value) {
+          if (value == 'update') {
+            _update(collection.drama);
+          } else if (value == 'select') {
+            _select(collection.jobs);
+          } else {
+            _batch(value, collection.jobs);
+          }
+        },
+        itemBuilder: (_) => [
+          PopupMenuItem(
+            value: 'update',
+            enabled: !_updater.busy,
+            child: const Text('更新本剧 · 补充新增与缺失'),
+          ),
+          const PopupMenuItem(value: 'select', child: Text('选择本合集')),
+          const PopupMenuItem(value: 'pause', child: Text('暂停本合集')),
+          const PopupMenuItem(value: 'resume', child: Text('继续 / 重试本合集')),
+          const PopupMenuItem(value: 'archive', child: Text('清理已完成任务，保留视频')),
+          if (_filter == 'archived')
+            const PopupMenuItem(value: 'restore', child: Text('恢复到任务列表')),
+          const PopupMenuItem(value: 'remove', child: Text('取消任务并删除视频')),
+        ],
+      );
+
   Widget _collection(DownloadCollection collection) {
     final count = collection.jobs
         .where((job) => _selected.contains(job.id))
         .length;
     final expanded = _expanded.contains(collection.drama.id);
-    return Card(
+    final television = AppLayout.isTelevision(context);
+
+    Widget tile({required Widget? trailing}) => Card(
       child: ListTile(
         leading: _selecting
             ? Checkbox(
@@ -480,45 +520,93 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
           '${collection.completed}/${collection.jobs.length} 集已下载 · ${storageSize(collection.bytes)}'
           '${collection.active > 0 ? ' · ${collection.active} 项进行中' : ''}${collection.failed > 0 ? ' · ${collection.failed} 项失败' : ''}',
         ),
-        onTap: () => setState(() {
-          if (!_expanded.remove(collection.drama.id)) {
-            _expanded.add(collection.drama.id);
-          }
-        }),
-        trailing: PopupMenuButton<String>(
-          tooltip: '${collection.drama.title} · 合集操作',
-          enabled: !_busy,
-          onSelected: (value) {
-            if (value == 'update') {
-              _update(collection.drama);
-            } else if (value == 'select') {
-              _select(collection.jobs);
-            } else {
-              _batch(value, collection.jobs);
-            }
-          },
-          itemBuilder: (_) => [
-            PopupMenuItem(
-              value: 'update',
-              enabled: !_updater.busy,
-              child: const Text('更新本剧 · 补充新增与缺失'),
-            ),
-            const PopupMenuItem(value: 'select', child: Text('选择本合集')),
-            const PopupMenuItem(value: 'pause', child: Text('暂停本合集')),
-            const PopupMenuItem(value: 'resume', child: Text('继续 / 重试本合集')),
-            const PopupMenuItem(value: 'archive', child: Text('清理已完成任务，保留视频')),
-            if (_filter == 'archived')
-              const PopupMenuItem(value: 'restore', child: Text('恢复到任务列表')),
-            const PopupMenuItem(value: 'remove', child: Text('取消任务并删除视频')),
-          ],
-        ),
+        onTap: television ? null : () => _toggleCollection(collection),
+        trailing: trailing,
       ),
+    );
+
+    if (!television) return tile(trailing: _collectionMenu(collection));
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: RemoteTarget(
+            key: ValueKey('download-collection-${collection.drama.id}'),
+            label: '${collection.drama.title}，${expanded ? '收起分集' : '展开分集'}',
+            onPressed: () => _toggleCollection(collection),
+            child: tile(
+              trailing: Icon(
+                expanded
+                    ? Icons.expand_less_rounded
+                    : Icons.expand_more_rounded,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 68,
+          child: Tooltip(
+            message: '${collection.drama.title} · 合集操作',
+            child: _collectionMenu(collection),
+          ),
+        ),
+      ],
     );
   }
 
-  Widget _episode(DownloadJob job) => Padding(
-    padding: const EdgeInsets.only(left: 12),
-    child: Card(
+  VoidCallback? _episodePrimaryAction(DownloadJob job) {
+    if (_busy) return null;
+    if (_selecting) return () => _select([job]);
+    if (job.completed) return () => _play(job);
+    if (job.active) return () => _batch('pause', [job]);
+    if (job.resumable) return () => _batch('resume', [job]);
+    return null;
+  }
+
+  String _episodePrimaryLabel(DownloadJob job) {
+    if (job.completed) return '播放';
+    if (job.active) return '暂停';
+    if (job.resumable) return '继续或重试';
+    return '查看';
+  }
+
+  PopupMenuButton<String> _episodeMenu(DownloadJob job) =>
+      PopupMenuButton<String>(
+        key: ValueKey('download-task-menu-${job.id}'),
+        enabled: !_busy,
+        tooltip: '第 ${job.episode.number} 集 · 更多操作',
+        onSelected: (value) {
+          if (value == 'play') {
+            _play(job);
+          } else {
+            _batch(value, [job]);
+          }
+        },
+        itemBuilder: (_) => [
+          if (job.completed)
+            const PopupMenuItem(value: 'play', child: Text('本地播放')),
+          if (job.active)
+            const PopupMenuItem(value: 'pause', child: Text('暂停')),
+          if (job.resumable)
+            const PopupMenuItem(value: 'resume', child: Text('继续 / 重试')),
+          if (job.completed)
+            PopupMenuItem(
+              value: job.archived ? 'restore' : 'archive',
+              child: Text(job.archived ? '恢复任务' : '清理任务，保留视频'),
+            ),
+          PopupMenuItem(
+            value: 'remove',
+            child: Text(job.completed ? '删除视频' : '取消下载'),
+          ),
+        ],
+      );
+
+  Widget _episode(DownloadJob job) {
+    final television = AppLayout.isTelevision(context);
+    final primary = _episodePrimaryAction(job);
+
+    Widget card({required Widget? trailing}) => Card(
       key: ValueKey('download-task-${job.id}'),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -543,46 +631,16 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               '${job.archived ? '已保留视频' : job.stateLabel} · ${storageSize(job.bytes)}'
               '${job.actualQuality > 0 ? ' · ${job.actualQuality}P' : ''}${job.error.isNotEmpty ? '\n${job.error}' : ''}',
             ),
-            onTap: _busy
+            onTap: television
+                ? null
+                : _busy
                 ? null
                 : _selecting
                 ? () => _select([job])
                 : job.completed
                 ? () => _play(job)
                 : null,
-            trailing: _selecting
-                ? null
-                : PopupMenuButton<String>(
-                    enabled: !_busy,
-                    tooltip: '分集操作',
-                    onSelected: (value) {
-                      if (value == 'play') {
-                        _play(job);
-                      } else {
-                        _batch(value, [job]);
-                      }
-                    },
-                    itemBuilder: (_) => [
-                      if (job.completed)
-                        const PopupMenuItem(value: 'play', child: Text('本地播放')),
-                      if (job.active)
-                        const PopupMenuItem(value: 'pause', child: Text('暂停')),
-                      if (job.resumable)
-                        const PopupMenuItem(
-                          value: 'resume',
-                          child: Text('继续 / 重试'),
-                        ),
-                      if (job.completed)
-                        PopupMenuItem(
-                          value: job.archived ? 'restore' : 'archive',
-                          child: Text(job.archived ? '恢复任务' : '清理任务，保留视频'),
-                        ),
-                      PopupMenuItem(
-                        value: 'remove',
-                        child: Text(job.completed ? '删除视频' : '取消下载'),
-                      ),
-                    ],
-                  ),
+            trailing: trailing,
           ),
           if (!job.completed)
             LinearProgressIndicator(
@@ -591,8 +649,34 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             ),
         ],
       ),
-    ),
-  );
+    );
+
+    if (!television) {
+      return Padding(
+        padding: const EdgeInsets.only(left: 12),
+        child: card(trailing: _selecting ? null : _episodeMenu(job)),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(left: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: RemoteTarget(
+              key: ValueKey('download-task-primary-${job.id}'),
+              label:
+                  '第 ${job.episode.number} 集，${_selecting ? '选择' : _episodePrimaryLabel(job)}',
+              onPressed: primary,
+              child: card(trailing: null),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(width: 68, child: _episodeMenu(job)),
+        ],
+      ),
+    );
+  }
 
   Widget _batchBar() => Material(
     color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -655,6 +739,11 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     ];
     final title = _selecting ? '已选 ${_selected.length} 项' : '下载合集';
     final actions = _titleActions(collections);
+    Widget rowWidget(Object row) => switch (row) {
+      DownloadCollection collection => _collection(collection),
+      DownloadJob job => _episode(job),
+      _ => const SizedBox.shrink(),
+    };
     final body = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -739,14 +828,18 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                   message: '在剧集详情选择下载，或调整筛选查看已保留的视频。',
                   icon: Icons.download_outlined,
                 )
+              : AppLayout.isTelevision(context)
+              ? SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [for (final row in rows) rowWidget(row)],
+                  ),
+                )
               : ListView.builder(
                   padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
                   itemCount: rows.length,
-                  itemBuilder: (_, index) => switch (rows[index]) {
-                    DownloadCollection collection => _collection(collection),
-                    DownloadJob job => _episode(job),
-                    _ => const SizedBox.shrink(),
-                  },
+                  itemBuilder: (_, index) => rowWidget(rows[index]),
                 ),
         ),
         if (_selecting) _batchBar(),

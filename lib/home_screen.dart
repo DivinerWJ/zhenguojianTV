@@ -150,9 +150,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     if (!_feedGenreEnabled) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('剧类筛选只在「仅红果」时可用')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('剧类筛选只在「仅红果」时可用')));
       return;
     }
     final picked = await showModalBottomSheet<String>(
@@ -1072,9 +1071,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     if (!_selectedDramas.containsKey(drama.id) &&
         _selectedDramas.length >= BatchDownloads.maxDramas) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('一次最多选择 50 部短剧，请分批下载')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('一次最多选择 50 部短剧，请分批下载')));
       return;
     }
     setState(() {
@@ -1258,7 +1256,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     icon: const Icon(Icons.sync_rounded),
                   ),
                 if (_tab == _discoverIndex) ...[
-                  if (!_showRecommendations)
+                  if (!_showRecommendations && constraints.maxWidth >= 360)
                     IconButton(
                       tooltip: '排序与筛选 · ${widget.store.catalogView.sort.label}',
                       onPressed: _chooseCatalogView,
@@ -1269,20 +1267,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           : null,
                       icon: const Icon(Icons.sort_rounded),
                     ),
-                  IconButton(
-                    key: const ValueKey('open-rankings'),
-                    tooltip: '榜单',
-                    onPressed: widget.store.sources.isEmpty
-                        ? null
-                        : _openRankings,
-                    icon: const Icon(Icons.leaderboard_outlined),
-                  ),
+                  if (constraints.maxWidth >= 360)
+                    IconButton(
+                      key: const ValueKey('open-rankings'),
+                      tooltip: '榜单',
+                      onPressed: widget.store.sources.isEmpty
+                          ? null
+                          : _openRankings,
+                      icon: const Icon(Icons.leaderboard_outlined),
+                    ),
                   // 多选下载（0.8.3）：电视上隐藏。
                   //
                   // 电视只适合"挑一部看"，批量下载 20 部短剧是手机/电脑的活；
                   // 而且选择模式的确认按钮在电视上要跨整个内容区去够，容易误触。
                   if (!_showRecommendations &&
                       !television &&
+                      constraints.maxWidth >= 360 &&
                       widget.store.canDownload &&
                       widget.repository.supportsDownloads)
                     IconButton(
@@ -1324,6 +1324,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   onSelected: (value) {
                     if (value == 'update') {
                       _refreshCatalog();
+                    } else if (value == 'sort') {
+                      _chooseCatalogView();
+                    } else if (value == 'rankings') {
+                      _openRankings();
+                    } else if (value == 'select') {
+                      setState(() => _selectionMode = true);
                     } else if (value == 'sources') {
                       _manageSources();
                     } else if (value == 'settings') {
@@ -1397,6 +1403,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             ),
                         child: const Text('更新剧库'),
                       ),
+                    if (_tab == _discoverIndex &&
+                        !_showRecommendations &&
+                        constraints.maxWidth < 360) ...[
+                      const PopupMenuItem(value: 'sort', child: Text('排序与筛选')),
+                      const PopupMenuItem(value: 'rankings', child: Text('榜单')),
+                      if (!television &&
+                          widget.store.canDownload &&
+                          widget.repository.supportsDownloads)
+                        const PopupMenuItem(
+                          value: 'select',
+                          child: Text('多选下载'),
+                        ),
+                    ],
                     if (widget.repository.supportsSourceManagement)
                       const PopupMenuItem(
                         value: 'sources',
@@ -1924,9 +1943,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                         : Text(
                                             '已经看到这里的全部剧集',
                                             style: TextStyle(
-                                              color: Theme.of(
-                                                context,
-                                              ).colorScheme.onSurfaceVariant,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurfaceVariant,
                                               fontSize: 12,
                                             ),
                                           ),
