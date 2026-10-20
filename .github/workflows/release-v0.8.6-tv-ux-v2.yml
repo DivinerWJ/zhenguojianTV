@@ -130,4 +130,4 @@ jobs:
           sha256sum /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk > /tmp/SHA256SUMS.txt
           gh release create v0.8.6 /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk /tmp/SHA256SUMS.txt --repo ai0by/zhenguojianTV --target "$(git rev-parse HEAD)" --title '真果鉴 TV v0.8.6 · TV 遥控体验重构' --notes-file /tmp/release_notes_v086.md
 
-# retry: balanced TV key-handler method bounds
+# retry: structural scaffold replacement
