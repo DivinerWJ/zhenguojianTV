@@ -55,7 +55,7 @@ jobs:
           replace_exact(
               'test/catalog_categories_test.dart',
               "    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));\n    await tester.pumpAndSettle();\n    // 默认打开「首页」，先切到「发现」页。\n    final discover = find.byKey(const ValueKey('bottom-nav-1'));\n    if (discover.evaluate().isNotEmpty) {\n      await tester.tap(discover);\n      await tester.pumpAndSettle();\n    }",
-              '    await tester.pumpWidget(\n      DuanjuApp(repository: repository, store: store, initialTab: 1),\n    );\n    await tester.pumpAndSettle();',
+              '    await tester.pumpWidget(\n      DuanjuApp(repository: repository, store: store, initialTab: 1),\n    );\n    // 首页内部有自动更新/动画等长期状态，不能用无界 pumpAndSettle 当“加载完成”。\n    // 这里的假仓库同步完成目录请求，固定推进几帧即可稳定进入发现页。\n    await tester.pump();\n    await tester.pump(const Duration(milliseconds: 500));',
           )
 
           p = Path('test/app_build_test.dart')
@@ -89,7 +89,7 @@ jobs:
           replace_exact(
               'test/local_persistence_test.dart',
               "      library['followStates'] = {};\n      library['history'] = [",
-              "      library.remove('followStates');\n      library.remove('followSync');\n      library['history'] = [",
+              "      // 收藏改成 next 时，同步快照也必须指向同一剧目；生产代码会拒绝\n      // ‘收藏 next、同步仍是旧剧’这种自相矛盾的备份。保留同步记录而不是\n      // 绕过校验，才能继续验证真正的‘原子快照写入失败不混数据’契约。\n      library.remove('followStates');\n      final sync = library['followSync'] as List;\n      final syncRecord = sync.single as Map;\n      syncRecord['drama'] = next.toJson();\n      library['history'] = [",
           )
           replace_exact('test/media_library_test.dart', '      expect(audioOnly.audioTranscodes, 1);', '      expect(audioOnly.audioTranscodes, 3);')
           replace_exact('test/media_library_test.dart', '    expect(plan.audioTranscodes, 2);', '    expect(plan.audioTranscodes, 3);')
