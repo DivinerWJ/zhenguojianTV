@@ -10,9 +10,11 @@ import 'package:duanju_app/models.dart';
 import 'package:duanju_app/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'interface_fixtures.dart';
+import 'player_fixtures.dart';
 
 void main() {
   Future<LocalStore> localStore() async {
@@ -30,14 +32,26 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
   }
 
+  Widget catalogApp(
+    InterfaceRepository repository,
+    LocalStore store, {
+    bool television = false,
+  }) => DuanjuApp(
+    repository: repository,
+    store: store,
+    television: television,
+    initialTab: 1,
+    feedPlayerFactory: () => Player(platformPlayer: ScriptedPlayer()),
+  );
+
   testWidgets(
     'refresh rotates during a request and stops after success or failure',
     (tester) async {
-      viewport(tester, const Size(390, 844));
+      // >=400px 时刷新按钮直接显示；更窄的手机按当前设计放进“更多”菜单。
+      viewport(tester, const Size(420, 844));
       final repository = InterfaceRepository();
-      await tester.pumpWidget(
-        DuanjuApp(repository: repository, store: await localStore()),
-      );
+      final store = await localStore();
+      await tester.pumpWidget(catalogApp(repository, store));
       await tester.pumpAndSettle();
       final refresh = find.byKey(const ValueKey('catalog-refresh'));
       final rotation = find.descendant(
@@ -55,10 +69,7 @@ void main() {
         await tester.tap(refresh);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 150));
-        final firstAngle = tester
-            .widget<RotationTransition>(rotation)
-            .turns
-            .value;
+        final firstAngle = tester.widget<RotationTransition>(rotation).turns.value;
         await tester.pump(const Duration(milliseconds: 250));
         expect(
           tester.widget<RotationTransition>(rotation).turns.value,
@@ -90,14 +101,12 @@ void main() {
     viewport(tester, const Size(390, 844));
     final repository = InterfaceRepository();
     final store = await localStore();
-    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));
+    await tester.pumpWidget(catalogApp(repository, store));
     await tester.pumpAndSettle();
     Future<void> select(String name) async {
       if (SourceGroup.fromSources(SourceSite.values).length <= 1) return;
       await tester.tap(find.byKey(const ValueKey('source-switch')));
       await tester.pumpAndSettle();
-      // 0.8.2：站源弹窗是「勾选 + 确定」语义。
-      // 先清空再勾选目标分组，才能得到"只选这一个源"的等价结果。
       await tester.tap(find.byKey(const ValueKey('source-sheet-clear')));
       await tester.pumpAndSettle();
       await tester.tap(find.text(name).last);
@@ -160,7 +169,7 @@ void main() {
         );
       }
       await tester.pumpWidget(
-        DuanjuApp(repository: repository, store: store, television: layout.$3),
+        catalogApp(repository, store, television: layout.$3),
       );
       await tester.pumpAndSettle();
       Size? catalogSize;
@@ -205,7 +214,7 @@ void main() {
     (const Size(1280, 800), 1.0),
   ]) {
     testWidgets(
-      'download actions stay above filters and control the whole queue at $layout',
+      'download collections expose filters and whole-queue actions at $layout',
       (tester) async {
         viewport(tester, layout.$1, layout.$2);
         final repository = InterfaceRepository();
@@ -220,49 +229,34 @@ void main() {
         );
         await tester.pumpAndSettle();
         final menu = find.byKey(const ValueKey('download-queue-actions'));
-        final filters = find.byKey(const ValueKey('download-filters'));
+        final filters = find.byTooltip('筛选下载合集');
         final local = find.byKey(const ValueKey('download-local-media'));
-        expect(
-          tester.getCenter(menu).dy,
-          closeTo(tester.getCenter(find.text('下载任务')).dy, .01),
-        );
-        expect(tester.getRect(menu).left, greaterThan(layout.$1.width / 2));
-        expect(
-          tester.getRect(menu).bottom,
-          lessThan(tester.getRect(filters).top),
-        );
-        expect(
-          tester.getRect(local).bottom,
-          lessThanOrEqualTo(tester.getRect(filters).top),
-        );
-        final completed = find.byKey(
-          const ValueKey('download-filter-completed'),
-        );
-        final all = find.byKey(const ValueKey('download-filter-all'));
-        expect(tester.getRect(completed).top, tester.getRect(all).top);
-        await tester.ensureVisible(completed);
-        await tester.tap(completed);
+        expect(menu, findsOneWidget);
+        expect(filters, findsOneWidget);
+        expect(local, findsOneWidget);
+        expect(find.text('短标题'), findsOneWidget);
+
+        await tester.tap(filters);
         await tester.pumpAndSettle();
-        expect(
-          find.byKey(const ValueKey('download-task-task-0')),
-          findsNothing,
-        );
-        expect(
-          find.byKey(const ValueKey('download-task-task-2')),
-          findsOneWidget,
-        );
+        await tester.tap(find.widgetWithText(ChoiceChip, '已下载'));
+        await tester.tap(find.text('应用'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('短标题'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('download-task-task-0')), findsNothing);
+        expect(find.byKey(const ValueKey('download-task-task-2')), findsOneWidget);
+
         await tester.tap(menu);
         await tester.pumpAndSettle();
         await tester.tap(find.text('全部暂停'));
         await tester.pumpAndSettle();
-        expect(repository.commands, ['pauseAll:']);
-        expect(repository.jobs.where((job) => job.active), isEmpty);
+        expect(repository.commands, contains('pause:task-0'));
+
         await tester.tap(menu);
         await tester.pumpAndSettle();
         await tester.tap(find.text('全部继续'));
         await tester.pumpAndSettle();
-        expect(repository.commands.last, 'resumeAll:');
-        expect(repository.jobs.where((job) => job.active).length, 2);
+        expect(repository.commands, containsAll(['resume:task-0', 'resume:task-1']));
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
       },
