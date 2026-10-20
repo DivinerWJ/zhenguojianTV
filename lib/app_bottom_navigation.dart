@@ -33,7 +33,8 @@ class _AppBottomNavigationState extends State<AppBottomNavigation> {
   Timer? _doubleTapWindow;
 
   void _handleTap(int index) {
-    final doubleTap = widget.onDestinationDoubleTap != null &&
+    final doubleTap =
+        widget.onDestinationDoubleTap != null &&
         _lastTapIndex == index &&
         (_doubleTapWindow?.isActive ?? false);
 
