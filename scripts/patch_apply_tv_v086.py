@@ -2,6 +2,8 @@ from pathlib import Path
 
 p = Path('scripts/apply_tv_v086.py')
 s = p.read_text()
+
+# 1) Episode branch: comments sit between currentIndex and episodes in the real source.
 old = '''needle = """    final currentIndex = _episodeIndex.clamp(0, detail.episodes.length - 1);\\n    final episodes = detail.episodes;\\n"""
 branch = """    final currentIndex = _episodeIndex.clamp(0, detail.episodes.length - 1);\\n    final episodes = detail.episodes;\\n    if (_television) {\\n      final chosen = await showTvEpisodePanel(\\n        context,\\n        title: widget.drama.title,\\n        episodes: episodes,\\n        currentIndex: currentIndex,\\n      );\\n      if (chosen != null && mounted && !_closed) {\\n        await _playEpisode(chosen);\\n      }\\n      return;\\n    }\\n"""
 if needle not in s:
@@ -16,4 +18,28 @@ s = s.replace(needle, branch, 1)
 '''
 if old not in s:
     raise SystemExit('helper episode block not found')
-p.write_text(s.replace(old, new, 1))
+s = s.replace(old, new, 1)
+
+# 2) _FeedRemoteActions construction uses eight-space property indentation in the real file.
+s = s.replace(
+    'old = """      openEpisodes: () => unawaited(_openEpisodes()),\\n      holdStart: _holdStartForRemote,\\n"""',
+    'old = """        openEpisodes: () => unawaited(_openEpisodes()),\\n        holdStart: _holdStartForRemote,\\n"""',
+    1,
+)
+s = s.replace(
+    'new = """      openEpisodes: () => unawaited(_openEpisodes()),\\n      openMenu: () => unawaited(_openTvPlayerMenu()),\\n      consumeBack: _consumeBackForRemote,\\n      holdStart: _holdStartForRemote,\\n"""',
+    'new = """        openEpisodes: () => unawaited(_openEpisodes()),\\n        openMenu: () => unawaited(_openTvPlayerMenu()),\\n        consumeBack: _consumeBackForRemote,\\n        holdStart: _holdStartForRemote,\\n"""',
+    1,
+)
+
+# 3) Go raw strings must contain JSON quotes directly, not backslash-escaped quotes.
+s = s.replace(
+    r'''`{\"version\":1,\"ttlSeconds\":3600,\"sources\":{\"huangdou\":[\"https://a.example\",\"https://a.example/\",\"http://bad.example\",\"https://b.example/path\"]}}`''',
+    r'''`{"version":1,"ttlSeconds":3600,"sources":{"huangdou":["https://a.example","https://a.example/","http://bad.example","https://b.example/path"]}}`''',
+)
+s = s.replace(
+    r'''`{\"version\":9,\"sources\":{\"huangdou\":[\"https://a.example\"]}}`''',
+    r'''`{"version":9,"sources":{"huangdou":["https://a.example"]}}`''',
+)
+
+p.write_text(s)
