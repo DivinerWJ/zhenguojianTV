@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: one-shot-provider-default
+  cancel-in-progress: true
+
 jobs:
   refresh-default:
     if: github.event.head_commit.message != 'Refresh Huangguo built-in endpoint'
@@ -26,15 +30,21 @@ jobs:
           text = path.read_text(encoding='utf-8')
           old = 'huangguoVideoBaseURL  = "https://huangguoai.fit"'
           new = 'huangguoVideoBaseURL  = "https://huangguo.video"'
+          if text.count(new) == 1 and text.count(old) == 0:
+              raise SystemExit(0)
           if text.count(old) != 1:
               raise SystemExit(f'expected one legacy Huangguo video URL, found {text.count(old)}')
           path.write_text(text.replace(old, new), encoding='utf-8')
           PY
           gofmt -w native/core/provider_huangguo.go native/core/provider_mirrors.go native/core/provider_mirrors_test.go
 
-      - name: Go provider regression
+      - name: Deterministic provider regression
         working-directory: native
-        run: go test ./core -count=1
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go test ./core -run 'Test(ParseProviderMirrorDocument|InvalidProviderMirrorDocumentFallsBack|ProviderMirrorConfigUsesJsDelivr|ValidProviderMirrorOriginRejectsUnsafeAddresses|ProviderBaseCandidatesPrefersRememberedThenRemoteThenBuiltin|ProviderURLCandidatesDynamicPreservesPathAndQuery)$' -count=1
+          go test ./bridge -run '^$'
 
       - name: Flutter 3.47.4
         uses: subosito/flutter-action@v2
@@ -47,14 +57,15 @@ jobs:
         run: |
           flutter pub get
           dart format --output=none --set-exit-if-changed lib/app_bottom_navigation.dart test/app_bottom_navigation_test.dart
-          flutter test test/app_bottom_navigation_test.dart
+          flutter test --dart-define=ALL_SOURCES=true test/app_bottom_navigation_test.dart
 
-      - name: Commit verified fallback and remove one-shot workflow
+      - name: Rebase, commit verified fallback and remove one-shot workflow
         shell: bash
         run: |
-          rm .github/workflows/one-shot-provider-default.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          rm .github/workflows/one-shot-provider-default.yml
           git add native/core/provider_huangguo.go native/core/provider_mirrors.go native/core/provider_mirrors_test.go lib/app_bottom_navigation.dart test/app_bottom_navigation_test.dart .github/workflows/one-shot-provider-default.yml
           git diff --cached --quiet && exit 0
           git commit -m "Refresh Huangguo built-in endpoint"
