@@ -55,5 +55,8 @@ jobs:
       - name: TV navigation regression (all sources)
         run: flutter test --dart-define=ALL_SOURCES=true test/television_test.dart
 
+      - name: Shared APK TV tab regression (all sources)
+        run: flutter test --dart-define=ALL_SOURCES=true test/tv_shared_apk_navigation_test.dart
+
       - name: TV player remote regression (all sources)
         run: flutter test --dart-define=ALL_SOURCES=true test/tv_player_remote_test.dart
