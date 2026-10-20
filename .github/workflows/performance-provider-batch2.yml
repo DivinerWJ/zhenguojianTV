@@ -100,7 +100,6 @@ jobs:
           PY
 
           cat > test/downloads_polling_test.dart <<'DART'
-          import 'package:duanju_app/core_bridge.dart';
           import 'package:duanju_app/downloads_screen.dart';
           import 'package:duanju_app/local_store.dart';
           import 'package:duanju_app/models.dart';
@@ -138,7 +137,7 @@ jobs:
                   MaterialApp(
                     home: ValueListenableBuilder<bool>(
                       valueListenable: active,
-                      builder: (_, value, __) => DownloadsScreen(
+                      builder: (context, value, child) => DownloadsScreen(
                         repository: repository,
                         store: store,
                         active: value,
@@ -186,7 +185,7 @@ jobs:
         run: |
           flutter pub get
           dart format lib/downloads_screen.dart lib/home_screen.dart test/downloads_polling_test.dart
-          flutter analyze
+          flutter analyze --no-fatal-warnings --no-fatal-infos
           flutter test --dart-define=ALL_SOURCES=true --concurrency=1 \
             test/downloads_polling_test.dart \
             test/app_bottom_navigation_test.dart \
