@@ -66,7 +66,21 @@ if key_end < 0:
 '''
 s = s[:block_start] + replacement + s[block_end:]
 
-# 4) Go raw strings must contain JSON quotes directly, not backslash-escaped quotes.
+# 4) Replace the helper's fragile scaffold exact match with structural bounds.
+scaffold_helper_start = s.find('old = """    final scaffold = Scaffold(')
+scaffold_helper_end = s.find('p.write_text(s)\n\n# Source mirror configuration', scaffold_helper_start)
+if scaffold_helper_start < 0 or scaffold_helper_end < 0:
+    raise SystemExit('helper scaffold block not found')
+scaffold_replacement = '''scaffold_start = s.find("    final scaffold = Scaffold(")
+scaffold_end = s.find('\\n\\n  /// 是否已弹出"退出播放"确认框', scaffold_start)
+if scaffold_start < 0 or scaffold_end < 0:
+    raise SystemExit("TV scaffold structural bounds missing")
+new_scaffold = """    final tv = AppLayout.isTelevision(context);\n    final scaffold = tv\n        ? Scaffold(backgroundColor: Colors.black, body: content)\n        : Scaffold(\n            backgroundColor: Colors.black,\n            body: SafeArea(\n              child: Column(\n                children: [_header(), Expanded(child: content)],\n              ),\n            ),\n          );\n    if (!tv) return scaffold;\n    return PopScope(\n      canPop: false,\n      onPopInvokedWithResult: (didPop, result) {\n        if (didPop) return;\n        if (_currentRemoteActions?.consumeBack() == true) return;\n        unawaited(_confirmLeavePlayback());\n      },\n      child: scaffold,\n    );\n  }\n"""
+s = s[:scaffold_start] + new_scaffold + s[scaffold_end:]
+'''
+s = s[:scaffold_helper_start] + scaffold_replacement + s[scaffold_helper_end:]
+
+# 5) Go raw strings must contain JSON quotes directly, not backslash-escaped quotes.
 s = s.replace(
     r'''`{\"version\":1,\"ttlSeconds\":3600,\"sources\":{\"huangdou\":[\"https://a.example\",\"https://a.example/\",\"http://bad.example\",\"https://b.example/path\"]}}`''',
     r'''`{"version":1,"ttlSeconds":3600,"sources":{"huangdou":["https://a.example","https://a.example/","http://bad.example","https://b.example/path"]}}`''',
