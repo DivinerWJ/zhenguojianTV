@@ -11,7 +11,12 @@ import (
 	"time"
 )
 
-const providerMirrorConfigURL = "https://raw.githubusercontent.com/ai0by/zhenguojianTV/main/config/source_mirrors.json"
+// Mutable source addresses live in the repository so an APK does not need to be
+// rebuilt just because a provider changes its domain. Use jsDelivr instead of
+// raw.githubusercontent.com because the latter is frequently slow or blocked on
+// some networks. If this document cannot be fetched, providerBaseCandidates
+// simply falls back to the built-in addresses compiled into the APK.
+const providerMirrorConfigURL = "https://cdn.jsdelivr.net/gh/ai0by/zhenguojianTV@main/config/source_mirrors.json"
 
 type providerMirrorDocument struct {
 	Version    int                 `json:"version"`
