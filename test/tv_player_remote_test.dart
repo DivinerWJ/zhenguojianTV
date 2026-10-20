@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsFlag;
+
 import 'package:duanju_app/app_layout.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/models.dart';
@@ -254,7 +256,6 @@ void main() {
     final detail = find.byKey(const ValueKey('tv-player-menu-detail'));
     expect(detail, findsOneWidget);
 
-    // 初始焦点在“选集”，向下 5 次依次经过倍速、清晰度、连播、追剧到详情。
     for (var i = 0; i < 5; i++) {
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
       await tester.pump(const Duration(milliseconds: 160));
