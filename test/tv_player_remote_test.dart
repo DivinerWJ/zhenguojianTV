@@ -66,9 +66,10 @@ Future<void> _pumpFrames(WidgetTester tester, [int frames = 50]) async {
 Future<(LocalStore, _TvRepo, ScriptedPlayer)> _mount(
   WidgetTester tester, {
   bool singleDrama = true,
+  Size size = const Size(1280, 720),
 }) async {
   tester.view.devicePixelRatio = 1;
-  tester.view.physicalSize = const Size(1280, 720);
+  tester.view.physicalSize = size;
   addTearDown(tester.view.resetDevicePixelRatio);
   addTearDown(tester.view.resetPhysicalSize);
   SharedPreferences.setMockInitialValues(const {});
@@ -169,13 +170,30 @@ void main() {
       await _pumpFrames(tester, 20);
       expect(repo.requestedEpisodes.last, 2);
 
-      // 竖滑/遥控切集共用 400ms 去重窗口。
-      await tester.pump(const Duration(milliseconds: 450));
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
       await _pumpFrames(tester, 20);
       expect(repo.requestedEpisodes.last, 1);
     },
   );
+
+  testWidgets('TV rapid opposite episode keys are not swallowed by touch debounce', (
+    tester,
+  ) async {
+    final (_, repo, _) = await _mount(tester);
+    expect(repo.requestedEpisodes.last, 1);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(repo.requestedEpisodes.last, 2);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await _pumpFrames(tester, 12);
+    expect(
+      repo.requestedEpisodes.last,
+      1,
+      reason: '遥控器是离散按键，不能复用触屏 400ms 防重复窗口吞掉反向操作',
+    );
+  });
 
   testWidgets('TV left/right seek works from root playback focus', (
     tester,
@@ -212,7 +230,6 @@ void main() {
       reason: '低分辨率 TV 上剧集详情也必须预先存在于遥控焦点树',
     );
 
-    // 第一项自动聚焦，OK 应进入选集抽屉；当前集必须自动定位并聚焦。
     await tester.sendKeyEvent(LogicalKeyboardKey.select);
     await tester.pumpAndSettle();
     expect(find.text('选集'), findsWidgets);
@@ -223,23 +240,53 @@ void main() {
     expect(find.text('播放设置'), findsNothing);
   });
 
+  testWidgets('TV 960x540 menu D-pad reaches and scrolls to bottom actions', (
+    tester,
+  ) async {
+    await _mount(
+      tester,
+      singleDrama: false,
+      size: const Size(960, 540),
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+    await tester.pumpAndSettle();
+    final detail = find.byKey(const ValueKey('tv-player-menu-detail'));
+    expect(detail, findsOneWidget);
+
+    // 初始焦点在“选集”，向下 5 次依次经过倍速、清晰度、连播、追剧到详情。
+    for (var i = 0; i < 5; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump(const Duration(milliseconds: 160));
+    }
+
+    final semantics = tester.getSemantics(
+      find.bySemanticsLabel('剧集详情，查看简介、剧集和更多信息'),
+    );
+    expect(
+      semantics.hasFlag(SemanticsFlag.isFocused),
+      isTrue,
+      reason: '低分辨率 TV 必须能只用方向键走到底部菜单项',
+    );
+    final rect = tester.getRect(detail);
+    expect(rect.top, greaterThanOrEqualTo(0));
+    expect(rect.bottom, lessThanOrEqualTo(540));
+  });
+
   testWidgets('TV back hierarchy hides controls before exit confirmation', (
     tester,
   ) async {
     final (_, _, _) = await _mount(tester);
 
-    // 短按 OK 进入控件焦点。
     await tester.sendKeyEvent(LogicalKeyboardKey.select);
     await tester.pumpAndSettle();
     expect(FocusManager.instance.primaryFocus?.debugLabel, 'feed-play-button');
 
-    // 第一次系统返回只收起控件并还焦点给播放画面。
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.text('退出播放？'), findsNothing);
     expect(FocusManager.instance.primaryFocus?.debugLabel, 'vertical-feed');
 
-    // 第二次系统返回才出现退出确认。
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.text('退出播放？'), findsOneWidget);
