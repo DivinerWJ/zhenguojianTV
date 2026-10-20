@@ -197,57 +197,113 @@ void main() {
         await tester.pump();
         expect(sample, findsNothing);
 
-        repository.pending!.complete(status('ok', running: true));
+        final checking = status('checking', running: true);
+        repository.statuses['hongguo'] = checking;
+        repository.pending!.complete(checking);
+        repository.pending = null;
+        await tester.pump();
+        expect(find.text('检测中'), findsOneWidget);
+        expect(sample, findsNothing);
+
+        final requests = repository.statusRequests.length;
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pump();
+        expect(repository.statusRequests.length, greaterThan(requests));
+        expect(sample, findsNothing);
+
+        repository.statuses['hongguo'] = status(
+          operation == 'check' ? 'ok' : 'catalogOnly',
+        );
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+        expect(
+          find.text(operation == 'check' ? '连接检测通过' : '目录正常 · 播放未检测'),
+          findsOneWidget,
+        );
+        expect(sample, findsNothing);
+
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(sample, findsOneWidget);
+        expect(find.text('入口与目录：目录可达'), findsOneWidget);
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(sample, findsNothing);
+        await tester.pump(const Duration(seconds: 10));
         await tester.pump();
         expect(sample, findsNothing);
-        await tester.pump(const Duration(seconds: 2));
-        expect(sample, findsNothing);
+        expect(find.byTooltip('复制诊断信息'), findsOneWidget);
+        expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
         store.dispose();
       },
     );
   }
 
-  testWidgets('source diagnostics distinguish CF playback failure on a narrow screen', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(360, 760);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    SharedPreferences.setMockInitialValues({});
-    final store = LocalStore(await SharedPreferences.getInstance());
-    final repository = SourceFixtureRepository()
-      ..statuses['hongguo'] = SourceStatus.fromJson({
+  testWidgets(
+    'source diagnostics distinguish CF playback failure on a narrow screen',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      SharedPreferences.setMockInitialValues({});
+      final store = LocalStore(await SharedPreferences.getInstance());
+      final repository = SourceFixtureRepository();
+      repository.statuses['hongguo'] = SourceStatus.fromJson({
         'source': 'hongguo',
-        'count': 5,
+        'count': 7,
+        'page': 3,
+        'hasMore': true,
+        'error': '合成 Cloudflare 验证错误',
         'health': {
-          'state': 'error',
-          'checkedAt': '2026-09-21T00:00:00Z',
-          'sample': '检测剧集',
+          'state': 'failed',
+          'checkedAt': '2026-09-19T03:00:00Z',
+          'sample': '无图合成数据',
           'steps': [
             {
-              'name': '播放地址',
-              'state': 'error',
-              'message': 'Cloudflare challenge / 403',
-              'host': 'video.example.test',
+              'name': '入口与目录',
+              'state': 'ok',
+              'message': '目录可达',
+              'httpStatus': 200,
+            },
+            {
+              'name': '播放地址与播放列表',
+              'state': 'failed',
+              'message': 'Cloudflare 要求浏览器验证',
               'httpStatus': 403,
-              'cfRay': 'abc-TPE',
+              'host': 'example.test',
             },
           ],
         },
       });
-    await tester.pumpWidget(
-      MaterialApp(home: SourcesScreen(repository: repository, store: store)),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('播放检测失败'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('health-toggle-hongguo')));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('Cloudflare'), findsOneWidget);
-    expect(find.textContaining('403'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-    store.dispose();
-  });
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(1.5)),
+            child: child!,
+          ),
+          home: SourcesScreen(repository: repository, store: store),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('检测未通过'), findsOneWidget);
+      expect(find.textContaining('HTTP 403'), findsNothing);
+      final toggle = find.byKey(const ValueKey('health-toggle-hongguo'));
+      await tester.ensureVisible(toggle);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HTTP 403'), findsOneWidget);
+      expect(find.textContaining('连接检测通过'), findsNothing);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HTTP 403'), findsNothing);
+      expect(find.textContaining('检测未通过'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      store.dispose();
+    },
+  );
 }
