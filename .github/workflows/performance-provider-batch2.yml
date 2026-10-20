@@ -45,14 +45,13 @@ jobs:
           replace_exact(
               'lib/downloads_screen.dart',
               '    widget.store.addListener(_changed);\n    _refresh();\n    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _refresh());\n  }\n\n  void _changed() {',
-              '''    widget.store.addListener(_changed);\n    if (widget.active) _startPolling();\n  }\n\n  void _startPolling() {\n    if (_timer != null || !widget.active || !_allowed) return;\n    unawaited(_refresh());\n    _timer = Timer.periodic(const Duration(seconds: 2), (_) {\n      if (widget.active) unawaited(_refresh());\n    });\n  }\n\n  void _stopPolling() {\n    _timer?.cancel();\n    _timer = null;\n  }\n\n  @override\n  void didUpdateWidget(covariant DownloadsScreen oldWidget) {\n    super.didUpdateWidget(oldWidget);\n    if (oldWidget.active == widget.active) return;\n    if (widget.active) {\n      _startPolling();\n    } else {\n      _stopPolling();\n    }\n  }\n\n  void _changed() {''',
+              '    widget.store.addListener(_changed);\n    if (widget.active) _startPolling();\n  }\n\n  void _startPolling() {\n    if (_timer != null || !widget.active || !_allowed) return;\n    unawaited(_refresh());\n    _timer = Timer.periodic(const Duration(seconds: 2), (_) {\n      if (widget.active) unawaited(_refresh());\n    });\n  }\n\n  void _stopPolling() {\n    _timer?.cancel();\n    _timer = null;\n  }\n\n  @override\n  void didUpdateWidget(covariant DownloadsScreen oldWidget) {\n    super.didUpdateWidget(oldWidget);\n    if (oldWidget.active == widget.active) return;\n    if (widget.active) {\n      _startPolling();\n    } else {\n      _stopPolling();\n    }\n  }\n\n  void _changed() {',
           )
           replace_exact(
               'lib/downloads_screen.dart',
               '    _stopBatch = true;\n    _timer?.cancel();',
               '    _stopBatch = true;\n    _stopPolling();',
           )
-
           replace_exact(
               'lib/home_screen.dart',
               "  int _generation = 0;\n  int _tab = 0;\n  String _submittedQuery = '';",
@@ -65,13 +64,13 @@ jobs:
           )
           replace_exact(
               'lib/home_screen.dart',
-              '''  void _changeTab(int tab) => setState(() {\n    _tab = tab;\n    _selectionMode = false;\n    _selectedDramas.clear();\n  });''',
-              '''  void _changeTab(int tab) => setState(() {\n    _tab = tab;\n    if (tab == _downloadIndex) _downloadVisited = true;\n    _selectionMode = false;\n    _selectedDramas.clear();\n  });''',
+              '  void _changeTab(int tab) => setState(() {\n    _tab = tab;\n    _selectionMode = false;\n    _selectedDramas.clear();\n  });',
+              '  void _changeTab(int tab) => setState(() {\n    _tab = tab;\n    if (tab == _downloadIndex) _downloadVisited = true;\n    _selectionMode = false;\n    _selectedDramas.clear();\n  });',
           )
           replace_exact(
               'lib/home_screen.dart',
-              '''                      if (widget.store.canDownload)\n                        DownloadsScreen(\n                          repository: widget.repository,\n                          store: widget.store,\n                          embedded: true,\n                        ),''',
-              '''                      if (widget.store.canDownload)\n                        _downloadVisited\n                            ? DownloadsScreen(\n                                repository: widget.repository,\n                                store: widget.store,\n                                embedded: true,\n                                active: _tab == _downloadIndex,\n                              )\n                            : const SizedBox.shrink(),''',
+              '                      if (widget.store.canDownload)\n                        DownloadsScreen(\n                          repository: widget.repository,\n                          store: widget.store,\n                          embedded: true,\n                        ),',
+              '                      if (widget.store.canDownload)\n                        _downloadVisited\n                            ? DownloadsScreen(\n                                repository: widget.repository,\n                                store: widget.store,\n                                embedded: true,\n                                active: _tab == _downloadIndex,\n                              )\n                            : const SizedBox.shrink(),',
           )
 
           config = {
@@ -97,74 +96,77 @@ jobs:
                   ],
               },
           }
-          Path('config/source_mirrors.json').write_text(
-              json.dumps(config, ensure_ascii=False, indent=2) + '\n',
-              encoding='utf-8',
-          )
-
-          Path('test/downloads_polling_test.dart').write_text('''import 'package:duanju_app/core_bridge.dart';
-import 'package:duanju_app/downloads_screen.dart';
-import 'package:duanju_app/local_store.dart';
-import 'package:duanju_app/models.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import 'fixtures.dart';
-
-class _PollingRepository extends FixtureRepository {
-  int downloadCalls = 0;
-
-  @override
-  bool get supportsDownloads => true;
-
-  @override
-  Future<List<DownloadJob>> downloads() async {
-    downloadCalls++;
-    return const [];
-  }
-}
-
-void main() {
-  testWidgets('hidden DownloadsScreen does not poll and resumes only while active', (tester) async {
-    SharedPreferences.setMockInitialValues(const {});
-    final store = LocalStore(await SharedPreferences.getInstance());
-    addTearDown(store.dispose);
-    final repository = _PollingRepository();
-    final active = ValueNotifier<bool>(false);
-    addTearDown(active.dispose);
-
-    await tester.pumpWidget(MaterialApp(
-      home: ValueListenableBuilder<bool>(
-        valueListenable: active,
-        builder: (_, value, __) => DownloadsScreen(
-          repository: repository,
-          store: store,
-          active: value,
-        ),
-      ),
-    ));
-    await tester.pump(const Duration(seconds: 3));
-    expect(repository.downloadCalls, 0);
-
-    active.value = true;
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
-    expect(repository.downloadCalls, 1);
-
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pump(const Duration(milliseconds: 50));
-    expect(repository.downloadCalls, greaterThanOrEqualTo(2));
-
-    active.value = false;
-    await tester.pump();
-    final pausedAt = repository.downloadCalls;
-    await tester.pump(const Duration(seconds: 3));
-    expect(repository.downloadCalls, pausedAt);
-  });
-}
-''', encoding='utf-8')
+          Path('config/source_mirrors.json').write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
           PY
+
+          cat > test/downloads_polling_test.dart <<'DART'
+          import 'package:duanju_app/core_bridge.dart';
+          import 'package:duanju_app/downloads_screen.dart';
+          import 'package:duanju_app/local_store.dart';
+          import 'package:duanju_app/models.dart';
+          import 'package:flutter/material.dart';
+          import 'package:flutter_test/flutter_test.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+
+          import 'fixtures.dart';
+
+          class _PollingRepository extends FixtureRepository {
+            int downloadCalls = 0;
+
+            @override
+            bool get supportsDownloads => true;
+
+            @override
+            Future<List<DownloadJob>> downloads() async {
+              downloadCalls++;
+              return const [];
+            }
+          }
+
+          void main() {
+            testWidgets(
+              'hidden DownloadsScreen does not poll and resumes only while active',
+              (tester) async {
+                SharedPreferences.setMockInitialValues(const {});
+                final store = LocalStore(await SharedPreferences.getInstance());
+                addTearDown(store.dispose);
+                final repository = _PollingRepository();
+                final active = ValueNotifier<bool>(false);
+                addTearDown(active.dispose);
+
+                await tester.pumpWidget(
+                  MaterialApp(
+                    home: ValueListenableBuilder<bool>(
+                      valueListenable: active,
+                      builder: (_, value, __) => DownloadsScreen(
+                        repository: repository,
+                        store: store,
+                        active: value,
+                      ),
+                    ),
+                  ),
+                );
+                await tester.pump(const Duration(seconds: 3));
+                expect(repository.downloadCalls, 0);
+
+                active.value = true;
+                await tester.pump();
+                await tester.pump(const Duration(milliseconds: 50));
+                expect(repository.downloadCalls, 1);
+
+                await tester.pump(const Duration(seconds: 2));
+                await tester.pump(const Duration(milliseconds: 50));
+                expect(repository.downloadCalls, greaterThanOrEqualTo(2));
+
+                active.value = false;
+                await tester.pump();
+                final pausedAt = repository.downloadCalls;
+                await tester.pump(const Duration(seconds: 3));
+                expect(repository.downloadCalls, pausedAt);
+              },
+            );
+          }
+          DART
 
       - name: Native source mirror regression
         shell: bash
