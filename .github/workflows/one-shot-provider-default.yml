@@ -59,14 +59,14 @@ jobs:
           dart format lib/app_bottom_navigation.dart test/app_bottom_navigation_test.dart
           flutter test --dart-define=ALL_SOURCES=true test/app_bottom_navigation_test.dart
 
-      - name: Rebase, commit verified fallback and remove one-shot workflow
+      - name: Commit verified fallback, rebase and remove one-shot workflow
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
           rm .github/workflows/one-shot-provider-default.yml
           git add native/core/provider_huangguo.go native/core/provider_mirrors.go native/core/provider_mirrors_test.go lib/app_bottom_navigation.dart test/app_bottom_navigation_test.dart .github/workflows/one-shot-provider-default.yml
           git diff --cached --quiet && exit 0
           git commit -m "Refresh Huangguo built-in endpoint"
+          git pull --rebase origin main
           git push origin HEAD:main
