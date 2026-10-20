@@ -1,18 +1,27 @@
+import 'package:duanju_app/app_build.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/main.dart';
 import 'package:duanju_app/models.dart';
-import 'package:duanju_app/app_build.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fixtures.dart';
+import 'player_fixtures.dart';
 
 void main() {
   Future<LocalStore> store() async {
     SharedPreferences.setMockInitialValues({});
     return LocalStore(await SharedPreferences.getInstance());
   }
+
+  Widget catalogApp(FixtureRepository repository, LocalStore local) => DuanjuApp(
+    repository: repository,
+    store: local,
+    initialTab: 1,
+    feedPlayerFactory: () => Player(platformPlayer: ScriptedPlayer()),
+  );
 
   for (final size in [const Size(390, 844), const Size(1280, 800)]) {
     testWidgets('catalog, VIP filter and fresh details at $size', (
@@ -24,14 +33,14 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final repository = FixtureRepository();
       final local = await store();
-      await tester.pumpWidget(DuanjuApp(repository: repository, store: local));
+      addTearDown(local.dispose);
+      await tester.pumpWidget(catalogApp(repository, local));
       await tester.pumpAndSettle();
       expect(find.byTooltip('VIP：隐藏'), findsNothing);
       expect(find.text('测试短剧'), findsOneWidget);
       if (allSourcesEnabled) {
         await tester.tap(find.byKey(const ValueKey('source-switch')));
         await tester.pumpAndSettle();
-        // 0.8.2：弹窗是「勾选 + 确定」语义，先清空再勾选，等价于原来的单选切换。
         await tester.tap(find.byKey(const ValueKey('source-sheet-clear')));
         await tester.pumpAndSettle();
         await tester.tap(find.text('黄豆'));
@@ -88,9 +97,9 @@ void main() {
 
   testWidgets('failed catalog can be retried', (tester) async {
     final repository = FixtureRepository()..fail = true;
-    await tester.pumpWidget(
-      DuanjuApp(repository: repository, store: await store()),
-    );
+    final local = await store();
+    addTearDown(local.dispose);
+    await tester.pumpWidget(catalogApp(repository, local));
     await tester.pumpAndSettle();
     expect(find.text('暂时无法加载'), findsOneWidget);
     repository.fail = false;
@@ -109,9 +118,9 @@ void main() {
       page: 3,
       hasMore: true,
     );
-    await tester.pumpWidget(
-      DuanjuApp(repository: repository, store: await store()),
-    );
+    final local = await store();
+    addTearDown(local.dispose);
+    await tester.pumpWidget(catalogApp(repository, local));
     await tester.pumpAndSettle();
     expect(find.text('测试短剧'), findsOneWidget);
     expect(repository.requests, isEmpty);
@@ -126,7 +135,14 @@ void main() {
     await tester.tap(find.text('加载更多'));
     await tester.pumpAndSettle();
     expect(repository.pages, [4]);
-    await tester.tap(find.byTooltip('更新当前站源'));
+    final refresh = find.byKey(const ValueKey('catalog-refresh'));
+    if (refresh.evaluate().isNotEmpty) {
+      await tester.tap(refresh);
+    } else {
+      await tester.tap(find.byTooltip('更多'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('更新剧库'));
+    }
     await tester.pumpAndSettle();
     expect(repository.pages, [4, 1]);
     expect(repository.forced, [false, true]);
@@ -138,9 +154,9 @@ void main() {
   ) async {
     final repository = FixtureRepository()..fail = true;
     repository.cachedPages['hongguo'] = CatalogPage([FixtureRepository.free]);
-    await tester.pumpWidget(
-      DuanjuApp(repository: repository, store: await store()),
-    );
+    final local = await store();
+    addTearDown(local.dispose);
+    await tester.pumpWidget(catalogApp(repository, local));
     await tester.pumpAndSettle();
     expect(find.text('测试短剧'), findsOneWidget);
     expect(find.text('合成网络错误'), findsOneWidget);
@@ -165,5 +181,7 @@ void main() {
     expect(restored.watched(FixtureRepository.free.id)?.position, 18.5);
     expect(restored.watched(FixtureRepository.free.id)?.episode, 2);
     expect(restored.isFavorite(FixtureRepository.free.id), isTrue);
+    local.dispose();
+    restored.dispose();
   });
 }
