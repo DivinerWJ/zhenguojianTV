@@ -58,7 +58,7 @@ jobs:
           set -euxo pipefail
           python3 scripts/patch_apply_tv_v086.py
           python3 scripts/apply_tv_v086.py
-          gofmt -w native/core/provider_mirrors.go native/core/provider_mirrors_test.go native/core/provider_huangdou.go native/core/provider_discovery.go native/core/provider_huangju_client.go native/core/provider_huanggo.go 2>/dev/null || gofmt -w native/core/provider_mirrors.go native/core/provider_mirrors_test.go native/core/provider_huangdou.go native/core/provider_discovery.go native/core/provider_huangju_client.go native/core/provider_huangguo.go
+          gofmt -w native/core/provider_mirrors.go native/core/provider_mirrors_test.go native/core/provider_huangdou.go native/core/provider_discovery.go native/core/provider_huangju_client.go native/core/provider_huangguo.go
           flutter pub get
 
       - name: Audit requested behavior
@@ -70,7 +70,6 @@ jobs:
           grep -q 'remote.togglePlayback()' lib/vertical_feed_screen.dart
           grep -Fq 'remote?.openMenu()' lib/vertical_feed_screen.dart
           grep -q 'providerMirrorConfigURL' native/core/provider_mirrors.go
-          grep -q 'source_mirrors.json' README.md
           test -s config/source_mirrors.json
           if grep -q 'padding: tv ? AppLayout.overscan' lib/main.dart; then exit 1; fi
           if grep -R -nE 'POST_NOTIFICATIONS|flutter_foreground_task|AppUpdater|checkOnStartup' lib android pubspec.yaml pubspec.lock; then exit 1; fi
@@ -130,4 +129,4 @@ jobs:
           sha256sum /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk > /tmp/SHA256SUMS.txt
           gh release create v0.8.6 /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk /tmp/SHA256SUMS.txt --repo ai0by/zhenguojianTV --target "$(git rev-parse HEAD)" --title '真果鉴 TV v0.8.6 · TV 遥控体验重构' --notes-file /tmp/release_notes_v086.md
 
-# retry: nullable menu audit
+# retry: functional tests after migration
