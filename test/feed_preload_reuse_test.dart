@@ -13,7 +13,6 @@ const _a = Drama(id: 'hongguo:1', source: 'hongguo', title: '甲剧', episodes: 
 const _b = Drama(id: 'hongguo:2', source: 'hongguo', title: '乙剧', episodes: 3);
 const _c = Drama(id: 'hongguo:3', source: 'hongguo', title: '丙剧', episodes: 3);
 
-/// 记录 preload / resolve / release 的顺序，用于判定"预加载是否被复用"。
 class _Repo extends FixtureRepository {
   final preloads = <String>[];
   final resolves = <String>[];
@@ -74,7 +73,6 @@ Future<void> _pump(WidgetTester tester, int frames) async {
   }
 }
 
-/// 搭一个竖滑流，返回注入的假播放器列表。
 Future<List<ScriptedPlayer>> _mount(
   WidgetTester tester,
   _Repo repo,
@@ -108,6 +106,13 @@ Future<List<ScriptedPlayer>> _mount(
   return platforms;
 }
 
+int _currentPage(WidgetTester tester) {
+  final pageView = tester.widget<PageView>(find.byType(PageView).first);
+  final controller = pageView.controller;
+  if (controller == null || !controller.hasClients) return 0;
+  return (controller.page ?? controller.initialPage.toDouble()).round();
+}
+
 void main() {
   late LocalStore store;
 
@@ -128,18 +133,8 @@ void main() {
     final platforms = await _mount(tester, repo, store);
     await _pump(tester, 80);
 
-    // 当前页是哪一部？（推荐流会打乱顺序）
-    String current() {
-      for (final t in ['甲剧', '乙剧', '丙剧']) {
-        if (find.textContaining(t).evaluate().isNotEmpty) return t;
-      }
-      return '?';
-    }
+    final firstPage = _currentPage(tester);
 
-    final first = current();
-    expect(first, isNot('?'));
-
-    // 推进到接近结束，触发"连播下一部"预加载。
     for (final p in platforms) {
       p.state = p.state.copyWith(position: const Duration(seconds: 90));
       p.positionController.add(const Duration(seconds: 90));
@@ -148,12 +143,11 @@ void main() {
 
     expect(repo.preloads, isNotEmpty, reason: '推进位置后应触发"下一部"预加载');
     final preloaded = repo.preloads.last;
-    debugPrint('预加载目标 = $preloaded（当前页 = $first）');
+    debugPrint('预加载目标 = $preloaded（当前页 = $firstPage）');
 
     repo.resolves.clear();
     repo.releases.clear();
 
-    // 滑到下一部。
     await tester.fling(
       find.byType(PageView),
       const Offset(0, -400),
@@ -162,17 +156,14 @@ void main() {
     );
     await _pump(tester, 120);
 
-    final second = current();
+    final secondPage = _currentPage(tester);
     debugPrint(
-      '滑到 = $second；期间 resolve=${repo.resolves} '
+      '滑到页 = $secondPage；期间 resolve=${repo.resolves} '
       'release=${repo.releases}',
     );
 
-    expect(second, isNot(first), reason: '应已切换到另一部剧');
-
-    // 核心断言：滑过去时**不应**重新解析（预加载已备好）。
+    expect(secondPage, isNot(firstPage), reason: '应已切换到另一部剧');
     expect(repo.resolves, isEmpty, reason: '滑到下一部时不应重新解析播放地址（预加载应被复用）');
-    // 也不应把刚预载好的会话释放掉。
     expect(
       repo.releases.where((s) => s.startsWith('P-')),
       isEmpty,
@@ -219,7 +210,6 @@ void main() {
     expect(repo.preloads, contains('甲剧2'), reason: '应预加载第 2 集');
 
     repo.resolves.clear();
-    // 上滑 = 下一集。
     await tester.fling(
       find.byType(PageView).evaluate().isEmpty
           ? find.byType(VerticalFeedScreen)
@@ -243,8 +233,6 @@ void main() {
     final platforms = await _mount(tester, repo, store);
     await _pump(tester, 80);
 
-    // 合成播放器时长固定 2 分钟 → 25% = 30 秒。
-    // 推到 40 秒（>25%，但远未过半），旧逻辑**不会**预载。
     for (final p in platforms) {
       p.state = p.state.copyWith(position: const Duration(seconds: 40));
       p.positionController.add(const Duration(seconds: 40));
