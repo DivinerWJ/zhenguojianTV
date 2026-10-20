@@ -57,6 +57,16 @@ jobs:
               "    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));\n    await tester.pumpAndSettle();\n    // 默认打开「首页」，先切到「发现」页。\n    final discover = find.byKey(const ValueKey('bottom-nav-1'));\n    if (discover.evaluate().isNotEmpty) {\n      await tester.tap(discover);\n      await tester.pumpAndSettle();\n    }",
               '    await tester.pumpWidget(\n      DuanjuApp(repository: repository, store: store, initialTab: 1),\n    );\n    // 首页内部有自动更新/动画等长期状态，不能用无界 pumpAndSettle 当“加载完成”。\n    // 这里的假仓库同步完成目录请求，固定推进几帧即可稳定进入发现页。\n    await tester.pump();\n    await tester.pump(const Duration(milliseconds: 500));',
           )
+          replace_exact(
+              'test/catalog_categories_test.dart',
+              "      await choose('AI 短剧');\n      await tester.pumpAndSettle();",
+              "      await choose('AI 短剧');\n      await tester.pump(const Duration(milliseconds: 500));",
+          )
+          replace_exact(
+              'test/catalog_categories_test.dart',
+              "      );\n      await tester.pumpAndSettle();\n      expect(find.text('过期分类结果'), findsNothing);",
+              "      );\n      await tester.pump();\n      await tester.pump(const Duration(milliseconds: 500));\n      expect(find.text('过期分类结果'), findsNothing);",
+          )
 
           p = Path('test/app_build_test.dart')
           text = p.read_text(encoding='utf-8')
@@ -91,6 +101,16 @@ jobs:
               "      library['followStates'] = {};\n      library['history'] = [",
               "      // 收藏改成 next 时，同步快照也必须指向同一剧目；生产代码会拒绝\n      // ‘收藏 next、同步仍是旧剧’这种自相矛盾的备份。保留同步记录而不是\n      // 绕过校验，才能继续验证真正的‘原子快照写入失败不混数据’契约。\n      library.remove('followStates');\n      final sync = library['followSync'] as List;\n      final syncRecord = sync.single as Map;\n      syncRecord['drama'] = next.toJson();\n      library['history'] = [",
           )
+
+          # Real bug found by the backup/restart test: autoPlayOnMobile is persisted as a
+          # bool, but LocalSnapshot validation forgot to classify it as a bool. A valid
+          # restored snapshot therefore became “corrupt” after the next cold start.
+          replace_exact(
+              'lib/local_snapshot.dart',
+              "        'autoUpdateCatalog',\n      }.contains(entry.key.split('.').last);",
+              "        'autoUpdateCatalog',\n        'autoPlayOnMobile',\n      }.contains(entry.key.split('.').last);",
+          )
+
           replace_exact('test/media_library_test.dart', '      expect(audioOnly.audioTranscodes, 1);', '      expect(audioOnly.audioTranscodes, 3);')
           replace_exact('test/media_library_test.dart', '    expect(plan.audioTranscodes, 2);', '    expect(plan.audioTranscodes, 3);')
           replace_exact('test/media_library_test.dart', "error.toString().contains('已取消')", "error.toString().contains('已停止')")
@@ -107,7 +127,7 @@ jobs:
         shell: bash
         run: |
           flutter pub get
-          dart format lib/main.dart test/feed_horizontal_swipe_test.dart test/feed_preload_reuse_test.dart test/catalog_categories_test.dart test/app_build_test.dart test/local_persistence_test.dart test/media_library_test.dart
+          dart format lib/main.dart lib/local_snapshot.dart test/feed_horizontal_swipe_test.dart test/feed_preload_reuse_test.dart test/catalog_categories_test.dart test/app_build_test.dart test/local_persistence_test.dart test/media_library_test.dart
           flutter test --dart-define=ALL_SOURCES=true --concurrency=1 \
             test/feed_horizontal_swipe_test.dart \
             test/feed_preload_reuse_test.dart \
@@ -122,7 +142,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           rm .github/workflows/cleanup-regression-batch1.yml
-          git add lib/main.dart test .github/workflows/cleanup-regression-batch1.yml
+          git add lib/main.dart lib/local_snapshot.dart test .github/workflows/cleanup-regression-batch1.yml
           git diff --cached --quiet && exit 0
           git commit -m "Clean obsolete regression contracts batch 1 verified"
           git pull --rebase origin main
