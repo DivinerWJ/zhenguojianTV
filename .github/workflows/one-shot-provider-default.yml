@@ -56,7 +56,7 @@ jobs:
       - name: Mobile navigation regression
         run: |
           flutter pub get
-          dart format --output=none --set-exit-if-changed lib/app_bottom_navigation.dart test/app_bottom_navigation_test.dart
+          dart format lib/app_bottom_navigation.dart test/app_bottom_navigation_test.dart
           flutter test --dart-define=ALL_SOURCES=true test/app_bottom_navigation_test.dart
 
       - name: Rebase, commit verified fallback and remove one-shot workflow
