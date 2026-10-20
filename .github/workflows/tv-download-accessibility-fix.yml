@@ -1,0 +1,269 @@
+name: One-shot TV downloads accessibility fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tv-download-accessibility-fix
+  cancel-in-progress: true
+
+jobs:
+  fix:
+    if: github.event.head_commit.message != 'Make downloads fully remote accessible'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply TV downloads accessibility patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/downloads_screen.dart')
+          text = p.read_text(encoding='utf-8')
+          if "import 'remote_widgets.dart';" not in text:
+              text = text.replace("import 'models.dart';\n", "import 'models.dart';\nimport 'remote_widgets.dart';\n", 1)
+
+          start = text.index('  Widget _collection(DownloadCollection collection) {')
+          mid = text.index('  Widget _episode(DownloadJob job) =>', start)
+          end = text.index('  Widget _batchBar() =>', mid)
+
+          collection = r'''  void _toggleCollection(DownloadCollection collection) {
+    setState(() {
+      if (!_expanded.remove(collection.drama.id)) {
+        _expanded.add(collection.drama.id);
+      }
+    });
+  }
+
+  Widget _collectionMenu(DownloadCollection collection) => PopupMenuButton<String>(
+    tooltip: '${collection.drama.title} · 合集操作',
+    enabled: !_busy,
+    onSelected: (value) {
+      if (value == 'update') {
+        _update(collection.drama);
+      } else if (value == 'select') {
+        _select(collection.jobs);
+      } else {
+        _batch(value, collection.jobs);
+      }
+    },
+    itemBuilder: (_) => [
+      PopupMenuItem(
+        value: 'update',
+        enabled: !_updater.busy,
+        child: const Text('更新本剧 · 补充新增与缺失'),
+      ),
+      const PopupMenuItem(value: 'select', child: Text('选择本合集')),
+      const PopupMenuItem(value: 'pause', child: Text('暂停本合集')),
+      const PopupMenuItem(value: 'resume', child: Text('继续 / 重试本合集')),
+      const PopupMenuItem(value: 'archive', child: Text('清理已完成任务，保留视频')),
+      if (_filter == 'archived')
+        const PopupMenuItem(value: 'restore', child: Text('恢复到任务列表')),
+      const PopupMenuItem(value: 'remove', child: Text('取消任务并删除视频')),
+    ],
+  );
+
+  Widget _collection(DownloadCollection collection) {
+    final count = collection.jobs
+        .where((job) => _selected.contains(job.id))
+        .length;
+    final expanded = _expanded.contains(collection.drama.id);
+    final television = AppLayout.isTelevision(context);
+    final tile = ListTile(
+      leading: _selecting
+          ? Checkbox(
+              tristate: true,
+              value: count == 0
+                  ? false
+                  : count == collection.jobs.length
+                  ? true
+                  : null,
+              onChanged: _busy ? null : (_) => _select(collection.jobs),
+            )
+          : Icon(expanded ? Icons.folder_open_rounded : Icons.folder_rounded),
+      title: Text(
+        collection.drama.title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        '${collection.completed}/${collection.jobs.length} 集已下载 · ${storageSize(collection.bytes)}'
+        '${collection.active > 0 ? ' · ${collection.active} 项进行中' : ''}${collection.failed > 0 ? ' · ${collection.failed} 项失败' : ''}',
+      ),
+      onTap: television ? null : () => _toggleCollection(collection),
+      trailing: television ? null : _collectionMenu(collection),
+    );
+    if (!television) return Card(child: tile);
+    return Card(
+      child: Row(
+        children: [
+          Expanded(
+            child: RemoteTarget(
+              key: ValueKey('download-collection-${collection.drama.id}'),
+              label:
+                  '${collection.drama.title}，${collection.jobs.length} 集，${expanded ? '已展开' : '按确定展开'}',
+              onPressed: () => _toggleCollection(collection),
+              child: tile,
+            ),
+          ),
+          _collectionMenu(collection),
+        ],
+      ),
+    );
+  }
+
+'''
+
+          episode = r'''  Widget _episodeMenu(DownloadJob job) => PopupMenuButton<String>(
+    enabled: !_busy,
+    tooltip: '分集操作',
+    onSelected: (value) {
+      if (value == 'play') {
+        _play(job);
+      } else {
+        _batch(value, [job]);
+      }
+    },
+    itemBuilder: (_) => [
+      if (job.completed)
+        const PopupMenuItem(value: 'play', child: Text('本地播放')),
+      if (job.active)
+        const PopupMenuItem(value: 'pause', child: Text('暂停')),
+      if (job.resumable)
+        const PopupMenuItem(value: 'resume', child: Text('继续 / 重试')),
+      if (job.completed)
+        PopupMenuItem(
+          value: job.archived ? 'restore' : 'archive',
+          child: Text(job.archived ? '恢复任务' : '清理任务，保留视频'),
+        ),
+      PopupMenuItem(
+        value: 'remove',
+        child: Text(job.completed ? '删除视频' : '取消下载'),
+      ),
+    ],
+  );
+
+  void _activateEpisode(DownloadJob job) {
+    if (_busy) return;
+    if (_selecting) {
+      _select([job]);
+    } else if (job.completed) {
+      unawaited(_play(job));
+    } else if (job.active) {
+      unawaited(_batch('pause', [job]));
+    } else if (job.resumable) {
+      unawaited(_batch('resume', [job]));
+    }
+  }
+
+  Widget _episode(DownloadJob job) {
+    final television = AppLayout.isTelevision(context);
+    final tile = ListTile(
+      leading: _selecting
+          ? Checkbox(
+              value: _selected.contains(job.id),
+              onChanged: _busy ? null : (_) => _select([job]),
+            )
+          : Icon(
+              job.completed
+                  ? Icons.offline_pin_outlined
+                  : job.state == 'failed'
+                  ? Icons.error_outline
+                  : Icons.downloading_rounded,
+            ),
+      title: Text('第 ${job.episode.number} 集${job.episode.vip ? ' · VIP' : ''}'),
+      subtitle: Text(
+        '${job.archived ? '已保留视频' : job.stateLabel} · ${storageSize(job.bytes)}'
+        '${job.actualQuality > 0 ? ' · ${job.actualQuality}P' : ''}${job.error.isNotEmpty ? '\n${job.error}' : ''}',
+      ),
+      onTap: television
+          ? null
+          : _busy
+          ? null
+          : _selecting
+          ? () => _select([job])
+          : job.completed
+          ? () => _play(job)
+          : null,
+      trailing: television || _selecting ? null : _episodeMenu(job),
+    );
+    final primary = television
+        ? Row(
+            children: [
+              Expanded(
+                child: RemoteTarget(
+                  key: ValueKey('download-task-primary-${job.id}'),
+                  label:
+                      '${job.drama.title}，第 ${job.episode.number} 集，${job.completed ? '按确定本地播放' : job.active ? '按确定暂停' : job.resumable ? '按确定继续下载' : job.stateLabel}',
+                  onPressed: _busy ? null : () => _activateEpisode(job),
+                  child: tile,
+                ),
+              ),
+              if (!_selecting) _episodeMenu(job),
+            ],
+          )
+        : tile;
+    return Padding(
+      padding: const EdgeInsets.only(left: 12),
+      child: Card(
+        key: ValueKey('download-task-${job.id}'),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            primary,
+            if (!job.completed)
+              LinearProgressIndicator(
+                value: job.progress > 0 || !job.active ? job.progress : null,
+                minHeight: 2,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+'''
+
+          text = text[:start] + collection + episode + text[end:]
+          p.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Flutter 3.47.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - name: Verify downloads and TV regression
+        shell: bash
+        run: |
+          flutter pub get
+          dart format lib/downloads_screen.dart
+          flutter analyze --no-fatal-warnings --no-fatal-infos
+          flutter test --dart-define=ALL_SOURCES=true --concurrency=1 \
+            test/downloads_polling_test.dart \
+            test/downloads_test.dart \
+            test/tv_shared_apk_navigation_test.dart \
+            test/television_test.dart \
+            test/tv_player_remote_test.dart
+
+      - name: Commit verified production fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/downloads_screen.dart
+          git diff --cached --quiet && exit 0
+          git commit -m "Make downloads fully remote accessible"
+          git pull --rebase origin main
+          git push origin HEAD:main
