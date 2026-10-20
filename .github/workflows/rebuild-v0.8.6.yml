@@ -1,0 +1,91 @@
+name: Rebuild v0.8.6
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rebuild-v0.8.6.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Go 1.24.1
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.1'
+          cache-dependency-path: native/go.sum
+
+      - name: Flutter 3.47.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        shell: bash
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Show source revision
+        shell: bash
+        run: |
+          git log -1 --oneline
+          git status --short
+          grep '^version:' pubspec.yaml
+
+      - name: Build v0.8.6 APKs
+        shell: bash
+        run: python3 scripts/build_android.py --tv --universal --all-sources
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_out
+          cp 'dist/android/zhenguojian-0.8.6+81-arm64-v8a.apk' 'release_out/zhenguojian-TV-v0.8.6-arm64-v8a.apk'
+          cp 'dist/android/zhenguojian-0.8.6+81-armeabi-v7a.apk' 'release_out/zhenguojian-TV-v0.8.6-armeabi-v7a.apk'
+          cp 'dist/android/zhenguojian-0.8.6+81-all.apk' 'release_out/zhenguojian-TV-v0.8.6-all.apk'
+          cd release_out
+          sha256sum zhenguojian-TV-v0.8.6-*.apk > SHA256SUMS.txt
+          ls -lh
+          cat SHA256SUMS.txt
+
+      - name: Save Action artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhenguojian-TV-v0.8.6
+          path: release_out/*
+          if-no-files-found: error
+
+      - name: Replace v0.8.6 release assets
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v0.8.6
+          name: 真果鉴 TV v0.8.6 · 稳定版
+          artifacts: 'release_out/SHA256SUMS.txt,release_out/zhenguojian-TV-v0.8.6-all.apk,release_out/zhenguojian-TV-v0.8.6-arm64-v8a.apk,release_out/zhenguojian-TV-v0.8.6-armeabi-v7a.apk'
+          allowUpdates: true
+          replacesArtifacts: true
+          omitBodyDuringUpdate: true
+          makeLatest: true
