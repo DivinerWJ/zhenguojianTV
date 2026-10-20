@@ -87,7 +87,9 @@ jobs:
         run: |
           set -euxo pipefail
           PYTHONPATH=scripts python3 -m unittest scripts.test_app_build -v
-          flutter test test/pinyin_test.dart test/television_test.dart
+          flutter test test/pinyin_test.dart
+          flutter test test/television_test.dart --plain-name 'remote grid reaches unbuilt rows, partial last row and pagination without touch'
+          flutter test test/television_test.dart --plain-name 'episode grid initially focuses an offscreen saved episode'
 
       - name: Build real TV APKs
         shell: bash
@@ -132,4 +134,4 @@ jobs:
           sha256sum /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk > /tmp/SHA256SUMS.txt
           gh release create v0.8.6 /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk /tmp/SHA256SUMS.txt --repo ai0by/zhenguojianTV --target "$(git rev-parse HEAD)" --title '真果鉴 TV v0.8.6 · TV 遥控体验重构' --notes-file /tmp/release_notes_v086.md
 
-# retry: targeted mirror-routing tests + full native compile in APK build
+# retry: targeted TV remote tests after sub-pixel legacy layout overflow
