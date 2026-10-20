@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 p = Path('scripts/apply_tv_v086.py')
 s = p.read_text()
@@ -33,13 +32,20 @@ s = s.replace(
     1,
 )
 
-# 3) Replace the whole _onKey method by balanced braces instead of assuming the next method name.
-pattern = re.compile(
-    r'''key_start = s\.find\("  KeyEventResult _onKey\(FocusNode node, KeyEvent event\) \{"\)\nkey_end = s\.find\("\\n  Future<bool> _confirmLeavePlayback\(\)", key_start\)\nif key_start < 0 or key_end < 0:\n    raise SystemExit\("parent _onKey block bounds missing"\)\n(new_key = r\'''[\s\S]*?\'''\n)s = s\[:key_start\] \+ new_key \+ s\[key_end:\]'''
-)
-match = pattern.search(s)
-if not match:
-    raise SystemExit('helper _onKey replacement block not found')
+# 3) Replace the helper's fragile _onKey bounds with a balanced-brace scanner.
+start_token = 'key_start = s.find("  KeyEventResult _onKey(FocusNode node, KeyEvent event) {")\n'
+block_start = s.find(start_token)
+block_end = s.find('\nold = """    final scaffold = Scaffold(', block_start)
+if block_start < 0 or block_end < 0:
+    raise SystemExit('helper _onKey block not found')
+block = s[block_start:block_end]
+new_key_start = block.find("new_key = r'''  KeyEventResult _onKey")
+if new_key_start < 0:
+    raise SystemExit('helper new_key literal not found')
+literal_end = block.find("\n'''\n", new_key_start)
+if literal_end < 0:
+    raise SystemExit('helper new_key literal end not found')
+new_key_literal = block[new_key_start:literal_end + 5]
 replacement = '''key_start = s.find("  KeyEventResult _onKey(FocusNode node, KeyEvent event) {")
 if key_start < 0:
     raise SystemExit("parent _onKey start missing")
@@ -56,9 +62,9 @@ for index in range(brace_start, len(s)):
             break
 if key_end < 0:
     raise SystemExit("parent _onKey end missing")
-''' + match.group(1) + '''s = s[:key_start] + new_key + s[key_end:]
+''' + new_key_literal + '''s = s[:key_start] + new_key + s[key_end:]
 '''
-s = s[:match.start()] + replacement + s[match.end():]
+s = s[:block_start] + replacement + s[block_end:]
 
 # 4) Go raw strings must contain JSON quotes directly, not backslash-escaped quotes.
 s = s.replace(
