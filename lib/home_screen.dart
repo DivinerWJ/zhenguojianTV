@@ -72,11 +72,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// 多选站源（非空时优先于单源/全部，作为当前浏览范围）。
   List<String> _multiSources = const [];
   List<Drama> _items = [];
+
   /// 当前生效的拼音/首字母关键词（0.8.4），空串表示没在用拼音搜索。
   ///
   /// 单独存一份而不是复用 `_search.text`：用户敲完 `hjdnz` 之后可能又手动
   /// 改了输入框但没提交，这时候列表应该保持上一次提交的结果，而不是抖成空。
   String _pinyinQuery = '';
+
   /// 拼音搜索的候选池 = 浏览过的全部剧目（见 `CatalogBrowser.library`）。
   List<Drama> _pinyinPool = const [];
   bool _loading = true;
@@ -85,6 +87,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String? _error;
   int _generation = 0;
   int _tab = 0;
+  bool _downloadVisited = false;
   String _submittedQuery = '';
   bool _failedMore = false;
   final _categorySelections = <String, String>{};
@@ -147,9 +150,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     if (!_feedGenreEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('剧类筛选只在「仅红果」时可用')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('剧类筛选只在「仅红果」时可用')));
       return;
     }
     final picked = await showModalBottomSheet<String>(
@@ -207,11 +210,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // 正确判据必须是**选中的 id 集合 == 可用的 id 集合**，而不是数量相等。
     final allIds = widget.store.sources.map((site) => site.id).toSet();
     final pickedIds = sites.map((site) => site.id).toSet();
-    final isAll = allIds.length == pickedIds.length &&
-        allIds.containsAll(pickedIds);
-    final name = isAll
-        ? '全部站源'
-        : sites.map((site) => site.entryName).join('+');
+    final isAll =
+        allIds.length == pickedIds.length && allIds.containsAll(pickedIds);
+    final name = isAll ? '全部站源' : sites.map((site) => site.entryName).join('+');
     return SourceGroup('multi', name, sites);
   }
 
@@ -728,6 +729,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     // 进软件优先打开「首页」（竖滑视频流）。
     _tab = widget.initialTab ?? _feedIndex;
+    if (!widget.store.canDownload && _tab == _downloadIndex) {
+      _tab = _feedIndex;
+    }
+    _downloadVisited = _tab == _downloadIndex;
     _browser = CatalogBrowser(widget.repository);
     _updater = LibraryUpdater(
       widget.repository,
@@ -1012,6 +1017,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _changeTab(int tab) => setState(() {
     _tab = tab;
+    if (tab == _downloadIndex) _downloadVisited = true;
     _selectionMode = false;
     _selectedDramas.clear();
   });
@@ -1595,11 +1601,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                       // 下载。
                       if (widget.store.canDownload)
-                        DownloadsScreen(
-                          repository: widget.repository,
-                          store: widget.store,
-                          embedded: true,
-                        ),
+                        _downloadVisited
+                            ? DownloadsScreen(
+                                repository: widget.repository,
+                                store: widget.store,
+                                embedded: true,
+                                active: _tab == _downloadIndex,
+                              )
+                            : const SizedBox.shrink(),
                     ],
                   ),
                 ),
@@ -2390,11 +2399,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
         ),
       ),
       child: checked
-          ? Icon(
-              Icons.check_rounded,
-              size: size - 8,
-              color: colors.onPrimary,
-            )
+          ? Icon(Icons.check_rounded, size: size - 8, color: colors.onPrimary)
           : null,
     );
   }

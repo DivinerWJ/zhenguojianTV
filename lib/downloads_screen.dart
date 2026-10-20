@@ -20,11 +20,15 @@ class DownloadsScreen extends StatefulWidget {
     required this.repository,
     required this.store,
     this.embedded = false,
+    this.active = true,
     this.playerBuilder,
   });
   final AppRepository repository;
   final LocalStore store;
   final bool embedded;
+
+  /// 嵌入主界面时仅当前标签激活轮询。独立打开下载页保持默认 true。
+  final bool active;
   @visibleForTesting
   final Widget Function(DramaDetail, int, double)? playerBuilder;
   @override
@@ -63,8 +67,31 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     _updater = DownloadCollectionUpdater(widget.repository, widget.store)
       ..addListener(_changed);
     widget.store.addListener(_changed);
-    _refresh();
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _refresh());
+    if (widget.active) _startPolling();
+  }
+
+  void _startPolling() {
+    if (_timer != null || !widget.active || !_allowed) return;
+    unawaited(_refresh());
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (widget.active) unawaited(_refresh());
+    });
+  }
+
+  void _stopPolling() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  @override
+  void didUpdateWidget(covariant DownloadsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active == widget.active) return;
+    if (widget.active) {
+      _startPolling();
+    } else {
+      _stopPolling();
+    }
   }
 
   void _changed() {
@@ -74,7 +101,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   @override
   void dispose() {
     _stopBatch = true;
-    _timer?.cancel();
+    _stopPolling();
     _search.dispose();
     widget.store.removeListener(_changed);
     _updater.removeListener(_changed);
