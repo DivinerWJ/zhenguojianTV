@@ -56,6 +56,13 @@ Future<void> _pump(WidgetTester tester, int frames) async {
   }
 }
 
+int _currentPage(WidgetTester tester) {
+  final pageView = tester.widget<PageView>(find.byType(PageView).first);
+  final controller = pageView.controller;
+  if (controller == null || !controller.hasClients) return 0;
+  return (controller.page ?? controller.initialPage.toDouble()).round();
+}
+
 void main() {
   late LocalStore store;
 
@@ -97,23 +104,12 @@ void main() {
     );
     await _pump(tester, 80);
 
-    // 把当前页的播放器报成**横屏**尺寸（1920×1080，比例 > 1.05）。
     for (final p in platforms) {
       p.videoSize(1920, 1080);
     }
     await _pump(tester, 20);
 
-    String current() {
-      for (final t in ['甲剧', '乙剧', '丙剧']) {
-        if (find.text(t).evaluate().isNotEmpty) return t;
-      }
-      return '?';
-    }
-
-    final first = current();
-    debugPrint('起始剧 = $first');
-
-    // 用户在左侧/中部水平滑（带一点竖直分量）调进度。
+    final first = _currentPage(tester);
     await tester.dragFrom(
       const Offset(210, 440),
       const Offset(150, 40),
@@ -122,9 +118,7 @@ void main() {
     );
     await _pump(tester, 40);
 
-    final after = current();
-    debugPrint('水平滑动后 = $after');
-
+    final after = _currentPage(tester);
     expect(after, first, reason: '水平滑动调进度时，页面不应翻到下一部');
     expect(tester.takeException(), isNull);
   });
@@ -164,15 +158,7 @@ void main() {
     }
     await _pump(tester, 20);
 
-    String current() {
-      for (final t in ['甲剧', '乙剧', '丙剧']) {
-        if (find.text(t).evaluate().isNotEmpty) return t;
-      }
-      return '?';
-    }
-
-    final first = current();
-    // 真实轨迹：先竖直 30px（未到 PageView 阈值 60），再横向 120px。
+    final first = _currentPage(tester);
     final gesture = await tester.startGesture(const Offset(210, 440));
     await gesture.moveBy(const Offset(0, 30));
     await tester.pump(const Duration(milliseconds: 16));
@@ -181,7 +167,7 @@ void main() {
     await gesture.up();
     await _pump(tester, 40);
 
-    expect(current(), first, reason: '先竖直 30px 再转横向，不应翻页');
+    expect(_currentPage(tester), first, reason: '先竖直 30px 再转横向，不应翻页');
   });
 
   testWidgets('横屏视频非全屏：竖直滑仍然可以翻页（不得回退）', (tester) async {
@@ -219,14 +205,7 @@ void main() {
     }
     await _pump(tester, 20);
 
-    String current() {
-      for (final t in ['甲剧', '乙剧', '丙剧']) {
-        if (find.text(t).evaluate().isNotEmpty) return t;
-      }
-      return '?';
-    }
-
-    final first = current();
+    final first = _currentPage(tester);
     await tester.fling(
       find.byType(PageView),
       const Offset(0, -400),
@@ -234,7 +213,7 @@ void main() {
       initialOffset: const Offset(210, 500),
     );
     await _pump(tester, 120);
-    final after = current();
+    final after = _currentPage(tester);
     debugPrint('竖直 fling：$first -> $after');
     expect(after, isNot(first), reason: '竖直滑动必须还能翻页');
   });
