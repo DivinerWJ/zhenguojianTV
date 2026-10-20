@@ -135,13 +135,17 @@ void main() {
   testWidgets(
     'home update uses a shared source job then reloads stale cache without another catalog request',
     (tester) async {
-      viewport(tester, const Size(390, 844));
+      viewport(tester, const Size(420, 844));
       final store = await create();
       await store.toggleFavorite(first);
       final repository = LibraryFeatureRepository();
       await tester.pumpWidget(
         MaterialApp(
-          home: HomeScreen(repository: repository, store: store),
+          home: HomeScreen(
+            repository: repository,
+            store: store,
+            initialTab: 1,
+          ),
         ),
       );
       await tester.pumpAndSettle();
