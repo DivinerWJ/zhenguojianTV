@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 p = Path('scripts/apply_tv_v086.py')
 s = p.read_text()
@@ -32,7 +33,34 @@ s = s.replace(
     1,
 )
 
-# 3) Go raw strings must contain JSON quotes directly, not backslash-escaped quotes.
+# 3) Replace the whole _onKey method by balanced braces instead of assuming the next method name.
+pattern = re.compile(
+    r'''key_start = s\.find\("  KeyEventResult _onKey\(FocusNode node, KeyEvent event\) \{"\)\nkey_end = s\.find\("\\n  Future<bool> _confirmLeavePlayback\(\)", key_start\)\nif key_start < 0 or key_end < 0:\n    raise SystemExit\("parent _onKey block bounds missing"\)\n(new_key = r\'''[\s\S]*?\'''\n)s = s\[:key_start\] \+ new_key \+ s\[key_end:\]'''
+)
+match = pattern.search(s)
+if not match:
+    raise SystemExit('helper _onKey replacement block not found')
+replacement = '''key_start = s.find("  KeyEventResult _onKey(FocusNode node, KeyEvent event) {")
+if key_start < 0:
+    raise SystemExit("parent _onKey start missing")
+brace_start = s.find("{", key_start)
+depth = 0
+key_end = -1
+for index in range(brace_start, len(s)):
+    if s[index] == "{":
+        depth += 1
+    elif s[index] == "}":
+        depth -= 1
+        if depth == 0:
+            key_end = index + 1
+            break
+if key_end < 0:
+    raise SystemExit("parent _onKey end missing")
+''' + match.group(1) + '''s = s[:key_start] + new_key + s[key_end:]
+'''
+s = s[:match.start()] + replacement + s[match.end():]
+
+# 4) Go raw strings must contain JSON quotes directly, not backslash-escaped quotes.
 s = s.replace(
     r'''`{\"version\":1,\"ttlSeconds\":3600,\"sources\":{\"huangdou\":[\"https://a.example\",\"https://a.example/\",\"http://bad.example\",\"https://b.example/path\"]}}`''',
     r'''`{"version":1,"ttlSeconds":3600,"sources":{"huangdou":["https://a.example","https://a.example/","http://bad.example","https://b.example/path"]}}`''',
