@@ -1,0 +1,40 @@
+name: Full App Regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shared-apk-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Go 1.24.1
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.1'
+
+      - name: Flutter 3.47.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - name: Resolve Flutter dependencies
+        run: flutter pub get
+
+      - name: Native regression
+        working-directory: native
+        run: go test ./... -count=1
+
+      - name: Shared APK Flutter regression (phone + TV, all sources)
+        run: flutter test --dart-define=ALL_SOURCES=true --concurrency=1
