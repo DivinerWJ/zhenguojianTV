@@ -155,10 +155,23 @@ void main() {
       expect(coverTop, lessThan(150));
       final switcher = find.byKey(const ValueKey('source-switch'));
       final rankings = find.byKey(const ValueKey('open-rankings'));
-      expect(
-        tester.getCenter(switcher).dy,
-        closeTo(tester.getCenter(rankings).dy, 2),
-      );
+      if (width >= 360) {
+        expect(rankings, findsOneWidget);
+        expect(
+          tester.getCenter(switcher).dy,
+          closeTo(tester.getCenter(rankings).dy, 2),
+        );
+      } else {
+        expect(rankings, findsNothing);
+        final more = find.byTooltip('更多');
+        expect(more, findsOneWidget);
+        await tester.tap(more);
+        await tester.pumpAndSettle();
+        final compactRankings = find.text('榜单');
+        expect(compactRankings, findsOneWidget);
+        Navigator.of(tester.element(compactRankings)).pop();
+        await tester.pumpAndSettle();
+      }
       await tester.tap(find.byKey(const ValueKey('toggle-search')));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsOneWidget);
