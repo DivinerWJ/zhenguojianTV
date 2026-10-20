@@ -161,6 +161,13 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   final _focus = FocusNode(debugLabel: 'vertical-feed');
   final _random = math.Random();
 
+  /// TV 确定键必须成对处理 KeyDown / KeyUp。
+  ///
+  /// 短按：松开时执行一次播放/暂停并进入控件焦点；
+  /// 长按：按下后交给 PlayerInteractions 的 350ms 状态机进入 3 倍速，
+  /// 松开只恢复原倍速，绝不能再额外触发一次播放/暂停。
+  bool _remoteConfirmPressed = false;
+
   /// 本次会话是否手动点过播放（0.7.3，`XQ-0107`）。
   ///
   /// 放在父级是为了**跨页共享**：移动网络下第一页要用户点一下才播；
@@ -381,6 +388,10 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     _slideAnimation.dispose();
     _slideOffset.dispose();
     _controller.dispose();
+    if (_remoteConfirmPressed) {
+      _remoteConfirmPressed = false;
+      _currentRemoteActions?.holdEnd();
+    }
     _focus.dispose();
     super.dispose();
   }
@@ -483,8 +494,10 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   List<Drama> _excludeWatched(List<Drama> items) {
     if (items.isEmpty) return items;
     final kept = items
-        .where((drama) => widget.store.following(drama.id)?.status !=
-            FollowStatus.watched)
+        .where(
+          (drama) =>
+              widget.store.following(drama.id)?.status != FollowStatus.watched,
+        )
         .toList();
     return kept.isEmpty ? items : kept;
   }
@@ -704,9 +717,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
   ///
   /// [localY] 用 `Listener` 的 `event.localPosition.dy`（相对手势层顶部）。
   /// 手势层是 `Positioned.fill`，因此其顶部即屏幕顶部（不含系统栏偏移）。
-  bool _inTopGuard(Offset localPosition) =>
-      localPosition.dy < _topGestureGuard;
-
+  bool _inTopGuard(Offset localPosition) => localPosition.dy < _topGestureGuard;
 
   /// 真正执行"上下滑"的语义（0.7.14 从 `_onVerticalDrag` 拆出，供动画结束时调用）。
   ///
@@ -870,16 +881,55 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     final key = event.logicalKey;
     final remote = _currentRemoteActions;
 
+    // 确定键单独做成 down/up 配对状态机。
+    // 不能在 KeyDown 直接 toggle，否则长按进入 3 倍速前会先暂停视频；
+    // 也不能忽略 KeyUp，否则长按会卡在 3 倍速直到 30 秒兜底。
+    if (_isConfirmKey(key)) {
+      if (event is KeyUpEvent) {
+        if (!_remoteConfirmPressed) return KeyEventResult.ignored;
+        _remoteConfirmPressed = false;
+        final boosted = remote?.isBoosting() ?? false;
+        remote?.holdEnd();
+        if (remote != null && !boosted) {
+          remote.activatePrimary();
+          // 短按 OK 既完成播放/暂停，也把焦点带入可见控件。
+          // 没有“菜单键”的精简遥控器仍可继续用方向键访问全部控件。
+          remote.showControls();
+        }
+        return remote == null ? KeyEventResult.ignored : KeyEventResult.handled;
+      }
+      if (event is KeyDownEvent) {
+        if (!node.hasPrimaryFocus || remote == null) {
+          return KeyEventResult.ignored;
+        }
+        _remoteConfirmPressed = true;
+        remote.holdStart();
+        return KeyEventResult.handled;
+      }
+      if (event is KeyRepeatEvent && _remoteConfirmPressed) {
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
     if (event is KeyUpEvent) return KeyEventResult.ignored;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
 
     if (key == LogicalKeyboardKey.goBack || key == LogicalKeyboardKey.escape) {
+      if (_remoteConfirmPressed) {
+        _remoteConfirmPressed = false;
+        remote?.holdEnd();
+      }
       if (remote?.consumeBack() == true) return KeyEventResult.handled;
       return KeyEventResult.ignored;
     }
     if (key == LogicalKeyboardKey.contextMenu) {
+      if (_remoteConfirmPressed) {
+        _remoteConfirmPressed = false;
+        remote?.holdEnd();
+      }
       if (event is KeyDownEvent) remote?.openMenu();
       return remote == null ? KeyEventResult.ignored : KeyEventResult.handled;
     }
@@ -889,16 +939,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
 
     if (key == LogicalKeyboardKey.arrowDown ||
         key == LogicalKeyboardKey.mediaTrackNext) {
-      if (event is KeyDownEvent) _jump(1);
+      if (event is KeyDownEvent) remote.moveVertical(1);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp ||
         key == LogicalKeyboardKey.mediaTrackPrevious) {
-      if (event is KeyDownEvent) _jump(-1);
-      return KeyEventResult.handled;
-    }
-    if (_isConfirmKey(key)) {
-      if (event is KeyDownEvent) remote.togglePlayback();
+      if (event is KeyDownEvent) remote.moveVertical(-1);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
@@ -916,7 +962,6 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     }
     return KeyEventResult.ignored;
   }
-
 
   bool _jump(int delta, {bool auto = false}) {
     if (_closed) return false;
@@ -967,7 +1012,10 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
             backgroundColor: Colors.black,
             body: SafeArea(
               child: Column(
-                children: [_header(), Expanded(child: content)],
+                children: [
+                  _header(),
+                  Expanded(child: content),
+                ],
               ),
             ),
           );
@@ -982,7 +1030,6 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
       child: scaffold,
     );
   }
-
 
   /// 是否已弹出"退出播放"确认框（防止连续按返回叠出多个对话框）。
   bool _leaveDialogOpen = false;
@@ -1142,10 +1189,8 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
           onOpenDetail: () => _openDetail(drama),
           onEpisodeStateChanged: isCurrent ? _onPageEpisodeStateChanged : null,
           // 所有页都上报遥控入口（按剧集 id 归档），父级按键时再按当前页取用。
-          onRemoteActions: (actions) => _onPageRemoteActions(
-            '${drama.source}-${drama.id}',
-            actions,
-          ),
+          onRemoteActions: (actions) =>
+              _onPageRemoteActions('${drama.source}-${drama.id}', actions),
           onReturnFocus: _focus.requestFocus,
           // 单剧模式（0.2.29）：起始集 / 本地文件模式 / 续播位置。
           // 只在单剧模式（第一页）生效；首页无限流保持原行为。
@@ -1228,10 +1273,8 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
           // 用 `ValueListenableBuilder` 只重建这一层，避免每帧重建整页。
           ValueListenableBuilder<double>(
             valueListenable: _slideOffset,
-            builder: (context, offset, child) => Transform.translate(
-              offset: Offset(0, offset),
-              child: child,
-            ),
+            builder: (context, offset, child) =>
+                Transform.translate(offset: Offset(0, offset), child: child),
             child: MediaQuery(
               data: MediaQuery.of(context).copyWith(
                 gestureSettings: const DeviceGestureSettings(touchSlop: 60),
@@ -1385,13 +1428,12 @@ class _SourceFeedFailure {
 ///
 /// 之所以用回调而不是 GlobalKey：GlobalKey 在同一 Widget 树中必须唯一，
 /// 若随"当前页"来回更换，Flutter 会搬移 State（含播放器）导致画面错乱。
-typedef EpisodeStateReporter =
-    void Function(
-      bool hasNext, {
-      Future<void> Function()? playNext,
-      bool hasPrev,
-      Future<void> Function()? playPrev,
-    });
+typedef EpisodeStateReporter = void Function(
+  bool hasNext, {
+  Future<void> Function()? playNext,
+  bool hasPrev,
+  Future<void> Function()? playPrev,
+});
 
 /// 子页上报给父级的遥控器操作入口（0.8.0 恢复电视支持）。
 ///
@@ -1406,13 +1448,16 @@ class _FeedRemoteActions {
   const _FeedRemoteActions({
     required this.showControls,
     required this.hideControlsIfVisible,
+    required this.activatePrimary,
     required this.togglePlayback,
+    required this.moveVertical,
     required this.seekBy,
     required this.openEpisodes,
     required this.openMenu,
     required this.consumeBack,
     required this.holdStart,
     required this.holdEnd,
+    required this.isBoosting,
     required this.setPaused,
   });
 
@@ -1422,8 +1467,14 @@ class _FeedRemoteActions {
   /// 控件可见时收起；返回是否真的收起了（供返回键判断）。
   final bool Function() hideControlsIfVisible;
 
-  /// 播放 / 暂停。
+  /// TV 主确认操作：正常状态播放/暂停；错误状态直接重试。
+  final VoidCallback activatePrimary;
+
+  /// 播放 / 暂停（媒体键使用，不参与长按确定键判定）。
   final VoidCallback togglePlayback;
+
+  /// TV 上下键：刷剧模式切剧；单剧/连播本剧模式切集。
+  final void Function(int direction) moveVertical;
 
   /// 前进 / 后退若干秒（负数为后退）。
   final void Function(int seconds) seekBy;
@@ -1442,6 +1493,9 @@ class _FeedRemoteActions {
 
   /// 遥控松开「确定」，恢复原倍速（0.8.3）。
   final VoidCallback holdEnd;
+
+  /// 当前是否已经真正进入长按 3 倍速。
+  final bool Function() isBoosting;
 
   /// 弹出确认框期间暂停 / 恢复播放（0.8.1）。
   ///
@@ -1891,13 +1945,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       final actions = _FeedRemoteActions(
         showControls: _showControlsForRemote,
         hideControlsIfVisible: _hideControlsForRemote,
+        activatePrimary: _activatePrimaryForRemote,
         togglePlayback: _togglePlayback,
+        moveVertical: _moveVerticalForRemote,
         seekBy: _seekBy,
         openEpisodes: () => unawaited(_openEpisodes()),
         openMenu: () => unawaited(_openTvPlayerMenu()),
         consumeBack: _consumeBackForRemote,
         holdStart: _holdStartForRemote,
         holdEnd: _holdEndForRemote,
+        isBoosting: () => _interactions?.boosting ?? false,
         setPaused: _setPausedForDialog,
       );
       _reportedActions = actions;
@@ -2022,9 +2079,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // 0.6.9：放弃恢复时必须撤掉"等待第一帧"，否则加载提示会盖住错误与重试按钮。
         _awaitingFirstFrame = false;
         _firstFrameTicks = 0;
-        _error = current.local
-            ? '本地视频播放中断，请返回重试。'
-            : '播放已中断，请点击重试。';
+        _error = current.local ? '本地视频播放中断，请返回重试。' : '播放已中断，请点击重试。';
       });
       _refreshFullscreen(immediate: true);
       return;
@@ -2476,9 +2531,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         }
         // 0.7.13：起播时若播放器已经报了宽高，直接认定"画面已出"，
         // 避免正常播放时「正在加载视频…」一直挂着。
-        if (playing &&
-            !_hasVideoFrame &&
-            (_player?.state.width ?? 0) > 0) {
+        if (playing && !_hasVideoFrame && (_player?.state.width ?? 0) > 0) {
           _hasVideoFrame = true;
           if (mounted && !_closed) setState(() {});
           _refreshFullscreen(immediate: true);
@@ -2711,9 +2764,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         unawaited(
           SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]),
         );
-        unawaited(
-          SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
-        );
+        unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
       }
     }
     _releasePlayer();
@@ -2852,6 +2903,49 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 用户操作，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
     });
+  }
+
+  void _retryPlayback() {
+    if (_closed || _loading) return;
+    _ready = false;
+    unawaited(_playerReleased ? _resumeAfterRelease() : _prepare(force: true));
+  }
+
+  /// TV 短按 OK：正常时播放/暂停；失败页直接重试。
+  void _activatePrimaryForRemote() {
+    if (_error != null) {
+      _retryPlayback();
+      return;
+    }
+    _togglePlayback();
+  }
+
+  /// TV 上下键和触屏竖滑使用完全相同的语义，避免两套行为漂移。
+  void _moveVerticalForRemote(int direction) {
+    if (_closed || !widget.active) return;
+    final inSeries = widget.singleDrama || widget.autoNextEpisode;
+    late final String message;
+    if (!inSeries) {
+      final switchDrama = widget.onSwitchDrama;
+      if (switchDrama == null) return;
+      final ok = switchDrama(direction);
+      message = ok
+          ? (direction > 0 ? '下一部' : '上一部')
+          : (direction > 0 ? '已经是最后一部了' : '已经是第一部了');
+    } else if (direction > 0) {
+      if (canPlayNextEpisode) {
+        unawaited(playNextEpisode());
+        message = '下一集';
+      } else {
+        message = '已经是最后一集了';
+      }
+    } else if (canPlayPrevEpisode) {
+      unawaited(playPrevEpisode());
+      message = '上一集';
+    } else {
+      message = '已经是第一集了';
+    }
+    if (message.isNotEmpty) _interactions?.hint(message);
   }
 
   /// 电视遥控"确定"键：显示控件并把焦点交给播放按钮（0.8.0）。
@@ -3135,7 +3229,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final generation = _generation;
     final index = _episodeIndex.clamp(0, detail.episodes.length - 1);
     bool current() =>
-        mounted && !_closed && generation == _generation && index == _episodeIndex;
+        mounted &&
+        !_closed &&
+        generation == _generation &&
+        index == _episodeIndex;
     _interactions?.cancel();
     setState(() => _panelOpen = true);
     try {
@@ -3365,7 +3462,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           //
           // 必须在 `open()` 之前设置，播放中途改这个属性不会重建解码器。
           try {
-            await platform.setProperty('hwdec', _softwareDecode ? 'no' : 'auto-safe');
+            await platform.setProperty(
+              'hwdec',
+              _softwareDecode ? 'no' : 'auto-safe',
+            );
           } catch (_) {
             // 忽略：个别平台的 libmpv 版本不认这个属性，不影响播放。
           }
@@ -4052,6 +4152,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         speedLabel: '${_speed}x',
         qualityLabel: _qualityLabel,
         followed: _followed,
+        canToggleAutoNext: !widget.singleDrama,
+        autoNextEpisode: widget.autoNextEpisode,
+        canOpenDetail: !widget.singleDrama,
+        canPush: _canPush,
       );
     });
     if (!mounted || _closed || action == null) return;
@@ -4064,6 +4168,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         await _openQualityMenu();
       case TvPlayerAction.follow:
         await _toggleFollow();
+      case TvPlayerAction.autoNext:
+        widget.onToggleAutoNext();
+      case TvPlayerAction.detail:
+        await _pauseForDetail();
+        if (mounted && !_closed) widget.onOpenDetail();
+      case TvPlayerAction.push:
+        await _pushToDevice();
     }
   }
 
@@ -4356,8 +4467,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _fsPointer = event.pointer;
     _fsOrigin = _fsLast = event.localPosition;
     _fsMoved = false;
-    _fsGuarded =
-        event.localPosition.dy < PlayerInteractions.topGestureGuard;
+    _fsGuarded = event.localPosition.dy < PlayerInteractions.topGestureGuard;
     _fsDownAt = event.timeStamp;
     _fsGesture = _FsGesture.none;
     _fsSeekTarget = null;
@@ -4410,8 +4520,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         if (player == null || player.state.duration <= Duration.zero) return;
         final seconds = delta.dx / size.width * _fsSeekSecondsPerWidth;
         final raw =
-            _fsStartPosition +
-            Duration(milliseconds: (seconds * 1000).round());
+            _fsStartPosition + Duration(milliseconds: (seconds * 1000).round());
         final target = Duration(
           milliseconds: raw.inMilliseconds.clamp(
             0,
@@ -4560,10 +4669,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (dx.abs() < 12 || dx.abs() <= dy.abs() * 1.2) return;
     final seconds = dx / width * _fsSeekSecondsPerWidth;
     final target = Duration(
-      milliseconds:
-          (_hStart + Duration(milliseconds: (seconds * 1000).round()))
-              .inMilliseconds
-              .clamp(0, player.state.duration.inMilliseconds),
+      milliseconds: (_hStart + Duration(milliseconds: (seconds * 1000).round()))
+          .inMilliseconds
+          .clamp(0, player.state.duration.inMilliseconds),
     );
     _hTarget = target;
     _seekPreview.value = target.inMilliseconds / 1000;
@@ -4643,9 +4751,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               // （横杆变成居中圆盘，表现为"进度条跑到中间"）。
               color: Colors.black,
               child: Theme(
-                data: _television
-                    ? _fullscreenTvTheme
-                    : _fullscreenTheme,
+                data: _television ? _fullscreenTvTheme : _fullscreenTheme,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
@@ -4693,10 +4799,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                     // 与竖屏主层保持一致（0.6.11）：补上"已就绪但无画面"的兜底，
                     // 避免全屏时出现纯黑无文字。
                     if (_loading ||
-                        (_awaitingFirstFrame && !(_player?.state.playing ?? false)) ||
+                        (_awaitingFirstFrame &&
+                            !(_player?.state.playing ?? false)) ||
                         // 0.7.13：改为判断"是否出过画面"。此前看 `width <= 0`，
                         // 而部分流始终不报宽高 → 正常播放时提示也一直挂着。
-                        (!_userPaused && _ready && _error == null && !_hasVideoFrame))
+                        (!_userPaused &&
+                            _ready &&
+                            _error == null &&
+                            !_hasVideoFrame))
                       const IgnorePointer(
                         child: LoadingHint(message: '正在加载视频…', dark: true),
                       )
@@ -4735,9 +4845,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                     if (_hasEpisodeBadge)
                       IgnorePointer(
                         child: _episodeBadge(
-                          textKey: const ValueKey(
-                            'fullscreen-episode-badge',
-                          ),
+                          textKey: const ValueKey('fullscreen-episode-badge'),
                         ),
                       ),
                     // 控件层：自动隐藏。
@@ -4804,98 +4912,101 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                       ValueListenableBuilder<double?>(
                                         valueListenable: _seekPreview,
                                         builder: (context, preview, _) => Row(
-                                        children: [
-                                          IconButton(
-                                            key: const ValueKey(
-                                              'fullscreen-play-toggle',
+                                          children: [
+                                            IconButton(
+                                              key: const ValueKey(
+                                                'fullscreen-play-toggle',
+                                              ),
+                                              tooltip: (state?.playing ?? false)
+                                                  ? '暂停'
+                                                  : '播放',
+                                              onPressed: _togglePlayback,
+                                              icon: Icon(
+                                                (state?.playing ?? false)
+                                                    ? Icons.pause_rounded
+                                                    : Icons.play_arrow_rounded,
+                                                color: Colors.white,
+                                              ),
                                             ),
-                                            tooltip: (state?.playing ?? false)
-                                                ? '暂停'
-                                                : '播放',
-                                            onPressed: _togglePlayback,
-                                            icon: Icon(
-                                              (state?.playing ?? false)
-                                                  ? Icons.pause_rounded
-                                                  : Icons.play_arrow_rounded,
-                                              color: Colors.white,
+                                            Text(
+                                              '${formatPosition(((preview ?? _seekValue) ?? position / 1000))} / ${formatPosition(duration / 1000)}',
+                                              style: const TextStyle(
+                                                color: Colors.white70,
+                                                fontSize: 12,
+                                              ),
                                             ),
-                                          ),
-                                          Text(
-                                            '${formatPosition(((preview ?? _seekValue) ?? position / 1000))} / ${formatPosition(duration / 1000)}',
-                                            style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                          Expanded(
-                                            child: SizedBox(
-                                              height: 32,
-                                              child: SliderTheme(
-                                                data: fullscreenSliderTheme,
-                                                child: Slider(
-                                                  key: const ValueKey(
-                                                    'fullscreen-progress',
-                                                  ),
-                                                  value:
-                                                      ((preview ?? _seekValue) ??
-                                                              position / 1000)
-                                                          .clamp(0, total),
-                                                  max: total,
-                                                  secondaryTrackValue:
-                                                      (buffered / 1000).clamp(
-                                                        0,
-                                                        total,
-                                                      ),
-                                                  onChangeStart: duration > 0
-                                                      ? (_) {
-                                                          _interactions
-                                                              ?.cancel();
-                                                          _hideTimer?.cancel();
-                                                        }
-                                                      : null,
-                                                  onChanged: duration <= 0
-                                                      ? null
-                                                      : (value) {
-                                                          _hideTimer?.cancel();
-                                                          setState(
-                                                            () => _seekValue =
-                                                                value,
-                                                          );
-                                                        },
-                                                  onChangeEnd: (value) {
-                                                    if (duration > 0) {
-                                                      unawaited(
-                                                        _seekTo(
-                                                          Duration(
-                                                            milliseconds:
-                                                                (value * 1000)
-                                                                    .round(),
-                                                          ),
+                                            Expanded(
+                                              child: SizedBox(
+                                                height: 32,
+                                                child: SliderTheme(
+                                                  data: fullscreenSliderTheme,
+                                                  child: Slider(
+                                                    key: const ValueKey(
+                                                      'fullscreen-progress',
+                                                    ),
+                                                    value:
+                                                        ((preview ??
+                                                                    _seekValue) ??
+                                                                position / 1000)
+                                                            .clamp(0, total),
+                                                    max: total,
+                                                    secondaryTrackValue:
+                                                        (buffered / 1000).clamp(
+                                                          0,
+                                                          total,
                                                         ),
+                                                    onChangeStart: duration > 0
+                                                        ? (_) {
+                                                            _interactions
+                                                                ?.cancel();
+                                                            _hideTimer
+                                                                ?.cancel();
+                                                          }
+                                                        : null,
+                                                    onChanged: duration <= 0
+                                                        ? null
+                                                        : (value) {
+                                                            _hideTimer
+                                                                ?.cancel();
+                                                            setState(
+                                                              () => _seekValue =
+                                                                  value,
+                                                            );
+                                                          },
+                                                    onChangeEnd: (value) {
+                                                      if (duration > 0) {
+                                                        unawaited(
+                                                          _seekTo(
+                                                            Duration(
+                                                              milliseconds:
+                                                                  (value * 1000)
+                                                                      .round(),
+                                                            ),
+                                                          ),
+                                                        );
+                                                      }
+                                                      setState(
+                                                        () => _seekValue = null,
                                                       );
-                                                    }
-                                                    setState(
-                                                      () => _seekValue = null,
-                                                    );
-                                                    _showControls();
-                                                  },
+                                                      _showControls();
+                                                    },
+                                                  ),
                                                 ),
                                               ),
                                             ),
-                                          ),
-                                          IconButton(
-                                            key: const ValueKey(
-                                              'fullscreen-exit',
+                                            IconButton(
+                                              key: const ValueKey(
+                                                'fullscreen-exit',
+                                              ),
+                                              tooltip: '退出全屏',
+                                              onPressed: _toggleLandscape,
+                                              icon: const Icon(
+                                                Icons.fullscreen_exit_rounded,
+                                                color: Colors.white,
+                                              ),
                                             ),
-                                            tooltip: '退出全屏',
-                                            onPressed: _toggleLandscape,
-                                            icon: const Icon(
-                                              Icons.fullscreen_exit_rounded,
-                                              color: Colors.white,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
+                                          ],
+                                        ),
                                       ),
                                       Row(
                                         mainAxisAlignment:
@@ -5201,15 +5312,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                     // 0.8.1：电视上按确定键时焦点落到"重试"。
                     key: const ValueKey('feed-retry'),
                     focusNode: _retryFocus,
-                    onPressed: () {
-                      _ready = false;
-                      // 0.3.5：播放器已释放时先重建再加载，避免在已释放实例上操作。
-                      unawaited(
-                        _playerReleased
-                            ? _resumeAfterRelease()
-                            : _prepare(force: true),
-                      );
-                    },
+                    onPressed: _retryPlayback,
                     child: const Text('重试'),
                   ),
                 ],
@@ -5273,269 +5376,299 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             node: _controlsScope,
             onFocusChange: _onControlsFocusChanged,
             child: IgnorePointer(
-          ignoring: !visible,
-          child: AnimatedOpacity(
-            opacity: visible ? 1 : 0,
-            duration: const Duration(milliseconds: 180),
-            // 进度条 / 时间 / 暂停按钮跟随 `_tick` 轻量重建（0.3.1）。
-            //
-            // 整页 setState 已移除（见 _ensurePlayer 的流监听），
-            // 这里只重建底部控件子树，避免每秒多次重建整个手势层与选集按钮。
-            //
-            // 0.6.3 修复（用户反馈"双击恢复后中央图标仍是暂停"）：
-            // 本 builder 的闭包**捕获的是外层 build 那一刻的 `state`**，
-            // 而 `_tick` 变化只会重跑这里，不会重跑外层 build →
-            // 于是这里一直用着过期状态，表现为"视频已在播放、图标却不变"。
-            // （实测：推位置到 30s 后进度条仍为 0；单击触发整页 setState 才跳到 5s。）
-            // 现在在 builder 内**重新读取实时状态**并遮蔽外层同名变量，
-            // 让播放状态、进度、时间都随 `_tick` 真正刷新。
-            child: ValueListenableBuilder<int>(
-              valueListenable: _tick,
-              builder: (context, _, _) {
-                final live = _player?.state;
-                final state = live;
-                final duration = live?.duration.inMilliseconds ?? 0;
-                final position = live?.position.inMilliseconds ?? 0;
-                final buffered = live?.buffer.inMilliseconds ?? 0;
-                final total = duration > 0 ? duration / 1000 : 1.0;
-                return Stack(
-                fit: StackFit.expand,
-                children: [
-                  const IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Color(0x99000000),
-                            Colors.transparent,
-                            Color(0xDD000000),
-                          ],
-                          stops: [0, .45, 1],
-                        ),
-                      ),
-                    ),
-                  ),
-                  // 左上角集数标签（0.6.2）。
-                  //
-                  // 只在有多个剧集时显示：单集、本地单文件不显示，
-                  // 避免出现"第1集"这种没有信息量的标签。
-                  if (_hasEpisodeBadge) _episodeBadge(),
-                  // 右上角推送按钮（0.6.4，从老播放器迁移）。
-                  //
-                  // 位置选择理由：底部按钮行已固定为 5 个等宽槽位
-                  // （320 窄屏槽位仅 59.2px，而"连播下一部"标签已 55px），
-                  // 再加第 6 个会把标签挤到截断；因此放在视频右上角，
-                  // 与左上角集数标签左右对称，也不占用底部功能位。
-                  // 位于控件层内 → 跟随控件一起显隐。
-                  if (_canPush) _pushButton(),
-                  // 暂停时显示中央播放按钮。
-                  if (!(state?.playing ?? false) &&
-                      !_loading &&
-                      _error == null &&
-                      !_panelOpen)
-                    Center(
-                      child: IconButton.filledTonal(
-                        tooltip: '播放',
-                        iconSize: 42,
-                        onPressed: _togglePlayback,
-                        icon: const Icon(Icons.play_arrow_rounded),
-                      ),
-                    ),
-                  // 长按加速提示。
-                  //
-                  // 0.2.26 修正：【已移除】，改到控件层外独立渲染。
-                  // 原因：该提示原先在控件层内部，受 `IgnorePointer(ignoring: !visible)`
-                  // 控制；而加速时 `visible` 恰好为 false，导致长按加速时
-                  // 连「3 倍速 · 松开恢复」都不显示（用户：“按住后啥也不显示”）。
-                  // 详见文件下方“长按加速提示（独立层）”块。
-                  // 底部区域：左侧信息面板 + 右侧功能按钮。
-                  //
-                  // 修复「横屏按钮点了没反应」的根因：原先底部面板与右侧按钮组
-                  // 是两个独立的 Positioned / Align，面板内容多时（剧名 + 两行简介
-                  // + 热度行）会向上撑高，把位于 right:8, bottom:190 的按钮组盖住，
-                  // 导致按钮收不到点击（表现为"完全没反应"，连按钮文字都不变）。
-                  // 改为同一个 Column 布局后，两者在结构上永不重叠。
-                  Align(
-                    alignment: Alignment.bottomCenter,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+              ignoring: !visible,
+              child: AnimatedOpacity(
+                opacity: visible ? 1 : 0,
+                duration: const Duration(milliseconds: 180),
+                // 进度条 / 时间 / 暂停按钮跟随 `_tick` 轻量重建（0.3.1）。
+                //
+                // 整页 setState 已移除（见 _ensurePlayer 的流监听），
+                // 这里只重建底部控件子树，避免每秒多次重建整个手势层与选集按钮。
+                //
+                // 0.6.3 修复（用户反馈"双击恢复后中央图标仍是暂停"）：
+                // 本 builder 的闭包**捕获的是外层 build 那一刻的 `state`**，
+                // 而 `_tick` 变化只会重跑这里，不会重跑外层 build →
+                // 于是这里一直用着过期状态，表现为"视频已在播放、图标却不变"。
+                // （实测：推位置到 30s 后进度条仍为 0；单击触发整页 setState 才跳到 5s。）
+                // 现在在 builder 内**重新读取实时状态**并遮蔽外层同名变量，
+                // 让播放状态、进度、时间都随 `_tick` 真正刷新。
+                child: ValueListenableBuilder<int>(
+                  valueListenable: _tick,
+                  builder: (context, _, _) {
+                    final live = _player?.state;
+                    final state = live;
+                    final duration = live?.duration.inMilliseconds ?? 0;
+                    final position = live?.position.inMilliseconds ?? 0;
+                    final buffered = live?.buffer.inMilliseconds ?? 0;
+                    final total = duration > 0 ? duration / 1000 : 1.0;
+                    return Stack(
+                      fit: StackFit.expand,
                       children: [
-                        Container(
-                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-                          decoration: const BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [Colors.transparent, Colors.black87],
+                        const IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Color(0x99000000),
+                                  Colors.transparent,
+                                  Color(0xDD000000),
+                                ],
+                                stops: [0, .45, 1],
+                              ),
                             ),
                           ),
+                        ),
+                        // 左上角集数标签（0.6.2）。
+                        //
+                        // 只在有多个剧集时显示：单集、本地单文件不显示，
+                        // 避免出现"第1集"这种没有信息量的标签。
+                        if (_hasEpisodeBadge) _episodeBadge(),
+                        // 右上角推送按钮（0.6.4，从老播放器迁移）。
+                        //
+                        // 位置选择理由：底部按钮行已固定为 5 个等宽槽位
+                        // （320 窄屏槽位仅 59.2px，而"连播下一部"标签已 55px），
+                        // 再加第 6 个会把标签挤到截断；因此放在视频右上角，
+                        // 与左上角集数标签左右对称，也不占用底部功能位。
+                        // 位于控件层内 → 跟随控件一起显隐。
+                        if (_canPush) _pushButton(),
+                        // 暂停时显示中央播放按钮。
+                        if (!(state?.playing ?? false) &&
+                            !_loading &&
+                            _error == null &&
+                            !_panelOpen)
+                          Center(
+                            child: IconButton.filledTonal(
+                              tooltip: '播放',
+                              iconSize: 42,
+                              onPressed: _togglePlayback,
+                              icon: const Icon(Icons.play_arrow_rounded),
+                            ),
+                          ),
+                        // 长按加速提示。
+                        //
+                        // 0.2.26 修正：【已移除】，改到控件层外独立渲染。
+                        // 原因：该提示原先在控件层内部，受 `IgnorePointer(ignoring: !visible)`
+                        // 控制；而加速时 `visible` 恰好为 false，导致长按加速时
+                        // 连「3 倍速 · 松开恢复」都不显示（用户：“按住后啥也不显示”）。
+                        // 详见文件下方“长按加速提示（独立层）”块。
+                        // 底部区域：左侧信息面板 + 右侧功能按钮。
+                        //
+                        // 修复「横屏按钮点了没反应」的根因：原先底部面板与右侧按钮组
+                        // 是两个独立的 Positioned / Align，面板内容多时（剧名 + 两行简介
+                        // + 热度行）会向上撑高，把位于 right:8, bottom:190 的按钮组盖住，
+                        // 导致按钮收不到点击（表现为"完全没反应"，连按钮文字都不变）。
+                        // 改为同一个 Column 布局后，两者在结构上永不重叠。
+                        Align(
+                          alignment: Alignment.bottomCenter,
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              _titleBar(),
-                              ValueListenableBuilder<double?>(
-                                valueListenable: _seekPreview,
-                                builder: (context, preview, _) => Row(
-                                children: [
-                                  IconButton(
-                                    key: const ValueKey('feed-play-toggle'),
-                                    // 0.8.0：电视上按"确定"后焦点落到这里，
-                                    // 再按一次确定即暂停/播放。
-                                    focusNode: _playFocus,
-                                    tooltip: (state?.playing ?? false)
-                                        ? '暂停'
-                                        : '播放',
-                                    onPressed: _togglePlayback,
-                                    style: _overlayButtonStyle(context),
-                                    icon: Icon(
-                                      (state?.playing ?? false)
-                                          ? Icons.pause_rounded
-                                          : Icons.play_arrow_rounded,
-                                      color: Colors.white,
-                                    ),
+                              Container(
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  10,
+                                  12,
+                                  8,
+                                ),
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Colors.transparent,
+                                      Colors.black87,
+                                    ],
                                   ),
-                                  Text(
-                                    '${formatPosition(((preview ?? _seekValue) ?? position / 1000))} / ${formatPosition(duration / 1000)}',
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                  Expanded(
-                                    // 电视上把进度条从焦点链里摘掉（0.8.3）。
-                                    //
-                                    // Slider 被遥控器聚焦后是个**焦点陷阱**：
-                                    // 左右键变成"改数值"而不是"移动焦点"，
-                                    // 用户想按右键去全屏按钮会变成拖动进度条，
-                                    // 而且上下键也未必能跳出去，看起来就像遥控器坏了。
-                                    //
-                                    // 电视上本来就有更合适的做法：控件隐藏时
-                                    // 左右键直接 ±10 秒、按住连续快进，比拖进度条准。
-                                    child: ExcludeFocus(
-                                      excluding: _television,
-                                      child: SliderTheme(
-                                      // 0.8.1：电视上进度条加粗，远看也能看清。
-                                      data: SliderTheme.of(context).copyWith(
-                                        trackHeight: _television ? 6 : 3,
-                                      ),
-                                      child: Slider(
-                                        key: const ValueKey('feed-progress'),
-                                        value:
-                                            ((preview ?? _seekValue) ?? position / 1000)
-                                                .clamp(0, total),
-                                        max: total,
-                                        secondaryTrackValue:
-                                            (buffered / 1000).clamp(0, total),
-                                        semanticFormatterCallback:
-                                            formatPosition,
-                                        onChangeStart: duration > 0
-                                            ? (_) {
-                                                _interactions?.cancel();
-                                                _hideTimer?.cancel();
-                                              }
-                                            : null,
-                                        onChanged: duration <= 0
-                                            ? null
-                                            : (value) {
-                                                _hideTimer?.cancel();
-                                                setState(
-                                                  () => _seekValue = value,
-                                                );
-                                              },
-                                        onChangeEnd: (value) {
-                                          if (duration > 0) {
-                                            unawaited(
-                                              _seekTo(
-                                                Duration(
-                                                  milliseconds: (value * 1000)
-                                                      .round(),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _titleBar(),
+                                    ValueListenableBuilder<double?>(
+                                      valueListenable: _seekPreview,
+                                      builder: (context, preview, _) => Row(
+                                        children: [
+                                          IconButton(
+                                            key: const ValueKey(
+                                              'feed-play-toggle',
+                                            ),
+                                            // 0.8.0：电视上按"确定"后焦点落到这里，
+                                            // 再按一次确定即暂停/播放。
+                                            focusNode: _playFocus,
+                                            tooltip: (state?.playing ?? false)
+                                                ? '暂停'
+                                                : '播放',
+                                            onPressed: _togglePlayback,
+                                            style: _overlayButtonStyle(context),
+                                            icon: Icon(
+                                              (state?.playing ?? false)
+                                                  ? Icons.pause_rounded
+                                                  : Icons.play_arrow_rounded,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          Text(
+                                            '${formatPosition(((preview ?? _seekValue) ?? position / 1000))} / ${formatPosition(duration / 1000)}',
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                          Expanded(
+                                            // 电视上把进度条从焦点链里摘掉（0.8.3）。
+                                            //
+                                            // Slider 被遥控器聚焦后是个**焦点陷阱**：
+                                            // 左右键变成"改数值"而不是"移动焦点"，
+                                            // 用户想按右键去全屏按钮会变成拖动进度条，
+                                            // 而且上下键也未必能跳出去，看起来就像遥控器坏了。
+                                            //
+                                            // 电视上本来就有更合适的做法：控件隐藏时
+                                            // 左右键直接 ±10 秒、按住连续快进，比拖进度条准。
+                                            child: ExcludeFocus(
+                                              excluding: _television,
+                                              child: SliderTheme(
+                                                // 0.8.1：电视上进度条加粗，远看也能看清。
+                                                data: SliderTheme.of(context)
+                                                    .copyWith(
+                                                      trackHeight: _television
+                                                          ? 6
+                                                          : 3,
+                                                    ),
+                                                child: Slider(
+                                                  key: const ValueKey(
+                                                    'feed-progress',
+                                                  ),
+                                                  value:
+                                                      ((preview ??
+                                                                  _seekValue) ??
+                                                              position / 1000)
+                                                          .clamp(0, total),
+                                                  max: total,
+                                                  secondaryTrackValue:
+                                                      (buffered / 1000).clamp(
+                                                        0,
+                                                        total,
+                                                      ),
+                                                  semanticFormatterCallback:
+                                                      formatPosition,
+                                                  onChangeStart: duration > 0
+                                                      ? (_) {
+                                                          _interactions
+                                                              ?.cancel();
+                                                          _hideTimer?.cancel();
+                                                        }
+                                                      : null,
+                                                  onChanged: duration <= 0
+                                                      ? null
+                                                      : (value) {
+                                                          _hideTimer?.cancel();
+                                                          setState(
+                                                            () => _seekValue =
+                                                                value,
+                                                          );
+                                                        },
+                                                  onChangeEnd: (value) {
+                                                    if (duration > 0) {
+                                                      unawaited(
+                                                        _seekTo(
+                                                          Duration(
+                                                            milliseconds:
+                                                                (value * 1000)
+                                                                    .round(),
+                                                          ),
+                                                        ),
+                                                      );
+                                                    }
+                                                    setState(
+                                                      () => _seekValue = null,
+                                                    );
+                                                    _showControls();
+                                                  },
                                                 ),
                                               ),
-                                            );
-                                          }
-                                          setState(() => _seekValue = null);
-                                          _showControls();
-                                        },
+                                            ),
+                                          ),
+                                          IconButton(
+                                            key: const ValueKey(
+                                              'feed-landscape',
+                                            ),
+                                            tooltip: _landscape ? '退出全屏' : '全屏',
+                                            onPressed: _toggleLandscape,
+                                            style: _overlayButtonStyle(context),
+                                            icon: Icon(
+                                              _landscape
+                                                  ? Icons
+                                                        .fullscreen_exit_rounded
+                                                  : Icons.fullscreen_rounded,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceEvenly,
+                                      children: [
+                                        _sideButton(
+                                          key: const ValueKey('feed-speed'),
+                                          icon: Icons.speed_rounded,
+                                          label: '${_speed}x',
+                                          onPressed: _openSpeedMenu,
+                                        ),
+                                        _sideButton(
+                                          key: const ValueKey('feed-quality'),
+                                          icon: Icons.hd_rounded,
+                                          label: _qualityLabel,
+                                          onPressed: _openQualityMenu,
+                                        ),
+                                        _sideButton(
+                                          key: const ValueKey('feed-episodes'),
+                                          icon: Icons.grid_view_rounded,
+                                          label: '选集',
+                                          onPressed: _openEpisodes,
+                                        ),
+                                        _sideButton(
+                                          key: const ValueKey('feed-follow'),
+                                          icon: _followed
+                                              ? Icons.bookmark_rounded
+                                              : Icons.bookmark_border_rounded,
+                                          label: _followed ? '已追剧' : '追剧',
+                                          onPressed: _toggleFollow,
+                                        ),
+                                        if (!widget.singleDrama)
+                                          _sideButton(
+                                            key: const ValueKey(
+                                              'feed-auto-next',
+                                            ),
+                                            icon: widget.autoNextEpisode
+                                                ? Icons.repeat_one_rounded
+                                                : Icons.skip_next_rounded,
+                                            label: widget.autoNextEpisode
+                                                ? '连播本剧'
+                                                : '连播下一部',
+                                            color: widget.autoNextEpisode
+                                                ? const Color(0xFFFF765F)
+                                                : Colors.white,
+                                            onPressed: widget.onToggleAutoNext,
+                                          ),
+                                      ],
                                     ),
-                                  ),
-                                  IconButton(
-                                    key: const ValueKey('feed-landscape'),
-                                    tooltip: _landscape ? '退出全屏' : '全屏',
-                                    onPressed: _toggleLandscape,
-                                    style: _overlayButtonStyle(context),
-                                    icon: Icon(
-                                      _landscape
-                                          ? Icons.fullscreen_exit_rounded
-                                          : Icons.fullscreen_rounded,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              ),
-                              Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceEvenly,
-                                children: [
-                                  _sideButton(
-                                    key: const ValueKey('feed-speed'),
-                                    icon: Icons.speed_rounded,
-                                    label: '${_speed}x',
-                                    onPressed: _openSpeedMenu,
-                                  ),
-                                  _sideButton(
-                                    key: const ValueKey('feed-quality'),
-                                    icon: Icons.hd_rounded,
-                                    label: _qualityLabel,
-                                    onPressed: _openQualityMenu,
-                                  ),
-                                  _sideButton(
-                                    key: const ValueKey('feed-episodes'),
-                                    icon: Icons.grid_view_rounded,
-                                    label: '选集',
-                                    onPressed: _openEpisodes,
-                                  ),
-                                  _sideButton(
-                                    key: const ValueKey('feed-follow'),
-                                    icon: _followed
-                                        ? Icons.bookmark_rounded
-                                        : Icons.bookmark_border_rounded,
-                                    label: _followed ? '已追剧' : '追剧',
-                                    onPressed: _toggleFollow,
-                                  ),
-                                  if (!widget.singleDrama)
-                                    _sideButton(
-                                      key: const ValueKey('feed-auto-next'),
-                                      icon: widget.autoNextEpisode
-                                          ? Icons.repeat_one_rounded
-                                          : Icons.skip_next_rounded,
-                                      label: widget.autoNextEpisode
-                                          ? '连播本剧'
-                                          : '连播下一部',
-                                      color: widget.autoNextEpisode
-                                          ? const Color(0xFFFF765F)
-                                          : Colors.white,
-                                      onPressed: widget.onToggleAutoNext,
-                                    ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ],
                           ),
                         ),
                       ],
-                    ),
-                  ),
-                  ],
-                );
-              },
-            ),
-          ),
+                    );
+                  },
+                ),
+              ),
             ),
           ),
         ),
@@ -5627,7 +5760,6 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   );
 }
 
-
 /// 方向锁定手势识别器（0.7.12，`XQ-0120`）。
 ///
 /// 为什么需要它：竖屏竖滑流里，「左右滑调进度」与 `PageView` 的「上下翻页」
@@ -5648,7 +5780,6 @@ class _DirectionalSeekGestureRecognizer extends OneSequenceGestureRecognizer {
 
   /// 水平方向判定为「主导」的最小位移。
   static const double _horizontalWin = 6;
-
 
   @override
   void addAllowedPointer(PointerDownEvent event) {

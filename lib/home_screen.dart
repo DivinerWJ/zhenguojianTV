@@ -415,9 +415,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         builder: (dialogContext) => Dialog(
           backgroundColor: Colors.transparent,
           elevation: 0,
-          insetPadding: const EdgeInsets.symmetric(
+          insetPadding: EdgeInsets.symmetric(
             horizontal: 48,
-            vertical: 32,
+            vertical: MediaQuery.sizeOf(dialogContext).height < 600 ? 12 : 32,
           ),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 760),
@@ -2092,7 +2092,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       key: ValueKey('tv-grid-$key'),
       itemKeys: items.map((item) => item.id).toList(),
       columns: columns,
-      itemExtent: DramaTile.extentFor(context, tileWidth - 14) + 14,
+      // Use the actual RemoteGrid cell width. The old tileWidth - 14/+14
+      // formula under-allocated a 2:3 poster and could overflow on 720p TV layouts.
+      itemExtent: DramaTile.extentFor(context, tileWidth),
       controller: controller,
       footer: footer,
       padding: const EdgeInsets.fromLTRB(18, 2, 18, 18),
@@ -2258,10 +2260,15 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
           ConstrainedBox(
             constraints: BoxConstraints(
               maxHeight: tv
-                  ? (MediaQuery.sizeOf(context).height * 0.52).clamp(
-                      200.0,
-                      460.0,
-                    )
+                  ? (MediaQuery.sizeOf(context).height < 600
+                        ? (MediaQuery.sizeOf(context).height - 300).clamp(
+                            160.0,
+                            260.0,
+                          )
+                        : (MediaQuery.sizeOf(context).height * 0.52).clamp(
+                            200.0,
+                            460.0,
+                          ))
                   : MediaQuery.sizeOf(context).height * 0.45,
             ),
             child: SingleChildScrollView(

@@ -184,7 +184,7 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
           iconColor: const Color(0xFFFF765F),
           iconSize: 52,
           title: '开始刷剧',
-          subtitle: '上下键换剧，左右键快进，按住确定键 3 倍速',
+          subtitle: '上下键换剧/集，左右键快进，OK 播放暂停，长按 OK 3 倍速',
           accent: const Color(0xFF3A1F1A),
           titleSize: 26,
         ),
@@ -443,10 +443,7 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
     return [
       for (final group in ordered.take(4))
         if (group.value.length >= 4)
-          _posterRow(
-            title: group.key,
-            items: group.value.take(20).toList(),
-          ),
+          _posterRow(title: group.key, items: group.value.take(20).toList()),
     ];
   }
 

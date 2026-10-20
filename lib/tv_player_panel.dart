@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'models.dart';
 import 'remote_widgets.dart';
 
-enum TvPlayerAction { episodes, speed, quality, follow }
+enum TvPlayerAction { episodes, speed, quality, follow, autoNext, detail, push }
 
 const _tvAccent = Color(0xFFFF765F);
 
@@ -91,6 +91,10 @@ Future<TvPlayerAction?> showTvPlayerMenu(
   required String speedLabel,
   required String qualityLabel,
   required bool followed,
+  required bool canToggleAutoNext,
+  required bool autoNextEpisode,
+  required bool canOpenDetail,
+  required bool canPush,
 }) {
   final items = <(TvPlayerAction, IconData, String, String)>[
     (
@@ -101,12 +105,28 @@ Future<TvPlayerAction?> showTvPlayerMenu(
     ),
     (TvPlayerAction.speed, Icons.speed_rounded, '倍速', '当前 $speedLabel'),
     (TvPlayerAction.quality, Icons.hd_rounded, '清晰度', qualityLabel),
+    if (canToggleAutoNext)
+      (
+        TvPlayerAction.autoNext,
+        autoNextEpisode ? Icons.repeat_one_rounded : Icons.skip_next_rounded,
+        '连播模式',
+        autoNextEpisode ? '当前：连播本剧' : '当前：连播下一部',
+      ),
     (
       TvPlayerAction.follow,
       followed ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
       followed ? '取消追剧' : '追剧',
       followed ? '已加入追剧列表' : '加入追剧列表',
     ),
+    if (canOpenDetail)
+      (
+        TvPlayerAction.detail,
+        Icons.info_outline_rounded,
+        '剧集详情',
+        '查看简介、剧集和更多信息',
+      ),
+    if (canPush)
+      (TvPlayerAction.push, Icons.cast_rounded, '推送播放', '发送到局域网内的另一台设备'),
   ];
   return _showTvSidePanel<TvPlayerAction>(
     context,
@@ -118,78 +138,92 @@ Future<TvPlayerAction?> showTvPlayerMenu(
         _panelHeader('播放设置', title),
         Divider(height: 1, color: Colors.white.withValues(alpha: .10)),
         Expanded(
-          child: ListView.separated(
+          child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(18, 18, 18, 26),
-            itemCount: items.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 10),
-            itemBuilder: (_, index) {
-              final item = items[index];
-              return RemoteTarget(
-                autofocus: index == 0,
-                accent: _tvAccent,
-                label: '${item.$3}，${item.$4}',
-                onPressed: () => Navigator.of(panelContext).pop(item.$1),
-                child: Container(
-                  constraints: const BoxConstraints(minHeight: 82),
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: .07),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 48,
-                        height: 48,
-                        decoration: BoxDecoration(
-                          color: _tvAccent.withValues(alpha: .15),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(item.$2, color: _tvAccent, size: 27),
+            child: Column(
+              children: [
+                for (var index = 0; index < items.length; index++) ...[
+                  RemoteTarget(
+                    key: ValueKey('tv-player-menu-${items[index].$1.name}'),
+                    autofocus: index == 0,
+                    accent: _tvAccent,
+                    label: '${items[index].$3}，${items[index].$4}',
+                    onPressed: () =>
+                        Navigator.of(panelContext).pop(items[index].$1),
+                    child: Container(
+                      constraints: const BoxConstraints(minHeight: 82),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
                       ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              item.$3,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 20,
-                                fontWeight: FontWeight.w700,
-                              ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: .07),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: _tvAccent.withValues(alpha: .15),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              item.$4,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: .58),
-                                fontSize: 14,
-                              ),
+                            child: Icon(
+                              items[index].$2,
+                              color: _tvAccent,
+                              size: 27,
                             ),
-                          ],
-                        ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  items[index].$3,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  items[index].$4,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: .58),
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Icon(
+                            Icons.chevron_right_rounded,
+                            color: Colors.white.withValues(alpha: .48),
+                          ),
+                        ],
                       ),
-                      Icon(
-                        Icons.chevron_right_rounded,
-                        color: Colors.white.withValues(alpha: .48),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              );
-            },
+                  if (index + 1 < items.length) const SizedBox(height: 10),
+                ],
+              ],
+            ),
           ),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(28, 0, 28, 22),
           child: Text(
-            'OK 播放/暂停  ·  ←/→ 快退快进  ·  菜单键打开本页  ·  返回关闭',
-            style: TextStyle(color: Colors.white.withValues(alpha: .42), fontSize: 13),
+            'OK 播放/暂停 · 长按 OK 3 倍速 · ←/→ 快退快进 · 菜单键设置 · 返回逐层退出',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: .42),
+              fontSize: 13,
+            ),
           ),
         ),
       ],
@@ -213,7 +247,10 @@ Future<int?> showTvEpisodePanel(
     builder: (panelContext) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _panelHeader('选集', '$title · 当前第 ${episodes[safeIndex].number} 集 · 上下滚动'),
+        _panelHeader(
+          '选集',
+          '$title · 当前第 ${episodes[safeIndex].number} 集 · 上下滚动',
+        ),
         Divider(height: 1, color: Colors.white.withValues(alpha: .10)),
         Expanded(
           child: RemoteGrid(
@@ -247,7 +284,11 @@ Future<int?> showTvEpisodePanel(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       if (current) ...[
-                        const Icon(Icons.play_arrow_rounded, color: _tvAccent, size: 22),
+                        const Icon(
+                          Icons.play_arrow_rounded,
+                          color: _tvAccent,
+                          size: 22,
+                        ),
                         const SizedBox(width: 3),
                       ],
                       Flexible(
@@ -258,7 +299,9 @@ Future<int?> showTvEpisodePanel(
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 17,
-                            fontWeight: current ? FontWeight.w800 : FontWeight.w600,
+                            fontWeight: current
+                                ? FontWeight.w800
+                                : FontWeight.w600,
                           ),
                         ),
                       ),

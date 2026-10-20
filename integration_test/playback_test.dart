@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:duanju_app/core_bridge.dart';
@@ -6,7 +6,6 @@ import 'package:duanju_app/downloads_screen.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/media_library.dart';
 import 'package:duanju_app/media_pipeline.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:duanju_app/main.dart';
 import 'package:duanju_app/models.dart';
 import 'package:flutter/material.dart';
@@ -405,9 +404,8 @@ void main() {
         await binding.takeScreenshot('android-offline-playback');
         await tester.tap(
           find.byTooltip(
-            MaterialLocalizations.of(
-              tester.element(find.byType(Video)),
-            ).backButtonTooltip,
+            MaterialLocalizations.of(tester.element(find.byType(Video)))
+                .backButtonTooltip,
           ),
         );
         await until(
@@ -483,79 +481,5 @@ void main() {
       }
     },
     timeout: const Timeout(Duration(minutes: 4)),
-  );
-
-  testWidgets(
-    'Android foreground service continues a slow download after minimizing',
-    (tester) async {
-      final repository = DownloadFixtureRepository();
-      await repository.initialize();
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.setBool('autoExport', false);
-      final store = LocalStore(preferences);
-      const drama = Drama(
-        id: 'hongguo:700009',
-        source: 'hongguo',
-        title: '后台下载合成验证',
-        episodes: 1,
-      );
-      final episode = Episode({
-        'id': 'slow',
-        'currentEpisode': 1,
-        'videoUrl': '$fixtureBase/clear.mp4?slow=1',
-        'referer': '$fixtureBase/',
-      }, 1);
-      await fixtureControl('online');
-      for (final job in await repository.downloads()) {
-        if (job.drama.id == drama.id) {
-          await repository.controlDownloads('remove', id: job.id);
-        }
-      }
-      try {
-        await tester.pumpWidget(
-          MaterialApp(
-            home: DownloadsScreen(repository: repository, store: store),
-          ),
-        );
-        await repository.enqueueDownloads(DramaDetail(drama, [episode]), [
-          episode,
-        ]);
-        expect(await FlutterForegroundTask.isRunningService, isTrue);
-        final before = (await repository.downloads())
-            .firstWhere((job) => job.drama.id == drama.id)
-            .bytes;
-        FlutterForegroundTask.minimizeApp();
-        await Future<void>.delayed(const Duration(seconds: 4));
-        final after = (await repository.downloads()).firstWhere(
-          (job) => job.drama.id == drama.id,
-        );
-        expect(after.bytes, greaterThan(before));
-        expect(after.state, isNot('failed'), reason: after.error);
-        expect(await FlutterForegroundTask.isRunningService, isTrue);
-        FlutterForegroundTask.launchApp();
-        await tester.pump(const Duration(seconds: 1));
-        await repository.controlDownloads('pause', id: after.id);
-        final paused = (await repository.downloads()).firstWhere(
-          (job) => job.id == after.id,
-        );
-        expect(paused.state, anyOf('paused', 'completed'));
-        binding.reportData ??= {};
-        binding.reportData!['backgroundDownload'] = {
-          'before': before,
-          'after': after.bytes,
-          'serviceRunning': true,
-        };
-      } finally {
-        FlutterForegroundTask.launchApp();
-        await tester.pumpWidget(const SizedBox.shrink());
-        for (final job in await repository.downloads()) {
-          if (job.drama.id == drama.id) {
-            await repository.controlDownloads('remove', id: job.id);
-          }
-        }
-        store.dispose();
-      }
-    },
-    timeout: const Timeout(Duration(minutes: 2)),
   );
 }

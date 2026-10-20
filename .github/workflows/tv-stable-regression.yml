@@ -1,0 +1,56 @@
+name: TV Stable Regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tv-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Go 1.24.1
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.1'
+
+      - name: Flutter 3.47.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - name: Resolve Flutter dependencies
+        run: flutter pub get
+
+      - name: Build-script regression
+        run: PYTHONPATH=scripts python3 -m unittest scripts.test_app_build -v
+
+      - name: Native source-routing regression
+        working-directory: native
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go test ./core -run 'Test(ParseProviderMirrorDocument|InvalidProviderMirrorDocumentFallsBack|ValidProviderMirrorOriginRejectsUnsafeAddresses|ProviderBaseCandidatesPrefersRememberedThenRemoteThenBuiltin|ProviderURLCandidatesDynamicPreservesPathAndQuery)$' -count=1
+          go test ./bridge -run '^$'
+
+      - name: Whole-project static analysis
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Pinyin regression
+        run: flutter test test/pinyin_test.dart
+
+      - name: TV navigation regression (all sources)
+        run: flutter test --dart-define=ALL_SOURCES=true test/television_test.dart
+
+      - name: TV player remote regression (all sources)
+        run: flutter test --dart-define=ALL_SOURCES=true test/tv_player_remote_test.dart
