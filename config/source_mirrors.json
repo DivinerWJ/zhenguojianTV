@@ -1,16 +1,17 @@
 {
   "version": 1,
-  "ttlSeconds": 21600,
+  "ttlSeconds": 3600,
   "sources": {
     "huangguoai": [
       "https://huangguoai.com",
-      "https://thu.agdkczeyx.cc",
       "https://ttvoij.ediayikma.cc",
       "https://thu.ediayikma.cc",
       "https://pku.ediayikma.cc",
-      "https://fdu.ediayikma.cc"
+      "https://fdu.ediayikma.cc",
+      "https://thu.agdkczeyx.cc"
     ],
     "huangguo-video": [
+      "https://huangguo.video",
       "https://huangguoai.fit"
     ],
     "huangdou": [
