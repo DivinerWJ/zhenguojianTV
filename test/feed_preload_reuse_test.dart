@@ -90,6 +90,7 @@ Future<List<ScriptedPlayer>> _mount(
           key: const ValueKey('feed'),
           repository: repo,
           store: store,
+          sources: const [SourceSite.hongguo],
           embedded: true,
           active: true,
           playerFactory:
@@ -145,11 +146,7 @@ void main() {
     }
     await _pump(tester, 80);
 
-    expect(
-      repo.preloads,
-      isNotEmpty,
-      reason: '推进位置后应触发"下一部"预加载',
-    );
+    expect(repo.preloads, isNotEmpty, reason: '推进位置后应触发"下一部"预加载');
     final preloaded = repo.preloads.last;
     debugPrint('预加载目标 = $preloaded（当前页 = $first）');
 
@@ -166,17 +163,15 @@ void main() {
     await _pump(tester, 120);
 
     final second = current();
-    debugPrint('滑到 = $second；期间 resolve=${repo.resolves} '
-        'release=${repo.releases}');
+    debugPrint(
+      '滑到 = $second；期间 resolve=${repo.resolves} '
+      'release=${repo.releases}',
+    );
 
     expect(second, isNot(first), reason: '应已切换到另一部剧');
 
     // 核心断言：滑过去时**不应**重新解析（预加载已备好）。
-    expect(
-      repo.resolves,
-      isEmpty,
-      reason: '滑到下一部时不应重新解析播放地址（预加载应被复用）',
-    );
+    expect(repo.resolves, isEmpty, reason: '滑到下一部时不应重新解析播放地址（预加载应被复用）');
     // 也不应把刚预载好的会话释放掉。
     expect(
       repo.releases.where((s) => s.startsWith('P-')),
@@ -256,10 +251,6 @@ void main() {
     }
     await _pump(tester, 80);
 
-    expect(
-      repo.preloads,
-      isNotEmpty,
-      reason: '播到 40 秒（时长的 33%）就应开始预载，不该等到过半',
-    );
+    expect(repo.preloads, isNotEmpty, reason: '播到 40 秒（时长的 33%）就应开始预载，不该等到过半');
   });
 }

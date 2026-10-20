@@ -197,6 +197,7 @@ class DuanjuApp extends StatelessWidget {
     this.navigatorKey,
     this.feedPlayerFactory,
     this.feedReady,
+    this.initialTab,
   });
   final AppRepository repository;
   final LocalStore? store;
@@ -208,6 +209,9 @@ class DuanjuApp extends StatelessWidget {
 
   /// 测试用：注入首页假播放器。
   final Player Function()? feedPlayerFactory;
+
+  /// 测试/深链用：直接打开指定主标签；正常启动为空，仍从首页进入。
+  final int? initialTab;
 
   /// 首页是否已就绪（控制开屏页）。为空时不开开屏页（如测试）。
   final ValueNotifier<bool>? feedReady;
@@ -270,6 +274,7 @@ class DuanjuApp extends StatelessWidget {
                     ),
                     repository: repository,
                     store: store!,
+                    initialTab: initialTab,
                     feedPlayerFactory: feedPlayerFactory,
                     onFeedReady: feedReady == null
                         ? null

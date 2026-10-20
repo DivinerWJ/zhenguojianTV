@@ -82,6 +82,7 @@ void main() {
             key: const ValueKey('feed'),
             repository: repo,
             store: store,
+            sources: const [SourceSite.hongguo],
             embedded: true,
             active: true,
             playerFactory: () {
@@ -144,6 +145,7 @@ void main() {
             key: const ValueKey('feed'),
             repository: repo,
             store: store,
+            sources: const [SourceSite.hongguo],
             embedded: true,
             active: true,
             playerFactory: () {
@@ -198,6 +200,7 @@ void main() {
             key: const ValueKey('feed'),
             repository: repo,
             store: store,
+            sources: const [SourceSite.hongguo],
             embedded: true,
             active: true,
             playerFactory: () {

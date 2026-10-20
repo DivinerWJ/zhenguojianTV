@@ -78,6 +78,7 @@ class LocalSnapshot {
         'autoExport',
         'exportPosters',
         'autoUpdateCatalog',
+        'autoPlayOnMobile',
       }.contains(entry.key.split('.').last);
       if (!owns(entry.key) ||
           (boolean ? entry.value is! bool : entry.value is! String)) {

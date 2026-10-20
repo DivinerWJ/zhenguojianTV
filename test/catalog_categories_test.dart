@@ -125,14 +125,13 @@ void main() {
     final store = LocalStore(await SharedPreferences.getInstance());
     addTearDown(store.dispose);
     await store.setSource(source);
-    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));
-    await tester.pumpAndSettle();
-    // 默认打开「首页」，先切到「发现」页。
-    final discover = find.byKey(const ValueKey('bottom-nav-1'));
-    if (discover.evaluate().isNotEmpty) {
-      await tester.tap(discover);
-      await tester.pumpAndSettle();
-    }
+    await tester.pumpWidget(
+      DuanjuApp(repository: repository, store: store, initialTab: 1),
+    );
+    // 首页内部有自动更新/动画等长期状态，不能用无界 pumpAndSettle 当“加载完成”。
+    // 这里的假仓库同步完成目录请求，固定推进几帧即可稳定进入发现页。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
     return store;
   }
 
@@ -192,13 +191,14 @@ void main() {
       repository.pendingComic = pending;
       await choose('AI 漫剧');
       await choose('AI 短剧');
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 500));
       pending.complete(
         CatalogPage(const [
           Drama(id: 'huangguoai:stale', source: 'huangguoai', title: '过期分类结果'),
         ]),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
       expect(find.text('过期分类结果'), findsNothing);
       expect(
         repository.categoryRequests,

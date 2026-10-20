@@ -128,7 +128,13 @@ void main() {
       backup['themeMode'] = 'light';
       final library = (backup['libraries'] as Map)['default'] as Map;
       library['favorites'] = [next.toJson()];
-      library['followStates'] = {};
+      // 收藏改成 next 时，同步快照也必须指向同一剧目；生产代码会拒绝
+      // ‘收藏 next、同步仍是旧剧’这种自相矛盾的备份。保留同步记录而不是
+      // 绕过校验，才能继续验证真正的‘原子快照写入失败不混数据’契约。
+      library.remove('followStates');
+      final sync = library['followSync'] as List;
+      final syncRecord = sync.single as Map;
+      syncRecord['drama'] = next.toJson();
       library['history'] = [
         WatchEntry(
           drama: next,

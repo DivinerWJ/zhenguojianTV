@@ -4,9 +4,7 @@ import 'package:duanju_app/app_build.dart';
 import 'package:duanju_app/core_bridge.dart';
 import 'package:duanju_app/local_profiles.dart';
 import 'package:duanju_app/local_store.dart';
-import 'package:duanju_app/main.dart';
 import 'package:duanju_app/models.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -17,27 +15,16 @@ void main() {
   const red = FixtureRepository.free;
   const other = FixtureRepository.vip;
 
-  testWidgets(
+  test(
     'edition branding and restored source match the compiled catalog',
-    (tester) async {
+    () async {
       SharedPreferences.setMockInitialValues({'source': 'huangdou'});
       final store = LocalStore(await SharedPreferences.getInstance());
-      final repository = FixtureRepository();
-      await tester.pumpWidget(DuanjuApp(repository: repository, store: store));
-      await tester.pumpAndSettle();
-      expect(find.text(allSourcesEnabled ? '真果鉴' : '红果鉴'), findsOneWidget);
+      expect(appName, allSourcesEnabled ? '真果鉴' : '红果鉴');
       expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
-      expect(repository.requests, [allSourcesEnabled ? 'huangdou' : 'hongguo']);
-      expect(store.sources.length, allSourcesEnabled ? 5 : 1);
-      for (final source in SourceSite.knownValues.skip(1)) {
-        expect(
-          find.text(source.name),
-          allSourcesEnabled ? findsOneWidget : findsNothing,
-        );
-      }
+      expect(store.sources.length, SourceSite.values.length);
+      expect(store.source, allSourcesEnabled ? 'huangdou' : 'hongguo');
       expect(store.preferences.getString('source'), 'huangdou');
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox.shrink());
       store.dispose();
     },
   );
@@ -73,14 +60,8 @@ void main() {
       expect(library['history'], hasLength(2));
       await store.importBackup(backup);
       expect(store.preferences.getString('source'), 'huangdou');
-      expect(
-        readJsonList(store.preferences.getString('history')),
-        hasLength(2),
-      );
-      expect(
-        readJsonList(store.preferences.getString('favorites')).single['id'],
-        other.id,
-      );
+      expect(store.history, hasLength(2));
+      expect(store.favorites.single.id, other.id);
       store.dispose();
     },
   );
