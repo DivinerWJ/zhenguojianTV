@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -28,27 +30,35 @@ class AppBottomNavigation extends StatefulWidget {
 
 class _AppBottomNavigationState extends State<AppBottomNavigation> {
   int? _lastTapIndex;
-  DateTime? _lastTapAt;
+  Timer? _doubleTapWindow;
 
   void _handleTap(int index) {
-    final now = DateTime.now();
-    final last = _lastTapAt;
     final doubleTap = widget.onDestinationDoubleTap != null &&
         _lastTapIndex == index &&
-        last != null &&
-        now.difference(last) <= kDoubleTapTimeout;
+        (_doubleTapWindow?.isActive ?? false);
 
     // 第一次点击立即切页，不等待双击识别超时。
     widget.onDestinationSelected(index);
 
+    _doubleTapWindow?.cancel();
     if (doubleTap) {
       _lastTapIndex = null;
-      _lastTapAt = null;
+      _doubleTapWindow = null;
       widget.onDestinationDoubleTap!(index);
       return;
     }
+
     _lastTapIndex = index;
-    _lastTapAt = now;
+    _doubleTapWindow = Timer(kDoubleTapTimeout, () {
+      _lastTapIndex = null;
+      _doubleTapWindow = null;
+    });
+  }
+
+  @override
+  void dispose() {
+    _doubleTapWindow?.cancel();
+    super.dispose();
   }
 
   @override
