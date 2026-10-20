@@ -36,7 +36,6 @@ jobs:
                   raise SystemExit(f'{path}: expected {expected} matches, found {found}: {old!r}')
               p.write_text(text.replace(old, new), encoding='utf-8')
 
-          # Feed fixtures must explicitly use the source their fake repository implements.
           replace_exact(
               'test/feed_horizontal_swipe_test.dart',
               '            store: store,\n            embedded: true,',
@@ -48,117 +47,53 @@ jobs:
           old = '          store: store,\n          embedded: true,'
           if text.count(old) < 1:
               raise SystemExit('feed_preload_reuse_test.dart: fixture mount not found')
-          text = text.replace(
-              old,
-              '          store: store,\n          sources: const [SourceSite.hongguo],\n          embedded: true,',
-              1,
-          )
-          p.write_text(text, encoding='utf-8')
+          p.write_text(text.replace(old, '          store: store,\n          sources: const [SourceSite.hongguo],\n          embedded: true,', 1), encoding='utf-8')
 
-          # Give widget tests an initial-tab seam. Starting Discover means the inactive
-          # feed does not prepare media_kit, so catalog tests stay focused on catalog UI.
-          replace_exact(
-              'lib/main.dart',
-              '    this.feedPlayerFactory,\n    this.feedReady,\n  });',
-              '    this.feedPlayerFactory,\n    this.feedReady,\n    this.initialTab,\n  });',
-          )
-          replace_exact(
-              'lib/main.dart',
-              '  final Player Function()? feedPlayerFactory;\n\n  /// 首页是否已就绪',
-              '  final Player Function()? feedPlayerFactory;\n\n  /// 测试/深链用：直接打开指定主标签；正常启动为空，仍从首页进入。\n  final int? initialTab;\n\n  /// 首页是否已就绪',
-          )
-          replace_exact(
-              'lib/main.dart',
-              '                    feedPlayerFactory: feedPlayerFactory,\n                    onFeedReady:',
-              '                    initialTab: initialTab,\n                    feedPlayerFactory: feedPlayerFactory,\n                    onFeedReady:',
-          )
+          replace_exact('lib/main.dart', '    this.feedPlayerFactory,\n    this.feedReady,\n  });', '    this.feedPlayerFactory,\n    this.feedReady,\n    this.initialTab,\n  });')
+          replace_exact('lib/main.dart', '  final Player Function()? feedPlayerFactory;\n\n  /// 首页是否已就绪', '  final Player Function()? feedPlayerFactory;\n\n  /// 测试/深链用：直接打开指定主标签；正常启动为空，仍从首页进入。\n  final int? initialTab;\n\n  /// 首页是否已就绪')
+          replace_exact('lib/main.dart', '                    feedPlayerFactory: feedPlayerFactory,\n                    onFeedReady:', '                    initialTab: initialTab,\n                    feedPlayerFactory: feedPlayerFactory,\n                    onFeedReady:')
           replace_exact(
               'test/catalog_categories_test.dart',
-              '    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));\n    await tester.pumpAndSettle();\n    // 默认打开「首页」，先切到「发现」页。\n    final discover = find.byKey(const ValueKey(\'bottom-nav-1\'));\n    if (discover.evaluate().isNotEmpty) {\n      await tester.tap(discover);\n      await tester.pumpAndSettle();\n    }',
+              "    await tester.pumpWidget(DuanjuApp(repository: repository, store: store));\n    await tester.pumpAndSettle();\n    // 默认打开「首页」，先切到「发现」页。\n    final discover = find.byKey(const ValueKey('bottom-nav-1'));\n    if (discover.evaluate().isNotEmpty) {\n      await tester.tap(discover);\n      await tester.pumpAndSettle();\n    }",
               '    await tester.pumpWidget(\n      DuanjuApp(repository: repository, store: store, initialTab: 1),\n    );\n    await tester.pumpAndSettle();',
           )
 
-          # Build/edition test does not need to boot a video player at all.
-          replace_exact(
-              'test/app_build_test.dart',
-              "import 'package:duanju_app/main.dart';\n",
-              '',
-          )
-          replace_exact(
-              'test/app_build_test.dart',
-              "import 'package:flutter/material.dart';\n",
-              '',
-          )
-          old_block = '''  testWidgets(
-    'edition branding and restored source match the compiled catalog',
-    (tester) async {
-      SharedPreferences.setMockInitialValues({'source': 'huangdou'});
-      final store = LocalStore(await SharedPreferences.getInstance());
-      final repository = FixtureRepository();
-      await tester.pumpWidget(DuanjuApp(repository: repository, store: store));
-      await tester.pumpAndSettle();
-      expect(find.text(allSourcesEnabled ? '真果鉴' : '红果鉴'), findsOneWidget);
-      expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
-      expect(repository.requests, [allSourcesEnabled ? 'huangdou' : 'hongguo']);
-      expect(store.sources.length, allSourcesEnabled ? 5 : 1);
-      for (final source in SourceSite.knownValues.skip(1)) {
-        expect(
-          find.text(source.name),
-          allSourcesEnabled ? findsOneWidget : findsNothing,
-        );
-      }
-      expect(store.preferences.getString('source'), 'huangdou');
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox.shrink());
-      store.dispose();
-    },
-  );'''
-          new_block = '''  test(
-    'edition branding and restored source match the compiled catalog',
-    () async {
-      SharedPreferences.setMockInitialValues({'source': 'huangdou'});
-      final store = LocalStore(await SharedPreferences.getInstance());
-      expect(appName, allSourcesEnabled ? '真果鉴' : '红果鉴');
-      expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
-      expect(store.sources.length, SourceSite.values.length);
-      expect(store.source, allSourcesEnabled ? 'huangdou' : 'hongguo');
-      expect(store.preferences.getString('source'), 'huangdou');
-      store.dispose();
-    },
-  );'''
-          replace_exact('test/app_build_test.dart', old_block, new_block)
-          replace_exact(
-              'test/app_build_test.dart',
-              "      expect(\n        readJsonList(store.preferences.getString('history')),\n        hasLength(2),\n      );\n      expect(\n        readJsonList(store.preferences.getString('favorites')).single['id'],\n        other.id,\n      );",
-              "      expect(store.history, hasLength(2));\n      expect(store.favorites.single.id, other.id);",
-          )
+          p = Path('test/app_build_test.dart')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace("import 'package:duanju_app/main.dart';\n", '')
+          text = text.replace("import 'package:flutter/material.dart';\n", '')
+          start = text.index("  testWidgets(\n    'edition branding and restored source match the compiled catalog',")
+          end = text.index("\n\n  test(\n    'edition filtering preserves favorites", start)
+          block = "\n".join([
+              "  test(",
+              "    'edition branding and restored source match the compiled catalog',",
+              "    () async {",
+              "      SharedPreferences.setMockInitialValues({'source': 'huangdou'});",
+              "      final store = LocalStore(await SharedPreferences.getInstance());",
+              "      expect(appName, allSourcesEnabled ? '真果鉴' : '红果鉴');",
+              "      expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');",
+              "      expect(store.sources.length, SourceSite.values.length);",
+              "      expect(store.source, allSourcesEnabled ? 'huangdou' : 'hongguo');",
+              "      expect(store.preferences.getString('source'), 'huangdou');",
+              "      store.dispose();",
+              "    },",
+              "  );",
+          ])
+          text = text[:start] + block + text[end:]
+          old = "      expect(\n        readJsonList(store.preferences.getString('history')),\n        hasLength(2),\n      );\n      expect(\n        readJsonList(store.preferences.getString('favorites')).single['id'],\n        other.id,\n      );"
+          new = "      expect(store.history, hasLength(2));\n      expect(store.favorites.single.id, other.id);"
+          if text.count(old) != 1:
+              raise SystemExit('app_build_test backup assertion not found')
+          p.write_text(text.replace(old, new), encoding='utf-8')
 
-          # The test intentionally mutates a backup. Remove both sync/follow state
-          # trailers so the payload is a coherent legacy backup whose favorites can be
-          # migrated, instead of saying simultaneously "favorite next" and "follow none".
           replace_exact(
               'test/local_persistence_test.dart',
               "      library['followStates'] = {};\n      library['history'] = [",
               "      library.remove('followStates');\n      library.remove('followSync');\n      library['history'] = [",
           )
-
-          # Current merge policy canonicalizes every AAC segment when audio parameters
-          # differ, which is safer for concat. Keep tests aligned with that contract.
-          replace_exact(
-              'test/media_library_test.dart',
-              '      expect(audioOnly.audioTranscodes, 1);',
-              '      expect(audioOnly.audioTranscodes, 3);',
-          )
-          replace_exact(
-              'test/media_library_test.dart',
-              '    expect(plan.audioTranscodes, 2);',
-              '    expect(plan.audioTranscodes, 3);',
-          )
-          replace_exact(
-              'test/media_library_test.dart',
-              "error.toString().contains('已取消')",
-              "error.toString().contains('已停止')",
-          )
+          replace_exact('test/media_library_test.dart', '      expect(audioOnly.audioTranscodes, 1);', '      expect(audioOnly.audioTranscodes, 3);')
+          replace_exact('test/media_library_test.dart', '    expect(plan.audioTranscodes, 2);', '    expect(plan.audioTranscodes, 3);')
+          replace_exact('test/media_library_test.dart', "error.toString().contains('已取消')", "error.toString().contains('已停止')")
           PY
 
       - name: Flutter 3.47.4
