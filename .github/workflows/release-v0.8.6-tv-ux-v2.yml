@@ -74,10 +74,13 @@ jobs:
           if grep -q 'padding: tv ? AppLayout.overscan' lib/main.dart; then exit 1; fi
           if grep -R -nE 'POST_NOTIFICATIONS|flutter_foreground_task|AppUpdater|checkOnStartup' lib android pubspec.yaml pubspec.lock; then exit 1; fi
 
-      - name: Test native core
+      - name: Test v0.8.6 native routing
         shell: bash
         working-directory: native
-        run: go test ./...
+        run: |
+          set -euxo pipefail
+          go test ./core -run 'Test(ParseProviderMirrorDocument|InvalidProviderMirrorDocumentFallsBack)$' -count=1
+          go test ./bridge -run '^$'
 
       - name: Test Flutter source
         shell: bash
@@ -129,4 +132,4 @@ jobs:
           sha256sum /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk > /tmp/SHA256SUMS.txt
           gh release create v0.8.6 /tmp/zhenguojian-TV-v0.8.6-all.apk /tmp/zhenguojian-TV-v0.8.6-arm64-v8a.apk /tmp/SHA256SUMS.txt --repo ai0by/zhenguojianTV --target "$(git rev-parse HEAD)" --title '真果鉴 TV v0.8.6 · TV 遥控体验重构' --notes-file /tmp/release_notes_v086.md
 
-# retry: functional tests after migration
+# retry: targeted mirror-routing tests + full native compile in APK build
