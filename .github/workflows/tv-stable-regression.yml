@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          go test ./core -run 'Test(ParseProviderMirrorDocument|InvalidProviderMirrorDocumentFallsBack|ValidProviderMirrorOriginRejectsUnsafeAddresses|ProviderBaseCandidatesPrefersRememberedThenRemoteThenBuiltin|ProviderURLCandidatesDynamicPreservesPathAndQuery)$' -count=1
+          go test ./core -run 'Test(ParseProviderMirrorDocument|InvalidProviderMirrorDocumentFallsBack|ProviderMirrorConfigUsesJsDelivr|ValidProviderMirrorOriginRejectsUnsafeAddresses|ProviderBaseCandidatesPrefersRememberedThenRemoteThenBuiltin|ProviderURLCandidatesDynamicPreservesPathAndQuery)$' -count=1
           go test ./bridge -run '^$'
 
       - name: Whole-project static analysis
@@ -48,6 +48,9 @@ jobs:
 
       - name: Pinyin regression
         run: flutter test test/pinyin_test.dart
+
+      - name: Mobile bottom-navigation latency regression
+        run: flutter test --dart-define=ALL_SOURCES=true test/app_bottom_navigation_test.dart
 
       - name: TV navigation regression (all sources)
         run: flutter test --dart-define=ALL_SOURCES=true test/television_test.dart
