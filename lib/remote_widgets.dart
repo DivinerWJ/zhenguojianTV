@@ -20,7 +20,11 @@ void _revealFocused(BuildContext context) {
   final rect = box.localToGlobal(Offset.zero) & box.size;
   RenderObject? node = box.parent;
   while (node != null) {
-    if (node is RenderAbstractViewport && node is RenderBox) {
+    if (node is RenderBox && RenderAbstractViewport.maybeOf(node) != null) {
+      // 先提升成 RenderBox 再问「是不是视口」。写 `is RenderAbstractViewport
+      // && is RenderBox` 是不行的：两者是并列分支（RenderAbstractViewport 直接
+      // 继承 RenderObject，RenderBox 由 RenderViewport 另行实现），Dart 不会把
+      // 它提升成交集类型，node 会停在 RenderAbstractViewport 上取不到 size。
       final area = node.localToGlobal(Offset.zero) & node.size;
       if (rect.top < area.top || rect.left < area.left) {
         policy = ScrollPositionAlignmentPolicy.keepVisibleAtStart;
