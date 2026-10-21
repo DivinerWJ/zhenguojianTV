@@ -7,12 +7,14 @@ import 'package:media_kit/media_kit.dart';
 import 'app_layout.dart';
 import 'about_credit.dart';
 import 'app_bottom_navigation.dart';
+import 'back_guard.dart';
 import 'core_bridge.dart';
 import 'catalog_filters.dart';
 import 'catalog_browser.dart';
 import 'catalog_auto_updater.dart';
 import 'catalog_sort.dart';
 import 'catalog_sort_sheet.dart';
+import 'display_mode.dart';
 import 'recommendations_screen.dart';
 import 'tv_home.dart';
 import 'vertical_feed_screen.dart';
@@ -23,7 +25,6 @@ import 'local_store.dart';
 import 'lan_screen.dart';
 import 'models.dart';
 import 'remote_widgets.dart';
-import 'tv_dialogs.dart';
 import 'widgets.dart';
 import 'vip_icon.dart';
 import 'settings_screen.dart';
@@ -597,41 +598,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _chooseDisplayMode() async {
-    final selection = await showDialog<String>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('界面模式'),
-        children: [
-          RadioGroup<String>(
-            groupValue: widget.store.displayMode,
-            onChanged: (value) => Navigator.pop(context, value),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final mode in const {
-                  'auto': '自动识别设备',
-                  'television': '电视 / 遥控器',
-                  'standard': '手机 / 电脑',
-                }.entries)
-                  RadioListTile<String>(
-                    value: mode.key,
-                    autofocus: mode.key == widget.store.displayMode,
-                    title: Text(mode.value),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-    if (selection != null && mounted) {
-      await saveUserChange(
-        context,
-        () => widget.store.setDisplayMode(selection),
-      );
-    }
-  }
+  Future<void> _chooseDisplayMode() => chooseDisplayMode(context, widget.store);
 
   /// 电视搜索的「热门搜索」词（0.8.3）。
   ///
@@ -671,12 +638,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// 电视返回键（0.8.1）。
+  /// 电视返回键（0.8.1，0.8.7 改为"再按一次退出"）。
   ///
-  /// 逐层退让，最后才问"是否退出应用"：
-  /// 选择模式 → 退出选择；不在首页 → 回首页；搜索有词 → 清空搜索；
-  /// 都没有 → 弹确认框（电视上误按返回不该直接退到桌面）。
+  /// 逐层退让：选择模式 → 退出选择；不在首页 → 回首页；搜索有词 → 清空搜索；
+  /// 都没有 → 第一次按提示、两秒内再按一次才退出应用。
+  ///
+  /// 0.8.7 不再弹"是否退出"对话框：电视上返回键会先把对话框关掉，
+  /// 下一次返回又被同一条逻辑重新弹出来，用户绕不出去。
   Future<void> _televisionBack() async {
+    if (!_backGuard.claim()) return;
     if (_selectionMode) {
       _cancelSelection();
       return;
@@ -689,28 +659,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _clearSearch();
       return;
     }
-    await _confirmExit();
+    _armExit();
   }
 
-  /// 是否已弹出"退出应用"确认框（防止连续按返回叠出多个对话框）。
-  bool _exitDialogOpen = false;
+  final _backGuard = BackGuard();
+  DateTime? _exitArmedAt;
+  Timer? _exitTimer;
+  static const _exitWindow = Duration(seconds: 2);
 
-  Future<void> _confirmExit() async {
-    if (_exitDialogOpen || !mounted) return;
-    _exitDialogOpen = true;
-    try {
-      final exit = await showTvConfirmDialog(
-        context,
-        title: '退出$appName？',
-        message: '按「确定」退出应用，按「返回」或选「继续观看」留在应用内。',
-        confirmLabel: '退出',
-        cancelLabel: '继续观看',
-      );
-      if (exit && mounted) await SystemNavigator.pop();
-    } finally {
-      _exitDialogOpen = false;
+  void _armExit() {
+    final armed = _exitArmedAt;
+    if (armed != null && DateTime.now().difference(armed) <= _exitWindow) {
+      _exitTimer?.cancel();
+      _exitArmedAt = null;
+      unawaited(SystemNavigator.pop());
+      return;
     }
+    _exitArmedAt = DateTime.now();
+    _exitTimer?.cancel();
+    _exitTimer = Timer(_exitWindow, () => _exitArmedAt = null);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            '再按一次「返回」退出$appName',
+            style: const TextStyle(fontSize: 15),
+          ),
+          duration: _exitWindow,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.fromLTRB(24, 0, 24, 28),
+        ),
+      );
   }
+
+  /// 遥控器返回键的键盘事件入口（部分盒子只发键盘事件，不发系统返回）。
+  void _keyboardBack() => popWithBackGuard(context);
 
   @override
   void initState() {
@@ -762,6 +746,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _autoUpdater.dispose();
     _feedRefresh.dispose();
     _cacheRefreshTimer?.cancel();
+    _exitTimer?.cancel();
     widget.repository.catalogUpdates.removeListener(_metadataChanged);
     _generation++;
     _categoryGeneration++;
@@ -1199,6 +1184,316 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// 电视左侧菜单（0.8.7）。
+  ///
+  /// 顶部栏去掉后，站源、搜索、设置都收进这里：遥控器只要按左键就能
+  /// 在"看什么"和"去哪儿"之间移动，顶部的高度全留给内容。
+  Widget _televisionNav() {
+    final entries = <(IconData, String, int)>[
+      (Icons.smart_display_rounded, '首页', _feedIndex),
+      (Icons.explore_rounded, '发现', _discoverIndex),
+      (Icons.bookmark_rounded, '追剧', _followIndex),
+      (Icons.history_rounded, '最近观看', _historyIndex),
+      if (widget.store.canDownload)
+        (Icons.download_rounded, '下载', _downloadIndex),
+    ];
+    Widget item(
+      IconData icon,
+      String label, {
+      required Key key,
+      required VoidCallback onPressed,
+      bool selected = false,
+      bool autofocus = false,
+    }) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: RemoteButton(
+        key: key,
+        label: label,
+        icon: icon,
+        selected: selected,
+        autofocus: autofocus,
+        onPressed: onPressed,
+      ),
+    );
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(8, 14, 8, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final (index, entry) in entries.indexed)
+            item(
+              entry.$1,
+              entry.$2,
+              key: ValueKey('tv-nav-${entry.$3}'),
+              selected: _tab == entry.$3,
+              autofocus: index == 0,
+              onPressed: () {
+                // 电视没有"双击标签"这个手势：已经在当前页时再按一次 = 刷新剧库。
+                if (_tab == entry.$3) {
+                  if (widget.store.sources.isNotEmpty) _refreshCatalog();
+                  return;
+                }
+                _changeTab(entry.$3);
+              },
+            ),
+          const Divider(height: 18),
+          item(
+            Icons.search_rounded,
+            '搜索',
+            key: const ValueKey('tv-nav-search'),
+            onPressed: () => unawaited(_televisionSearch()),
+          ),
+          if (widget.store.sources.isNotEmpty)
+            item(
+              Icons.live_tv_rounded,
+              _group.name,
+              key: const ValueKey('tv-nav-source'),
+              onPressed: _openSourceSheet,
+            ),
+          item(
+            Icons.settings_rounded,
+            '设置',
+            key: const ValueKey('tv-nav-settings'),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => SettingsScreen(
+                  repository: widget.repository,
+                  store: widget.store,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _appBarActions(
+    BuildContext context,
+    BoxConstraints constraints,
+  ) => [
+    if (_selectionMode) ...[
+      TextButton(
+        key: const ValueKey('clear-catalog-selection'),
+        onPressed: _selectedDramas.isEmpty
+            ? null
+            : () => setState(_selectedDramas.clear),
+        child: const Text('清空'),
+      ),
+      TextButton(
+        key: const ValueKey('cancel-catalog-selection'),
+        onPressed: _cancelSelection,
+        child: const Text('取消'),
+      ),
+    ] else ...[
+      // 0.7.2（XQ-0106）：首页剧类筛选入口。仅"单独红果"时可用。
+      // 0.8.3：电视首页是海报行，剧类筛选只对竖滑流有意义，电视隐藏。
+      if (_tab == _feedIndex)
+        IconButton(
+          key: const ValueKey('feed-genre'),
+          tooltip: _feedGenreEnabled
+              ? '剧类 · $_feedGenreLabel'
+              : '剧类筛选仅红果单独选择时可用',
+          onPressed: _openFeedGenreSheet,
+          color: _feedGenreEnabled && _feedGenre != 'all'
+              ? Theme.of(context).colorScheme.primary
+              : null,
+          icon: const Icon(Icons.theater_comedy_outlined),
+        ),
+      if (_tab == _followIndex)
+        IconButton(
+          key: const ValueKey('follow-lan-sync'),
+          tooltip: '追剧同步',
+          onPressed: () => openLanSync(context),
+          icon: const Icon(Icons.sync_rounded),
+        ),
+      if (_tab == _discoverIndex) ...[
+        if (!_showRecommendations && constraints.maxWidth >= 360)
+          IconButton(
+            tooltip: '排序与筛选 · ${widget.store.catalogView.sort.label}',
+            onPressed: _chooseCatalogView,
+            color:
+                widget.store.catalogView.sort != CatalogSort.source ||
+                    widget.store.catalogView.release.isNotEmpty
+                ? Theme.of(context).colorScheme.primary
+                : null,
+            icon: const Icon(Icons.sort_rounded),
+          ),
+        if (constraints.maxWidth >= 360)
+          IconButton(
+            key: const ValueKey('open-rankings'),
+            tooltip: '榜单',
+            onPressed: widget.store.sources.isEmpty
+                ? null
+                : _openRankings,
+            icon: const Icon(Icons.leaderboard_outlined),
+          ),
+        // 多选下载（0.8.3）：电视上隐藏。
+        //
+        // 电视只适合"挑一部看"，批量下载 20 部短剧是手机/电脑的活；
+        // 而且选择模式的确认按钮在电视上要跨整个内容区去够，容易误触。
+        if (!_showRecommendations &&
+            constraints.maxWidth >= 360 &&
+            widget.store.canDownload &&
+            widget.repository.supportsDownloads)
+          IconButton(
+            key: const ValueKey('select-catalog-dramas'),
+            tooltip: '多选下载',
+            onPressed: () => setState(() => _selectionMode = true),
+            icon: const Icon(Icons.checklist_rounded),
+          ),
+        IconButton(
+          key: const ValueKey('toggle-search'),
+          tooltip: _searchVisible ? '收起搜索' : '搜索',
+          icon: Icon(
+            _searchVisible
+                ? Icons.search_off_rounded
+                : Icons.search_rounded,
+          ),
+          onPressed: _toggleSearch,
+        ),
+      ],
+      if (_tab == _discoverIndex &&
+          !_showRecommendations &&
+          constraints.maxWidth >= 400)
+        RefreshAction(
+          key: const ValueKey('catalog-refresh'),
+          loading:
+              _loading ||
+              _loadingMore ||
+              _categoriesLoading ||
+              _group.sources.any(
+                (source) => _updater.busy(source.id),
+              ),
+          tooltip: '更新剧库',
+          onPressed: widget.store.sources.isEmpty
+              ? null
+              : _refreshCatalog,
+        ),
+      PopupMenuButton<String>(
+        tooltip: '更多',
+        onSelected: (value) {
+          if (value == 'update') {
+            _refreshCatalog();
+          } else if (value == 'sort') {
+            _chooseCatalogView();
+          } else if (value == 'rankings') {
+            _openRankings();
+          } else if (value == 'select') {
+            setState(() => _selectionMode = true);
+          } else if (value == 'sources') {
+            _manageSources();
+          } else if (value == 'settings') {
+            Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => SettingsScreen(
+                  repository: widget.repository,
+                  store: widget.store,
+                ),
+              ),
+            );
+          } else if (value == 'users') {
+            Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => ProfilesScreen(store: widget.store),
+              ),
+            );
+          } else if (value == 'display') {
+            _chooseDisplayMode();
+          } else if (value == 'about') {
+            showAboutDialog(
+              context: context,
+              applicationName: appName,
+              applicationVersion: AppLayout.versionOf(context),
+              applicationIcon: const Icon(
+                Icons.play_circle_filled_rounded,
+                size: 48,
+                color: Color(0xFFFF765F),
+              ),
+              children: [
+                const Text('独立运行，打开即可浏览和播放。观看记录与追剧收藏保存在当前设备。'),
+                const SizedBox(height: 12),
+                // 作者信息（0.2.30 新增，用户要求）：
+                // 名字蓝色可点击，跳转各自 GitHub 页面，并标明身份。
+                const AboutCredit(
+                  name: 'Topkill',
+                  role: '开源项目 guoapp3 原作者',
+                  url: 'https://github.com/Topkill/guoapp3',
+                ),
+                const AboutCredit(
+                  name: '软萌小正太',
+                  role: '原改版与维护',
+                  url: 'https://github.com/kuoluoss/zhenguojian',
+                ),
+                const AboutCredit(
+                  name: 'ai0by',
+                  role: 'TV 版适配与维护',
+                  url: 'https://github.com/ai0by',
+                ),
+                const AboutCredit(
+                  name: '项目仓库',
+                  role: '真果鉴 TV GitHub',
+                  url: 'https://github.com/ai0by/zhenguojianTV',
+                ),
+              ],
+            );
+          }
+        },
+        itemBuilder: (_) => [
+          if (_tab == _discoverIndex &&
+              !_showRecommendations &&
+              constraints.maxWidth < 400)
+            PopupMenuItem(
+              value: 'update',
+              enabled:
+                  widget.store.sources.isNotEmpty &&
+                  !_group.sources.any(
+                    (source) => _updater.busy(source.id),
+                  ),
+              child: const Text('更新剧库'),
+            ),
+          if (_tab == _discoverIndex &&
+              !_showRecommendations &&
+              constraints.maxWidth < 360) ...[
+            const PopupMenuItem(value: 'sort', child: Text('排序与筛选')),
+            const PopupMenuItem(value: 'rankings', child: Text('榜单')),
+            if (widget.store.canDownload &&
+                widget.repository.supportsDownloads)
+              const PopupMenuItem(
+                value: 'select',
+                child: Text('多选下载'),
+              ),
+          ],
+          if (widget.repository.supportsSourceManagement)
+            const PopupMenuItem(
+              value: 'sources',
+              child: Text('站源管理'),
+            ),
+          const PopupMenuItem(value: 'users', child: Text('用户管理')),
+          const PopupMenuItem(
+            value: 'settings',
+            child: Text('设置与备份'),
+          ),
+          // 「界面模式」入口（0.8.0 恢复）。
+          //
+          // 0.2.26 曾隐藏此入口并强制手机版渲染；现恢复 TV 版，
+          // 需要保留手动切换能力：部分电视盒子（定制 launcher、
+          // 投影仪、模拟器）不会上报 leanback / television，
+          // 自动识别失效时用户可在这里强制切到「电视 / 遥控器」。
+          const PopupMenuItem(value: 'display', child: Text('界面模式')),
+          const PopupMenuItem(
+            value: 'about',
+            child: Text('关于$appName'),
+          ),
+        ],
+      ),
+    ],
+    const SizedBox(width: 8),
+  ];
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.store,
@@ -1207,288 +1502,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final television = AppLayout.isTelevision(context);
         final desktop = constraints.maxWidth >= 840;
         final scaffold = Scaffold(
-          appBar: AppBar(
-            toolbarHeight: television ? 64 : null,
-            titleSpacing: 12,
-            title: _selectionMode
-                ? const Text(
-                    '选择短剧',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  )
-                : _tab == _feedIndex || _tab == _discoverIndex
-                ? _sourceMenu()
-                : const Text(appName),
-            actions: [
-              if (_selectionMode) ...[
-                TextButton(
-                  key: const ValueKey('clear-catalog-selection'),
-                  onPressed: _selectedDramas.isEmpty
-                      ? null
-                      : () => setState(_selectedDramas.clear),
-                  child: const Text('清空'),
+          // 0.8.7：电视不要顶部栏。站源/搜索/设置都挪进左侧菜单，
+          // 顶部省下来的高度全给海报和剧集格子。
+          appBar: television
+              ? null
+              : AppBar(
+                  titleSpacing: 12,
+                  title: _selectionMode
+                      ? const Text(
+                          '选择短剧',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        )
+                      : _tab == _feedIndex || _tab == _discoverIndex
+                      ? _sourceMenu()
+                      : const Text(appName),
+                  actions: _appBarActions(context, constraints),
                 ),
-                TextButton(
-                  key: const ValueKey('cancel-catalog-selection'),
-                  onPressed: _cancelSelection,
-                  child: const Text('取消'),
-                ),
-              ] else ...[
-                // 0.7.2（XQ-0106）：首页剧类筛选入口。仅"单独红果"时可用。
-                // 0.8.3：电视首页是海报行，剧类筛选只对竖滑流有意义，电视隐藏。
-                if (_tab == _feedIndex && !television)
-                  IconButton(
-                    key: const ValueKey('feed-genre'),
-                    tooltip: _feedGenreEnabled
-                        ? '剧类 · $_feedGenreLabel'
-                        : '剧类筛选仅红果单独选择时可用',
-                    onPressed: _openFeedGenreSheet,
-                    color: _feedGenreEnabled && _feedGenre != 'all'
-                        ? Theme.of(context).colorScheme.primary
-                        : null,
-                    icon: const Icon(Icons.theater_comedy_outlined),
-                  ),
-                if (_tab == _followIndex)
-                  IconButton(
-                    key: const ValueKey('follow-lan-sync'),
-                    tooltip: '追剧同步',
-                    onPressed: () => openLanSync(context),
-                    icon: const Icon(Icons.sync_rounded),
-                  ),
-                if (_tab == _discoverIndex) ...[
-                  if (!_showRecommendations && constraints.maxWidth >= 360)
-                    IconButton(
-                      tooltip: '排序与筛选 · ${widget.store.catalogView.sort.label}',
-                      onPressed: _chooseCatalogView,
-                      color:
-                          widget.store.catalogView.sort != CatalogSort.source ||
-                              widget.store.catalogView.release.isNotEmpty
-                          ? Theme.of(context).colorScheme.primary
-                          : null,
-                      icon: const Icon(Icons.sort_rounded),
-                    ),
-                  if (constraints.maxWidth >= 360)
-                    IconButton(
-                      key: const ValueKey('open-rankings'),
-                      tooltip: '榜单',
-                      onPressed: widget.store.sources.isEmpty
-                          ? null
-                          : _openRankings,
-                      icon: const Icon(Icons.leaderboard_outlined),
-                    ),
-                  // 多选下载（0.8.3）：电视上隐藏。
-                  //
-                  // 电视只适合"挑一部看"，批量下载 20 部短剧是手机/电脑的活；
-                  // 而且选择模式的确认按钮在电视上要跨整个内容区去够，容易误触。
-                  if (!_showRecommendations &&
-                      !television &&
-                      constraints.maxWidth >= 360 &&
-                      widget.store.canDownload &&
-                      widget.repository.supportsDownloads)
-                    IconButton(
-                      key: const ValueKey('select-catalog-dramas'),
-                      tooltip: '多选下载',
-                      onPressed: () => setState(() => _selectionMode = true),
-                      icon: const Icon(Icons.checklist_rounded),
-                    ),
-                  IconButton(
-                    key: const ValueKey('toggle-search'),
-                    tooltip: _searchVisible ? '收起搜索' : '搜索',
-                    icon: Icon(
-                      _searchVisible
-                          ? Icons.search_off_rounded
-                          : Icons.search_rounded,
-                    ),
-                    onPressed: _toggleSearch,
-                  ),
-                ],
-                if (_tab == _discoverIndex &&
-                    !_showRecommendations &&
-                    constraints.maxWidth >= 400)
-                  RefreshAction(
-                    key: const ValueKey('catalog-refresh'),
-                    loading:
-                        _loading ||
-                        _loadingMore ||
-                        _categoriesLoading ||
-                        _group.sources.any(
-                          (source) => _updater.busy(source.id),
-                        ),
-                    tooltip: '更新剧库',
-                    onPressed: widget.store.sources.isEmpty
-                        ? null
-                        : _refreshCatalog,
-                  ),
-                PopupMenuButton<String>(
-                  tooltip: '更多',
-                  onSelected: (value) {
-                    if (value == 'update') {
-                      _refreshCatalog();
-                    } else if (value == 'sort') {
-                      _chooseCatalogView();
-                    } else if (value == 'rankings') {
-                      _openRankings();
-                    } else if (value == 'select') {
-                      setState(() => _selectionMode = true);
-                    } else if (value == 'sources') {
-                      _manageSources();
-                    } else if (value == 'settings') {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute<void>(
-                          builder: (_) => SettingsScreen(
-                            repository: widget.repository,
-                            store: widget.store,
-                          ),
-                        ),
-                      );
-                    } else if (value == 'users') {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute<void>(
-                          builder: (_) => ProfilesScreen(store: widget.store),
-                        ),
-                      );
-                    } else if (value == 'display') {
-                      _chooseDisplayMode();
-                    } else if (value == 'about') {
-                      showAboutDialog(
-                        context: context,
-                        applicationName: appName,
-                        applicationVersion: AppLayout.versionOf(context),
-                        applicationIcon: const Icon(
-                          Icons.play_circle_filled_rounded,
-                          size: 48,
-                          color: Color(0xFFFF765F),
-                        ),
-                        children: [
-                          const Text('独立运行，打开即可浏览和播放。观看记录与追剧收藏保存在当前设备。'),
-                          const SizedBox(height: 12),
-                          // 作者信息（0.2.30 新增，用户要求）：
-                          // 名字蓝色可点击，跳转各自 GitHub 页面，并标明身份。
-                          const AboutCredit(
-                            name: 'Topkill',
-                            role: '开源项目 guoapp3 原作者',
-                            url: 'https://github.com/Topkill/guoapp3',
-                          ),
-                          const AboutCredit(
-                            name: '软萌小正太',
-                            role: '原改版与维护',
-                            url: 'https://github.com/kuoluoss/zhenguojian',
-                          ),
-                          const AboutCredit(
-                            name: 'ai0by',
-                            role: 'TV 版适配与维护',
-                            url: 'https://github.com/ai0by',
-                          ),
-                          const AboutCredit(
-                            name: '项目仓库',
-                            role: '真果鉴 TV GitHub',
-                            url: 'https://github.com/ai0by/zhenguojianTV',
-                          ),
-                        ],
-                      );
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    if (_tab == _discoverIndex &&
-                        !_showRecommendations &&
-                        constraints.maxWidth < 400)
-                      PopupMenuItem(
-                        value: 'update',
-                        enabled:
-                            widget.store.sources.isNotEmpty &&
-                            !_group.sources.any(
-                              (source) => _updater.busy(source.id),
-                            ),
-                        child: const Text('更新剧库'),
-                      ),
-                    if (_tab == _discoverIndex &&
-                        !_showRecommendations &&
-                        constraints.maxWidth < 360) ...[
-                      const PopupMenuItem(value: 'sort', child: Text('排序与筛选')),
-                      const PopupMenuItem(value: 'rankings', child: Text('榜单')),
-                      if (!television &&
-                          widget.store.canDownload &&
-                          widget.repository.supportsDownloads)
-                        const PopupMenuItem(
-                          value: 'select',
-                          child: Text('多选下载'),
-                        ),
-                    ],
-                    if (widget.repository.supportsSourceManagement)
-                      const PopupMenuItem(
-                        value: 'sources',
-                        child: Text('站源管理'),
-                      ),
-                    const PopupMenuItem(value: 'users', child: Text('用户管理')),
-                    const PopupMenuItem(
-                      value: 'settings',
-                      child: Text('设置与备份'),
-                    ),
-                    // 「界面模式」入口（0.8.0 恢复）。
-                    //
-                    // 0.2.26 曾隐藏此入口并强制手机版渲染；现恢复 TV 版，
-                    // 需要保留手动切换能力：部分电视盒子（定制 launcher、
-                    // 投影仪、模拟器）不会上报 leanback / television，
-                    // 自动识别失效时用户可在这里强制切到「电视 / 遥控器」。
-                    const PopupMenuItem(value: 'display', child: Text('界面模式')),
-                    const PopupMenuItem(
-                      value: 'about',
-                      child: Text('关于$appName'),
-                    ),
-                  ],
-                ),
-              ],
-              const SizedBox(width: 8),
-            ],
-          ),
           body: SafeArea(
             top: false,
             child: Row(
               children: [
                 if (television) ...[
-                  SizedBox(
-                    width: 164,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(8, 24, 8, 12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          for (final entry in [
-                            (Icons.smart_display_rounded, '首页'),
-                            (Icons.explore_rounded, '发现'),
-                            (Icons.bookmark_rounded, '追剧'),
-                            (Icons.history_rounded, '最近观看'),
-                            if (widget.store.canDownload)
-                              (Icons.download_rounded, '下载'),
-                          ].indexed)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 14),
-                              child: RemoteButton(
-                                key: ValueKey('tv-nav-${entry.$1}'),
-                                label: entry.$2.$2,
-                                icon: entry.$2.$1,
-                                selected: _tab == entry.$1,
-                                autofocus: entry.$1 == 0,
-                                onPressed: () {
-                                  // 电视没有"双击标签"这个手势：
-                                  // 已经在首页时再按一次「首页」= 刷新剧库（0.8.3）。
-                                  if (_tab == entry.$1) {
-                                    if (entry.$1 == _feedIndex &&
-                                        widget.store.sources.isNotEmpty) {
-                                      _refreshCatalog();
-                                    }
-                                    return;
-                                  }
-                                  _changeTab(entry.$1);
-                                },
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  SizedBox(width: 132, child: _televisionNav()),
                   const VerticalDivider(width: 1),
                 ] else if (desktop) ...[
                   NavigationRail(
@@ -1533,7 +1569,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   // 直接构建，切换标签时**未选中的页面会被销毁**，切回来时重建，
                   // 于是首页（竖滑流）每次都重新加载、丢失播放进度与滚动位置。
                   //
-                  // 改用 `IndexedStack`：所有页面同时存在于树中，只显示当前一个。
+                  // 改用 `IndexedStack`：所有页面同时存在树中，只显示当前一个。
                   // 这样首页（含播放器）在切标签时保持存活，不再重建。
                   //
                   // 刷新时机改为（用户明确要求）：
@@ -1673,8 +1709,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         );
         if (!television && !_selectionMode) return scaffold;
         return PopScope(
-          // 电视（0.8.1）：所有返回都先交给 `_televisionBack` 逐层退让，
-          // 退到首页且无其它状态时才弹"退出应用"确认框。
+          // 电视（0.8.1）：所有返回都先交给 `_televisionBack` 逐层退让。
           // 手机保持原行为：不在选择模式时直接交给系统退出。
           canPop: !_selectionMode && !television,
           onPopInvokedWithResult: (didPop, result) {
@@ -1683,10 +1718,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           },
           child: CallbackShortcuts(
             bindings: {
-              const SingleActivator(LogicalKeyboardKey.escape): () =>
-                  Navigator.of(context).maybePop(),
-              const SingleActivator(LogicalKeyboardKey.goBack): () =>
-                  Navigator.of(context).maybePop(),
+              const SingleActivator(LogicalKeyboardKey.escape):
+                  _keyboardBack,
+              const SingleActivator(LogicalKeyboardKey.goBack): _keyboardBack,
             },
             child: scaffold,
           ),
@@ -1763,6 +1797,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // 0.8.7：电视没有顶部栏了，榜单/排序/更新并到剧类行右侧。
+              if (television) ...[
+                RemoteButton(
+                  key: const ValueKey('tv-catalog-rankings'),
+                  label: '榜单',
+                  icon: Icons.leaderboard_outlined,
+                  onPressed: widget.store.sources.isEmpty
+                      ? null
+                      : _openRankings,
+                ),
+                const SizedBox(width: 6),
+                RemoteButton(
+                  key: const ValueKey('tv-catalog-sort'),
+                  label: '排序',
+                  icon: Icons.sort_rounded,
+                  onPressed: _chooseCatalogView,
+                ),
+                const SizedBox(width: 6),
+                RemoteButton(
+                  key: const ValueKey('tv-catalog-refresh'),
+                  label: '更新',
+                  icon: Icons.refresh_rounded,
+                  onPressed: widget.store.sources.isEmpty
+                      ? null
+                      : _refreshCatalog,
+                ),
+                const SizedBox(width: 6),
+              ],
               if (_supportsVipFilter)
                 IconButton(
                   tooltip: widget.store.hideVip ? 'VIP：隐藏' : 'VIP：显示',
@@ -2114,7 +2176,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     ScrollController? controller,
     Widget? footer,
   }) {
-    final columns = ((width - 36) / 150).floor().clamp(1, 8);
+    final columns = ((width - 36) / 120).floor().clamp(1, 10);
     final tileWidth = (width - 36 - (columns - 1) * 14) / columns;
     return RemoteGrid(
       key: ValueKey('tv-grid-$key'),
@@ -2219,10 +2281,10 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
             : null,
       ),
       padding: EdgeInsets.fromLTRB(
-        tv ? 24 : 16,
-        tv ? 20 : 14,
-        tv ? 24 : 16,
-        tv ? 18 : 12,
+        tv ? 18 : 16,
+        14,
+        tv ? 18 : 16,
+        tv ? 14 : 12,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -2236,7 +2298,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: tv ? 26 : 17,
+                    fontSize: tv ? 19 : 17,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
@@ -2254,7 +2316,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
                 child: Text(
                   '已选 $selectedCount/$groupCount',
                   style: TextStyle(
-                    fontSize: tv ? 15 : 12,
+                    fontSize: tv ? 13 : 12,
                     fontWeight: FontWeight.w700,
                     color: colors.primary,
                   ),
@@ -2280,7 +2342,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
                 ? '共 ${widget.allSources.length} 个站源，可同时勾选多个聚合浏览'
                 : '可同时勾选多个站源聚合浏览',
             style: TextStyle(
-              fontSize: tv ? 15 : 12,
+              fontSize: 12,
               color: colors.onSurfaceVariant,
             ),
           ),
@@ -2347,7 +2409,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
     final checked = _selected.contains(group.id);
     final entries = group.sources.map((site) => site.entryName).join(' · ');
     return Padding(
-      padding: EdgeInsets.only(bottom: tv ? 10 : 6),
+      padding: EdgeInsets.only(bottom: tv ? 8 : 6),
       child: RemoteTarget(
         key: ValueKey('source-sheet-${group.id}'),
         onPressed: () => _toggle(group.id),
@@ -2358,8 +2420,8 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
             '${checked ? '已选' : '未选'}',
         child: Padding(
           padding: EdgeInsets.symmetric(
-            horizontal: tv ? 12 : 8,
-            vertical: tv ? 12 : 8,
+            horizontal: tv ? 10 : 8,
+            vertical: 8,
           ),
           child: Row(
             children: [
@@ -2375,7 +2437,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: tv ? 19 : 15,
+                        fontSize: 15,
                         fontWeight: FontWeight.w700,
                         color: checked ? colors.primary : colors.onSurface,
                       ),
@@ -2387,7 +2449,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: tv ? 14 : 11.5,
+                          fontSize: tv ? 12 : 11.5,
                           color: colors.onSurfaceVariant,
                         ),
                       ),
@@ -2404,7 +2466,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
 
   Widget _checkBox(bool checked, bool tv) {
     final colors = Theme.of(context).colorScheme;
-    final size = tv ? 30.0 : 22.0;
+    final size = tv ? 24.0 : 22.0;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 120),
       width: size,
@@ -2444,7 +2506,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 16,
+            fontSize: 14,
             fontWeight: FontWeight.w700,
             color: colors.primary,
           ),
@@ -2472,7 +2534,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
       onPressed: onPressed,
       label: label,
       child: Container(
-        height: 52,
+        height: 42,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: filled ? colors.primary : colors.surfaceContainerHighest,
@@ -2484,7 +2546,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 18,
+            fontSize: 15,
             fontWeight: FontWeight.w700,
             color: filled ? colors.onPrimary : colors.onSurface,
           ),

@@ -190,6 +190,9 @@ func TestLegacyPlaybackAndDownloadUseAuthenticatedPlaylistAndSourceKey(t *testin
 }
 
 func TestLegacyDiscoverySkipsFailedHost(t *testing.T) {
+	// apiEndpoint 会读远程镜像候选，先清掉包级缓存，保证只探本用例的 fixture。
+	resetProviderMirrorCaches()
+	t.Cleanup(resetProviderMirrorCaches)
 	d := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/api/app/ping/check" {
 			return nil, errors.New("unexpected request")

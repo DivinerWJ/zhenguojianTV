@@ -270,15 +270,19 @@ func (d *Downloader) doPreparedCatalogRequest(request *http.Request, timeout tim
 	if err != nil && base.Err() == nil {
 		// 用户开了系统代理/VPN 时，代理节点可能连不上国内站源（或出口 IP 被站点限流）。
 		// 此时用同名请求强制直连再试一次，避免"一开代理，站源更新全失败"。
-		if proxy, proxyErr := d.proxyRouter.proxy(request); proxyErr == nil && proxy != nil {
-			cancel()
-			directCtx := context.WithValue(base, forceDirectKey{}, true)
-			if timeout > 0 {
-				var directCancel context.CancelFunc
-				directCtx, directCancel = context.WithTimeout(directCtx, timeout)
-				cancel = directCancel
+		// proxyRouter 在部分构造路径（纯直连场景、单测）里为 nil，这里必须判空，
+		// 否则 nil 接收者调用 proxy() 会直接 panic。
+		if d.proxyRouter != nil {
+			if proxy, proxyErr := d.proxyRouter.proxy(request); proxyErr == nil && proxy != nil {
+				cancel()
+				directCtx := context.WithValue(base, forceDirectKey{}, true)
+				if timeout > 0 {
+					var directCancel context.CancelFunc
+					directCtx, directCancel = context.WithTimeout(directCtx, timeout)
+					cancel = directCancel
+				}
+				response, err = d.client.Do(request.Clone(directCtx))
 			}
-			response, err = d.client.Do(request.Clone(directCtx))
 		}
 	}
 	if err != nil {

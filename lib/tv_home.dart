@@ -137,9 +137,9 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
       ..._categoryRows(),
     ];
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
       itemCount: rows.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 26),
+      separatorBuilder: (_, _) => const SizedBox(height: 18),
       itemBuilder: (_, index) => rows[index],
     );
   }
@@ -151,14 +151,14 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
         if (widget.loading)
           const CircularProgressIndicator(strokeWidth: 3)
         else ...[
-          const Icon(Icons.live_tv_outlined, size: 56, color: Colors.white54),
-          const SizedBox(height: 16),
+          const Icon(Icons.live_tv_outlined, size: 44, color: Colors.white54),
+          const SizedBox(height: 12),
           Text(
             widget.emptyMessage ?? '还没有可播放的内容',
-            style: const TextStyle(fontSize: 18, color: Colors.white70),
+            style: const TextStyle(fontSize: 15, color: Colors.white70),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           RemoteButton(
             label: '重新加载',
             icon: Icons.refresh_rounded,
@@ -182,14 +182,14 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
           label: '开始刷剧，进入竖滑短视频流',
           icon: Icons.play_circle_fill_rounded,
           iconColor: const Color(0xFFFF765F),
-          iconSize: 52,
+          iconSize: 38,
           title: '开始刷剧',
           subtitle: '上下键换剧/集，左右键快进，OK 播放暂停，长按 OK 3 倍速',
           accent: const Color(0xFF3A1F1A),
-          titleSize: 26,
+          titleSize: 20,
         ),
       ),
-      const SizedBox(width: 16),
+      const SizedBox(width: 12),
       Expanded(
         flex: 2,
         child: _heroCard(
@@ -197,13 +197,13 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
           onPressed: widget.onSearch,
           label: '搜索短剧，支持拼音/首字母',
           icon: Icons.search_rounded,
-          iconSize: 40,
+          iconSize: 30,
           title: '搜索',
           subtitle: '剧名或拼音/首字母',
-          titleSize: 22,
+          titleSize: 17,
         ),
       ),
-      const SizedBox(width: 16),
+      const SizedBox(width: 12),
       Expanded(
         flex: 2,
         child: _heroCard(
@@ -211,10 +211,10 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
           onPressed: widget.onBrowse,
           label: '浏览全部短剧',
           icon: Icons.grid_view_rounded,
-          iconSize: 40,
+          iconSize: 30,
           title: '浏览全部',
           subtitle: '按分类、榜单挑片',
-          titleSize: 22,
+          titleSize: 17,
         ),
       ),
     ],
@@ -239,16 +239,16 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
     onPressed: onPressed,
     label: label,
     child: Container(
-      height: 118,
-      padding: const EdgeInsets.symmetric(horizontal: 22),
+      height: 84,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
         color: accent,
       ),
       child: Row(
         children: [
           Icon(icon, size: iconSize, color: iconColor),
-          const SizedBox(width: 16),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -264,13 +264,13 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
                     color: Colors.white,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Text(
                   subtitle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 14,
+                    fontSize: 12,
                     color: Colors.white.withValues(alpha: .62),
                   ),
                 ),
@@ -292,7 +292,7 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
         ? '换个关键词再试，或按「返回」回到首页'
         : '支持子序列：hjdnz / hdz / hnz 都能搜到「黄金大逆转」';
     return ListView(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
       children: [
         Row(
           children: [
@@ -304,7 +304,7 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  fontSize: 22,
+                  fontSize: 17,
                   fontWeight: FontWeight.w800,
                   color: Colors.white,
                 ),
@@ -320,21 +320,21 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
                 label: '清除搜索，返回电视首页',
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 11,
+                    horizontal: 12,
+                    vertical: 7,
                   ),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1C1D22),
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(9),
                   ),
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.close_rounded, size: 18, color: Colors.white),
-                      SizedBox(width: 6),
+                      Icon(Icons.close_rounded, size: 15, color: Colors.white),
+                      SizedBox(width: 5),
                       Text(
                         '清除搜索',
-                        style: TextStyle(fontSize: 15, color: Colors.white),
+                        style: TextStyle(fontSize: 13, color: Colors.white),
                       ),
                     ],
                   ),
@@ -342,19 +342,19 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
               ),
           ],
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
         Text(
           subtitle,
           style: TextStyle(
-            fontSize: 14,
+            fontSize: 12,
             color: Colors.white.withValues(alpha: .6),
           ),
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 14),
         if (items.isNotEmpty)
           Wrap(
-            spacing: 14,
-            runSpacing: 18,
+            spacing: 10,
+            runSpacing: 12,
             children: [
               for (var index = 0; index < items.length; index++)
                 _poster(
@@ -379,11 +379,11 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
     return _section(
       title: '继续观看',
       child: SizedBox(
-        height: _posterRowHeight,
+        height: _posterHeight(context),
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: entries.length,
-          separatorBuilder: (_, _) => const SizedBox(width: 14),
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
           itemBuilder: (_, index) {
             final entry = entries[index];
             final percent = entry.duration <= 0
@@ -412,11 +412,11 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
     title: title,
     onMore: onMore,
     child: SizedBox(
-      height: _posterRowHeight,
+      height: _posterHeight(context),
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: items.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 14),
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
         itemBuilder: (_, index) {
           final drama = items[index];
           return _poster(
@@ -462,7 +462,7 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
-                fontSize: 22,
+                fontSize: 17,
                 fontWeight: FontWeight.w800,
                 color: Colors.white,
               ),
@@ -473,21 +473,37 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
               onPressed: onMore,
               label: '$title，查看全部',
               child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 child: Text(
                   '查看全部',
-                  style: TextStyle(fontSize: 15, color: Colors.white70),
+                  style: TextStyle(fontSize: 13, color: Colors.white70),
                 ),
               ),
             ),
         ],
       ),
-      const SizedBox(height: 12),
+      const SizedBox(height: 8),
       child,
     ],
   );
 
-  static const double _posterRowHeight = 248;
+  static const double _posterWidth = 128;
+  static const double _posterTitleSize = 13;
+  static const double _posterSubtitleSize = 11;
+
+  /// 海报行高度按"封面 2:3 + 两行文字 + 焦点框"反算。
+  ///
+  /// 写死高度会让封面被 `BoxFit.cover` 裁掉上下两端（标题、主演名字都没了），
+  /// 或者反过来比格子高、底部文字被裁。1.45 是 CJK 字体的行高上界。
+  static double _posterHeight(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    return ((_posterWidth - RemoteTarget.chrome) * 1.5 +
+            4 +
+            RemoteTarget.chrome +
+            scaler.scale(_posterTitleSize) * 1.45 +
+            scaler.scale(_posterSubtitleSize) * 1.45)
+        .ceilToDouble();
+  }
 
   Widget _poster({
     required Key key,
@@ -498,8 +514,8 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
     bool autofocus = false,
   }) => SizedBox(
     key: key,
-    width: 158,
-    height: _posterRowHeight,
+    width: _posterWidth,
+    height: _posterHeight(context),
     child: RemoteTarget(
       autofocus: autofocus,
       onPressed: onPressed,
@@ -508,32 +524,35 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                DramaCover(drama: drama, repository: widget.repository),
-                if (progress != null)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: LinearProgressIndicator(
-                      value: progress,
-                      minHeight: 4,
-                      backgroundColor: Colors.black45,
-                      color: const Color(0xFFFF765F),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  DramaCover(drama: drama, repository: widget.repository),
+                  if (progress != null)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 3,
+                        backgroundColor: Colors.black45,
+                        color: const Color(0xFFFF765F),
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           Text(
             drama.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
-              fontSize: 15,
+              fontSize: _posterTitleSize,
               fontWeight: FontWeight.w600,
               color: Colors.white,
             ),
@@ -544,7 +563,7 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 13,
+                fontSize: _posterSubtitleSize,
                 color: Colors.white.withValues(alpha: .55),
               ),
             ),

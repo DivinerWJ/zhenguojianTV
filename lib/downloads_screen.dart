@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_layout.dart';
+import 'back_guard.dart';
 import 'core_bridge.dart';
 import 'download_collections.dart';
 import 'local_store.dart';
@@ -849,12 +850,16 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () =>
-            Navigator.of(context).maybePop(),
+            popWithBackGuard(context),
         const SingleActivator(LogicalKeyboardKey.goBack): () =>
-            Navigator.of(context).maybePop(),
+            popWithBackGuard(context),
       },
       child: Scaffold(
-        appBar: AppBar(title: Text(title), actions: actions),
+        appBar: AppBar(
+          automaticallyImplyLeading: !AppLayout.isTelevision(context),
+          title: Text(title),
+          actions: actions,
+        ),
         body: SafeArea(top: false, child: body),
       ),
     );

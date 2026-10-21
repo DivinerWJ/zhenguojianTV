@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
+
 import 'local_profiles.dart';
 import 'local_store.dart';
 import 'models.dart';
@@ -130,8 +132,10 @@ class _ProfilesScreenState extends State<ProfilesScreen> {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.store,
-    builder: (_, _) => Scaffold(
-      appBar: AppBar(title: Text(widget.locked ? '解锁$appName' : '用户管理')),
+    builder: (context, _) => Scaffold(
+      appBar: AppBar(
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
+        title: Text(widget.locked ? '解锁$appName' : '用户管理')),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 720),
@@ -352,7 +356,9 @@ class _ProfileEditorState extends State<ProfileEditor> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(widget.profile == null ? '添加用户' : '编辑用户')),
+    appBar: AppBar(
+      automaticallyImplyLeading: !AppLayout.isTelevision(context),
+      title: Text(widget.profile == null ? '添加用户' : '编辑用户')),
     body: Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),

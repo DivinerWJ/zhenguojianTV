@@ -161,10 +161,10 @@ func TestHongguoDetailAndPlayableQuality(t *testing.T) {
 	if _, err := parseHongguoAppDetail(result, "700001"); err == nil {
 		t.Fatal("incomplete details accepted")
 	}
-	media, err := selectHongguoAppMedia(map[string]any{"video_list": []any{
-		map[string]any{"main_url": "https://media.example.test/new.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "2160p"}},
-		map[string]any{"main_url": "https://media.example.test/low.mp4", "video_meta": map[string]any{"codec_type": "h264", "definition": "720p"}},
-		map[string]any{"main_url": "https://media.example.test/high.mp4", "video_meta": map[string]any{"codec_type": "hevc", "definition": "1080p"}},
+	media, err := selectHongguoAppVideoList(map[string]any{"video_list": []any{
+		map[string]any{"main_url": "https://media.example.test.qznovelvod.com/new.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "2160p"}},
+		map[string]any{"main_url": "https://media.example.test.qznovelvod.com/low.mp4", "video_meta": map[string]any{"codec_type": "h264", "definition": "720p"}},
+		map[string]any{"main_url": "https://media.example.test.qznovelvod.com/high.mp4", "video_meta": map[string]any{"codec_type": "hevc", "definition": "1080p"}},
 	}})
 	if err != nil || media.Quality != 1080 || !strings.HasSuffix(media.URL, "high.mp4") {
 		t.Fatalf("wrong playable quality: %v", err)

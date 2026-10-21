@@ -365,20 +365,20 @@ class DramaTile extends StatelessWidget {
   final VoidCallback? onLongPress;
 
   static double titleHeight(BuildContext context) =>
-      MediaQuery.textScalerOf(
-        context,
-      ).scale(AppLayout.isTelevision(context) ? 17 : 14) *
-      2.6;
+      MediaQuery.textScalerOf(context).scale(14) * 2.6;
 
   static double subtitleHeight(BuildContext context) =>
-      MediaQuery.textScalerOf(
-        context,
-      ).scale(AppLayout.isTelevision(context) ? 14 : 12) *
-      1.3;
+      MediaQuery.textScalerOf(context).scale(12) * 1.3;
 
-  static double extentFor(BuildContext context, double width) =>
-      (width * 1.5 + 13 + titleHeight(context) + subtitleHeight(context))
-          .ceilToDouble();
+  static double extentFor(BuildContext context, double width) {
+    final chrome = AppLayout.isTelevision(context) ? RemoteTarget.chrome : 0.0;
+    return ((width - chrome) * 1.5 +
+            13 +
+            titleHeight(context) +
+            subtitleHeight(context) +
+            chrome)
+        .ceilToDouble();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -451,10 +451,10 @@ class DramaTile extends StatelessWidget {
               drama.title,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(
+              style: const TextStyle(
                 fontWeight: FontWeight.w600,
                 height: 1.3,
-                fontSize: television ? 17 : 14,
+                fontSize: 14,
               ),
             ),
           ),
@@ -469,7 +469,7 @@ class DramaTile extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: television ? 14 : 12,
+                fontSize: 12,
                 height: 1.3,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),

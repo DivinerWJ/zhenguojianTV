@@ -12,6 +12,7 @@ import 'core_bridge.dart';
 import 'app_layout.dart';
 import 'app_splash.dart';
 import 'app_theme.dart';
+import 'back_guard.dart';
 import 'home_screen.dart';
 import 'local_store.dart';
 import 'profiles_screen.dart';
@@ -70,9 +71,16 @@ class _AppBootstrapState extends State<AppBootstrap>
   @override
   void initState() {
     super.initState();
+    // 新建实例从干净的窗口开始，避免上一次的 180ms 去重窗口吞掉首次返回。
+    entryBackGuard.reset();
     WidgetsBinding.instance.addObserver(this);
     _initialize();
   }
+
+  /// 系统返回（`popRoute`）。与遥控器返回键的键盘事件去重：
+  /// 部分盒子一次按键会同时发出两条，不去重就会"按一次退两级"。
+  @override
+  Future<bool> didPopRoute() async => !entryBackGuard.claim();
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -255,9 +263,16 @@ class DuanjuApp extends StatelessWidget {
                     LogicalKeyboardKey.gameButtonA,
                     includeRepeats: false,
                   ): ActivateIntent(),
-                  SingleActivator(LogicalKeyboardKey.goBack): DismissIntent(),
                 },
-                child: FocusTraversalGroup(child: child!),
+                child: CallbackShortcuts(
+                  bindings: {
+                    const SingleActivator(LogicalKeyboardKey.goBack): () {
+                      if (!entryBackGuard.claim()) return;
+                      navigatorKey?.currentState?.maybePop();
+                    },
+                  },
+                  child: FocusTraversalGroup(child: child!),
+                ),
               ),
             ),
           ),

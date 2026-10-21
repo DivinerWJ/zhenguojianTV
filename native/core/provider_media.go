@@ -35,10 +35,20 @@ func (d *Downloader) providerBaseURL(source string) string {
 		configured, fallback = d.cfg.HongguoURL, hongguoBaseURL
 	case sourceHuangju:
 		configured, fallback = d.cfg.HuangjuURL, huangjuBaseURL
+	case sourceDuanju51:
+		fallback = duanju51BaseURL
 	default:
 		fallback = "https://d2pypzndaqisk.cloudfront.net"
 	}
-	return strings.TrimRight(firstNonEmpty(configured, fallback), "/")
+	if configured != "" {
+		return strings.TrimRight(configured, "/")
+	}
+	// 远程镜像优先于编译进 APK 的内置地址；这里只读缓存，绝不发起网络请求，
+	// 因为 providerBaseURL 会在构造每个地址时被同步调用。
+	if origin := cachedProviderMirrorOrigin(source); origin != "" {
+		return strings.TrimRight(origin, "/")
+	}
+	return strings.TrimRight(fallback, "/")
 }
 
 func providerSourceForURL(raw string) string {
@@ -52,20 +62,23 @@ func providerSourceForURL(raw string) string {
 		return sourceHuangguoAI
 	case host == "huangguo.video" || host == "huangguoai.fit":
 		return sourceHuangguoVideo
-	case host == "tideember.cc" || host == "xqjurgek.top":
+	case huangdouMirrorHost(host):
 		return sourceHuangdou
 	case host == "hongguoduanju.com" || host == "www.hongguoduanju.com":
 		return sourceHongguo
 	case host == "huangju.net" || host == "www.huangju.net" || host == "api.huangju.net":
 		return sourceHuangju
+	case duanju51MirrorHost(host):
+		return sourceDuanju51
 	default:
-		return ""
+		// 远程镜像配置里登记的备用域名（红果、黄剧等站源经常换域名）。
+		return providerSourceForHost(host)
 	}
 }
 
 func (d *Downloader) providerURLCandidates(raw string) []string {
 	source := providerSourceForURL(raw)
-	if source == "" || source == sourceHuangju {
+	if source == "" {
 		return []string{raw}
 	}
 	parsed, _ := url.Parse(raw)
@@ -90,6 +103,25 @@ func (d *Downloader) providerURLCandidates(raw string) []string {
 		add(candidate)
 	}
 	return candidates
+}
+
+// providerPageURL 把章节里保存的页面地址对齐到当前站源基址。
+// 旧任务存的 PageURL 可能是上一代域名，而站源已经换到新镜像；主机不对齐的话
+// 请求会打到已下线/被拦的地址。路径与查询保持不变。
+func (d *Downloader) providerPageURL(raw, source string) string {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return raw
+	}
+	base, err := url.Parse(d.providerBaseURL(source))
+	if err != nil || base.Host == "" || strings.EqualFold(base.Host, parsed.Host) {
+		return raw
+	}
+	if rehosted := rehostProviderURL(parsed, base.Scheme+"://"+base.Host); rehosted != "" {
+		return rehosted
+	}
+	return raw
 }
 
 func (d *Downloader) resolveProviderMedia(ctx context.Context, task Task) (providerMedia, error) {
@@ -145,12 +177,20 @@ func (d *Downloader) resolveProviderMedia(ctx context.Context, task Task) (provi
 	if chapter.PageURL != "" && (chapter.Source == sourceHuangguoAI || chapter.Source == sourceHuangguoVideo) {
 		responses := &playbackResponseURLs{}
 		pageContext := context.WithValue(ctx, playbackResponseURLsKey{}, responses)
-		body, err := d.fetchProviderText(pageContext, chapter.PageURL, media.Referer)
+		// 存量任务里保存的 PageURL 可能指向已经失效或被 WAF 拦下的旧域名
+		// （黄果旧站 huangguo.video 现在直接 404，黄果 AI 又频繁换镜像）。
+		// 先按当前站源基址重新拼接主机，失败再退回原地址，否则换域名之后
+		// 这些老任务会一直播放失败。
+		pageURL := d.providerPageURL(chapter.PageURL, chapter.Source)
+		body, err := d.fetchProviderText(pageContext, pageURL, media.Referer)
+		if err != nil && pageURL != chapter.PageURL {
+			pageURL = chapter.PageURL
+			body, err = d.fetchProviderText(pageContext, pageURL, media.Referer)
+		}
 		if err != nil {
 			return providerMedia{}, err
 		}
-		pageURL := chapter.PageURL
-		if actual, ok := responses.values.Load(chapter.PageURL); ok {
+		if actual, ok := responses.values.Load(pageURL); ok {
 			pageURL = actual.(string)
 		}
 		if chapter.Source == sourceHuangguoAI {

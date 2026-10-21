@@ -181,9 +181,16 @@ func TestNativeCoverRedirectAndBoundedDiskCache(t *testing.T) {
 
 func TestNativeCatalogCacheFreshnessPagingAndRefresh(t *testing.T) {
 	var calls atomic.Int32
+	// 首页（category 为空）会并发抓 nativeAICategories 里的每一个分类，
+	// 所以 fixture 必须放行全部四个路径；只放行 ai-duanju 会让另外三个 404
+	// 把整页拖成失败。各分类返回同一批 id，顺带覆盖跨分类去重。
+	allowed := map[string]bool{}
+	for _, entry := range nativeAICategories {
+		allowed["/api/videos/category/"+entry.ID] = true
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if r.URL.Path != "/api/videos/category/ai-duanju" {
+		if !allowed[r.URL.Path] {
 			t.Error("test must only request synthetic catalog metadata", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -211,11 +218,13 @@ func TestNativeCatalogCacheFreshnessPagingAndRefresh(t *testing.T) {
 		return engine
 	}
 	engine := open()
+	// 一次"首页拉取"= 每个分类各一次上游请求。
+	perFetch := int32(len(nativeAICategories))
 	first, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1})
 	if err != nil || len(first.Items) != 24 || !first.Fresh || !first.HasMore {
 		t.Fatal("first catalog request failed", err, first)
 	}
-	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1}); err != nil || calls.Load() != 1 {
+	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1}); err != nil || calls.Load() != perFetch {
 		t.Fatal("fresh catalog caused another request", err, calls.Load())
 	}
 	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 2}); err != nil {
@@ -226,10 +235,10 @@ func TestNativeCatalogCacheFreshnessPagingAndRefresh(t *testing.T) {
 	if len(cached.Items) != 25 || cached.Page != 2 || cached.HasMore || !cached.Fresh {
 		t.Fatal("cached pagination state did not survive a restart", cached)
 	}
-	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1}); err != nil || calls.Load() != 2 {
+	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1}); err != nil || calls.Load() != perFetch*2 {
 		t.Fatal("restart bypassed fresh disk cache", err, calls.Load())
 	}
-	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1, Force: true}); err != nil || calls.Load() != 3 {
+	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1, Force: true}); err != nil || calls.Load() != perFetch*3 {
 		t.Fatal("manual refresh reused old data", err, calls.Load())
 	}
 	state := engine.catalogStates[sourceHuangguoAI]
@@ -238,7 +247,7 @@ func TestNativeCatalogCacheFreshnessPagingAndRefresh(t *testing.T) {
 	if engine.nativeCached(sourceHuangguoAI).Fresh {
 		t.Fatal("expired catalog is marked fresh")
 	}
-	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1}); err != nil || calls.Load() != 4 {
+	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHuangguoAI, Page: 1}); err != nil || calls.Load() != perFetch*4 {
 		t.Fatal("expired catalog was not updated", err, calls.Load())
 	}
 }

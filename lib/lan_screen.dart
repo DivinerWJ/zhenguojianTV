@@ -4,6 +4,8 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'app_layout.dart';
+
 import 'lan_controller.dart';
 import 'local_store.dart';
 import 'widgets.dart';
@@ -190,7 +192,9 @@ class _LanSyncScreenState extends State<LanSyncScreen> {
       final controlsEnabled =
           !_busy && !_cancelling && !link.syncing && !link.store.locked;
       return Scaffold(
-        appBar: AppBar(title: const Text('追剧同步')),
+        appBar: AppBar(
+          automaticallyImplyLeading: !AppLayout.isTelevision(context),
+          title: const Text('追剧同步')),
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 720),
@@ -938,7 +942,9 @@ class _LanConflicts extends StatelessWidget {
                 )
                 .toList();
       return Scaffold(
-        appBar: AppBar(title: const Text('处理记录冲突')),
+        appBar: AppBar(
+          automaticallyImplyLeading: !AppLayout.isTelevision(context),
+          title: const Text('处理记录冲突')),
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 720),

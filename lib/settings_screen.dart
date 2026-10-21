@@ -10,6 +10,7 @@ import 'core_bridge.dart';
 import 'app_layout.dart';
 import 'app_theme.dart';
 import 'background_downloads.dart';
+import 'display_mode.dart';
 import 'local_store.dart';
 import 'profiles_screen.dart';
 import 'app_build.dart';
@@ -135,8 +136,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.store,
-    builder: (_, _) => Scaffold(
-      appBar: AppBar(title: const Text('设置与备份')),
+    builder: (context, _) => Scaffold(
+      appBar: AppBar(
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
+        title: const Text('设置与备份')),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 720),
@@ -174,6 +177,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 subtitle: Text(AppTheme.label(widget.store.themeMode)),
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: _chooseTheme,
+              ),
+              // 0.8.7：电视版顶部栏去掉后，「界面模式」改从这里切换。
+              ListTile(
+                key: const ValueKey('display-mode-setting'),
+                leading: const Icon(Icons.tv_rounded),
+                title: const Text('界面模式'),
+                subtitle: Text(displayModeLabel(widget.store.displayMode)),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => chooseDisplayMode(context, widget.store),
               ),
               // 电视兼容模式（0.8.3）。
               //
@@ -455,7 +467,9 @@ class _StorageScreenState extends State<StorageScreen> {
   Widget build(BuildContext context) => PopScope(
     canPop: !_busy,
     child: Scaffold(
-      appBar: AppBar(title: const Text('下载目录与空间')),
+      appBar: AppBar(
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
+        title: const Text('下载目录与空间')),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 720),

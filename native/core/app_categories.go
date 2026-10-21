@@ -59,6 +59,8 @@ func validNativeCategory(source, category string) bool {
 		return strings.TrimSpace(category) == category
 	case sourceHuangju:
 		return category == huangjuNewestCategory || validHuangjuID(category) && !strings.HasPrefix(category, "@")
+	case sourceDuanju51:
+		return validDuanju51Category(category)
 	}
 	return false
 }
@@ -76,6 +78,8 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 		return append(all, nativeAICategories...), nil
 	case sourceHuangdou:
 		return all, nil
+	case sourceDuanju51:
+		return append(all, duanju51Categories...), nil
 	}
 	engine.mu.Lock()
 	cached := append([]nativeCategory{}, engine.categoryOptions[source]...)

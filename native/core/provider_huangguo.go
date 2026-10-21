@@ -36,6 +36,22 @@ var (
 	huangguoAIBaseMirrors = []string{"https://huangguoai.com", "https://thu.agdkczeyx.cc", "https://ttvoij.ediayikma.cc", "https://thu.ediayikma.cc", "https://pku.ediayikma.cc", "https://fdu.ediayikma.cc"}
 	huangguoVideoBaseURL  = "https://huangguo.video"
 
+	// 黄豆镜像池与 config/source_mirrors.json 的 huangdou 段保持一致。
+	// 远程配置拉取失败时靠这份内置列表兜底，媒体代理也用它识别 Referer。
+	huangdouBaseMirrors = []string{
+		"https://tideember.cc",
+		"https://xqjurgek.top",
+		"https://iwgsqufx.cc",
+		"https://roufquunbu.cc",
+		"https://ahievheved.cc",
+		"https://momodrift.top",
+		"https://zuzuspot.top",
+		"https://zuzucast.top",
+		"https://glowcanvas.cc",
+		"https://eyeonneb.cc",
+		"https://lzlukvca.cc",
+	}
+
 	huangguoAISlugs     = []string{"recommend", "newest", "ai-duanju", "ai-manju", "ai-huanlian", "ai-mogai", "ranks/hot"}
 	huangguoAITypeNames = map[string]string{"recommend": "精选推荐", "newest": "最近上新", "ai-duanju": "AI成人短剧", "ai-manju": "AI成人漫剧", "ai-huanlian": "AI换脸", "ai-mogai": "AI魔改", "ranks/hot": "排行榜"}
 
@@ -65,6 +81,8 @@ type providerEpisode struct {
 	URL   string
 	Index int
 	HLS   string
+	// Locked 表示该集需要会员/金币，HLS 可能为空或是试看片段。
+	Locked bool
 }
 
 func providerDramaID(source, sourceID string) string {
@@ -86,7 +104,7 @@ func splitProviderDramaID(id string) (source, sourceID string, ok bool) {
 
 func isHuangguoProviderSource(source string) bool {
 	switch canonicalProviderSource(source) {
-	case sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo, sourceHuangju, sourceCloudFront:
+	case sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo, sourceHuangju, sourceDuanju51, sourceCloudFront:
 		return true
 	default:
 		return false
@@ -94,20 +112,26 @@ func isHuangguoProviderSource(source string) bool {
 }
 
 func canonicalProviderSource(source string) string {
-	switch strings.ToLower(strings.TrimSpace(source)) {
+	trimmed := strings.ToLower(strings.TrimSpace(source))
+	switch trimmed {
 	case "huangguo", "huangguoai", "huangguoai.com":
 		return sourceHuangguoAI
 	case "huangguo-video", "huangguo.video", "huangguoai.fit":
 		return sourceHuangguoVideo
-	case "huangdou", "tideember.cc", "xqjurgek.top":
+	case "huangdou":
 		return sourceHuangdou
 	case "hongguo", "hongguoduanju.com":
 		return sourceHongguo
 	case "huangju", "huangju.net", "api.huangju.net":
 		return sourceHuangju
+	case "51duanju", "51短剧", "51dj", "blue.xdrgcewe.cc":
+		return sourceDuanju51
 	case "cloudfront":
 		return sourceCloudFront
 	default:
+		if huangdouMirrorHost(trimmed) {
+			return sourceHuangdou
+		}
 		return strings.TrimSpace(source)
 	}
 }
@@ -287,9 +311,11 @@ func (d *Downloader) fetchHuangguoVideoDetail(ctx context.Context, sourceID stri
 	if !strings.HasPrefix(detailPath, "series/") && !strings.HasPrefix(detailPath, "video/") {
 		detailPath = "series/" + detailPath
 	}
-	detailURL := strings.TrimRight(huangguoVideoBaseURL, "/") + "/" + detailPath
-	// 与 AI 详情一致：多镜像候选时并行竞速，避免串行等待。
-	body, err := d.fetchProviderTextRacing(ctx, detailURL, huangguoVideoBaseURL+"/")
+	// 与 AI 详情一致：走 providerBaseURL，让远程镜像配置对黄果旧站同样生效。
+	baseURL := d.providerBaseURL(sourceHuangguoVideo)
+	detailURL := strings.TrimRight(baseURL, "/") + "/" + detailPath
+	// 多镜像候选时并行竞速，避免串行等待。
+	body, err := d.fetchProviderTextRacing(ctx, detailURL, baseURL+"/")
 	if err != nil {
 		return Drama{}, nil, err
 	}
@@ -357,7 +383,7 @@ func (d *Downloader) fetchProviderText(ctx context.Context, rawURL, referer stri
 			tried++
 			if attempt > 1 {
 				select {
-				case <-time.After(time.Duration(attempt) * time.Second):
+				case <-time.After(providerRetryDelay(attempt - 1)):
 				case <-ctx.Done():
 					return "", ctx.Err()
 				}

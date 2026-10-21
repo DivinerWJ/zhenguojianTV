@@ -9,18 +9,14 @@ import (
 
 func withProviderMirrorCacheForTest(t *testing.T, sources map[string][]string) {
 	t.Helper()
+	// 先清空再写入：镜像缓存是包级变量，上一个用例残留的域名会混进候选列表，
+	// 造成单跑通过、全量失败。用例结束后同样恢复干净状态。
+	resetProviderMirrorCaches()
 	providerMirrorCache.Lock()
-	oldExpires := providerMirrorCache.expires
-	oldSources := providerMirrorCache.sources
 	providerMirrorCache.sources = sources
 	providerMirrorCache.expires = time.Now().Add(time.Hour)
 	providerMirrorCache.Unlock()
-	t.Cleanup(func() {
-		providerMirrorCache.Lock()
-		providerMirrorCache.expires = oldExpires
-		providerMirrorCache.sources = oldSources
-		providerMirrorCache.Unlock()
-	})
+	t.Cleanup(resetProviderMirrorCaches)
 }
 
 func TestValidProviderMirrorOriginRejectsUnsafeAddresses(t *testing.T) {

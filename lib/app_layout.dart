@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 
 export 'app_build.dart';
 
-const appVersion = '0.8.6';
+const appVersion = '0.8.7';
 
 ThemeData televisionTheme(ThemeData theme) {
   final colors = theme.colorScheme;
@@ -17,10 +17,13 @@ ThemeData televisionTheme(ThemeData theme) {
     (states) =>
         states.contains(WidgetState.focused) ? colors.primaryContainer : null,
   );
+  // 0.8.7：电视控件整体收小一档。原来 52×48 / 18pt 是按 10 英尺视距
+  // 放大的，但 720p 盒子只有 540~720 逻辑高度，一行海报加标题就顶掉半屏，
+  // 列表里一屏看不到几张卡。
   final button = ButtonStyle(
     side: focusSide,
-    minimumSize: const WidgetStatePropertyAll(Size(52, 48)),
-    textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 18)),
+    minimumSize: const WidgetStatePropertyAll(Size(40, 36)),
+    textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 15)),
   );
   return theme.copyWith(
     focusColor: colors.primaryContainer,
@@ -41,27 +44,27 @@ ThemeData televisionTheme(ThemeData theme) {
     // 0.8.1 电视样式：播放器进度条在 10 英尺外要看得见，
     // 轨道加粗、滑块与焦点光圈放大（遥控器可把焦点移到进度条上）。
     sliderTheme: theme.sliderTheme.copyWith(
-      trackHeight: 6,
+      trackHeight: 5,
       activeTrackColor: colors.primary,
       inactiveTrackColor: colors.onSurface.withValues(alpha: .24),
       thumbColor: colors.primary,
-      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 9),
-      overlayShape: const RoundSliderOverlayShape(overlayRadius: 22),
+      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+      overlayShape: const RoundSliderOverlayShape(overlayRadius: 18),
     ),
     progressIndicatorTheme: theme.progressIndicatorTheme.copyWith(
-      strokeWidth: 5,
+      strokeWidth: 4,
       color: colors.primary,
     ),
     dialogTheme: theme.dialogTheme.copyWith(
       backgroundColor: theme.colorScheme.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
     ),
     tooltipTheme: theme.tooltipTheme.copyWith(
-      textStyle: const TextStyle(fontSize: 14),
+      textStyle: const TextStyle(fontSize: 13),
     ),
     chipTheme: theme.chipTheme.copyWith(
-      labelStyle: const TextStyle(fontSize: 15),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      labelStyle: const TextStyle(fontSize: 13),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
     ),
   );
 }

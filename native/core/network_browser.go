@@ -22,24 +22,32 @@ type browserHTTPClient interface {
 }
 
 type huangguoBrowserTransport struct {
-	base      http.RoundTripper
-	router    *proxyRouter
-	host      string
-	insecure  bool
-	record    func(diagnosticEvent)
-	mu        sync.Mutex
-	clients   map[string]browserHTTPClient
-	newClient func(string) (browserHTTPClient, error)
+	base   http.RoundTripper
+	router *proxyRouter
+	host   string
+	// configured 是显式配置的黄果旧站地址（自建镜像、本地联调）。
+	// 只认用户配置，不认远程镜像缓存，避免把只需要普通请求的站点
+	// （例如 huangguoai.fit）也套上浏览器指纹客户端。
+	configured string
+	insecure   bool
+	record     func(diagnosticEvent)
+	mu         sync.Mutex
+	clients    map[string]browserHTTPClient
+	newClient  func(string) (browserHTTPClient, error)
 }
 
 func newHuangguoBrowserTransport(base http.RoundTripper, downloader *Downloader) *huangguoBrowserTransport {
 	// 浏览器指纹传输只服务旧站 huangguo.video（当时需要过 Cloudflare 与预览凭证）。
 	// 黄果剧场（huangguoai.fit）改用普通请求即可，实测浏览器指纹客户端反而全部超时。
-	configured, _ := url.Parse("https://huangguo.video")
 	transport := &huangguoBrowserTransport{
-		base: base, router: downloader.proxyRouter, host: configured.Host,
+		base: base, router: downloader.proxyRouter, host: "huangguo.video",
 		insecure: downloader.cfg.InsecureTLS, record: downloader.recordDiagnostic,
 		clients: make(map[string]browserHTTPClient),
+	}
+	// 用户显式配置了旧站地址时必须同样走指纹客户端：否则会退回普通 client，
+	// 既过不了 Cloudflare，也连不上自签证书的镜像/联调站点。
+	if configured, err := url.Parse(strings.TrimSpace(downloader.cfg.HuangguoVideoURL)); err == nil && configured.Host != "" {
+		transport.configured = strings.ToLower(configured.Host)
 	}
 	transport.newClient = transport.createClient
 	return transport
@@ -48,7 +56,9 @@ func newHuangguoBrowserTransport(base http.RoundTripper, downloader *Downloader)
 func (transport *huangguoBrowserTransport) matches(request *http.Request) bool {
 	return (request.Method == http.MethodGet || request.Method == http.MethodHead) &&
 		(request.URL.Scheme == "http" || request.URL.Scheme == "https") &&
-		(strings.EqualFold(request.URL.Host, transport.host) || strings.EqualFold(request.URL.Hostname(), "huangguo.video"))
+		(strings.EqualFold(request.URL.Host, transport.host) ||
+			strings.EqualFold(request.URL.Hostname(), "huangguo.video") ||
+			transport.configured != "" && strings.EqualFold(request.URL.Host, transport.configured))
 }
 
 func (transport *huangguoBrowserTransport) createClient(proxy string) (browserHTTPClient, error) {

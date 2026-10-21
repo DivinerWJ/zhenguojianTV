@@ -7,8 +7,8 @@ class SourceSite {
   final String id;
   final String name;
   final String description;
-  bool get onlineSearch => id == 'hongguo' || id == 'huangju';
-  bool get pagedSearch => id == 'huangju';
+  bool get onlineSearch => id == 'hongguo' || id == 'huangju' || id == '51duanju';
+  bool get pagedSearch => id == 'huangju' || id == '51duanju';
   bool get searchSuggestions => id == 'hongguo';
   String get groupId => switch (id) {
     'huangguo-video' || 'huangguoai' || 'cloudfront' => 'huangguo',
@@ -27,6 +27,7 @@ class SourceSite {
     hongguo,
     SourceSite('huangdou', '黄豆', '精选短剧'),
     SourceSite('huangju', '黄剧', '热门 · 最新 · 分类短剧'),
+    SourceSite('51duanju', '51短剧', '首页 · 榜单 · 剧场'),
     SourceSite('huangguo-video', '黄果剧场', '视频剧集'),
     SourceSite('huangguoai', '黄果 AI', 'AI 短剧'),
     SourceSite('cloudfront', '黄果旧版', '旧 API 剧库'),

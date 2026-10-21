@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
+
 import 'core_bridge.dart';
 import 'download_preferences.dart';
 import 'local_store.dart';
@@ -15,7 +17,9 @@ class DownloadPreferencesScreen extends StatelessWidget {
     builder: (context, _) {
       final preferences = store.downloadPreferences;
       return Scaffold(
-        appBar: AppBar(title: const Text('下载偏好')),
+        appBar: AppBar(
+          automaticallyImplyLeading: !AppLayout.isTelevision(context),
+          title: const Text('下载偏好')),
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 680),
@@ -179,6 +183,7 @@ class _ResourceSettingsScreenState extends State<ResourceSettingsScreen> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
+      automaticallyImplyLeading: !AppLayout.isTelevision(context),
       title: const Text('网络与资源'),
       actions: [
         TextButton(

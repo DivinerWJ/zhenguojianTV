@@ -61,6 +61,10 @@ func legacyFixtureLogin(t *testing.T, request *http.Request) {
 }
 
 func TestLegacyAnonymousCatalogAndSessionReuse(t *testing.T) {
+	// 远程镜像缓存是包级变量、TTL 一小时：前序用例抓到的真实镜像会改变
+	// 本用例的候选域名判定，导致单跑通过、全量失败。
+	resetProviderMirrorCaches()
+	t.Cleanup(resetProviderMirrorCaches)
 	var loginCalls, scriptCalls atomic.Int32
 	transport := sourceFixtureTransport(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {

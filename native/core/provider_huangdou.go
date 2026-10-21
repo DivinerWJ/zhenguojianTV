@@ -137,7 +137,7 @@ func (d *Downloader) resolveHuangdouPlayback(ctx context.Context, client *huangd
 }
 
 func (c *huangdouAPIClient) call(ctx context.Context, path string, data map[string]any, out *any) error {
-	builtins := []string{c.host, huangdouBaseURL, "https://xqjurgek.top"}
+	builtins := append([]string{c.host}, huangdouBaseMirrors...)
 	hosts := c.d.providerBaseCandidates(ctx, sourceHuangdou, builtins)
 	if len(hosts) == 0 {
 		hosts = builtins
@@ -184,6 +184,19 @@ func isHuangdouAccessError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func huangdouMirrorHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, origin := range huangdouBaseMirrors {
+		if strings.TrimPrefix(origin, "https://") == host {
+			return true
+		}
+	}
+	return false
 }
 
 func huangdouPreviewOnly(data map[string]any, media, host string) bool {

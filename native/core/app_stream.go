@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -209,6 +210,16 @@ func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStr
 	return strings.Join(output, "\n"), nil
 }
 
+// looksLikePlaylist 只看正文开头的 #EXTM3U 标记，用来补 Content-Type 判不出来的
+// m3u8。传入的可以是完整正文，也可以只是预读到的前若干字节。
+func looksLikePlaylist(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	text := strings.TrimSpace(strings.TrimPrefix(string(data), "\ufeff"))
+	return strings.HasPrefix(text, "#EXTM3U")
+}
+
 func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		writer.WriteHeader(http.StatusMethodNotAllowed)
@@ -248,7 +259,7 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 		asset.data = nil
 	}
 	if len(asset.data) > 0 {
-		if strings.Contains(asset.contentType, "mpegurl") {
+		if strings.Contains(asset.contentType, "mpegurl") || looksLikePlaylist(asset.data) {
 			body, err := stream.nativeRewrite(parts[0], session, string(asset.data), asset.address)
 			if err != nil {
 				http.Error(writer, err.Error(), http.StatusBadGateway)
@@ -273,7 +284,9 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 		return
 	}
 	upstream.Header.Set("User-Agent", userAgent)
-	upstream.Header.Set("Referer", session.referer)
+	if session.referer != "" {
+		upstream.Header.Set("Referer", session.referer)
+	}
 	for _, name := range []string{"Range", "If-Range"} {
 		if value := request.Header.Get(name); value != "" {
 			upstream.Header.Set(name, value)
@@ -296,14 +309,24 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	if response.Request != nil && response.Request.URL != nil {
 		finalURL = response.Request.URL
 	}
-	playlist := strings.Contains(asset.contentType, "mpegurl") || strings.Contains(contentType, "mpegurl") || strings.HasSuffix(strings.ToLower(finalURL.Path), ".m3u8")
-	if playlist && request.Method == http.MethodHead {
+	playlistHint := strings.Contains(asset.contentType, "mpegurl") || strings.Contains(contentType, "mpegurl") || strings.HasSuffix(strings.ToLower(finalURL.Path), ".m3u8")
+	// 上游镜像常把 m3u8 以 application/octet-stream 返回、地址也不带扩展名，
+	// 只靠 Content-Type / 后缀会漏判。漏判后相对分片地址不会被改写成代理地址，
+	// 播放会直接断，所以这里再嗅探正文开头的 #EXTM3U 标记。
+	var buffered *bufio.Reader
+	if request.Method == http.MethodGet {
+		buffered = bufio.NewReaderSize(response.Body, 64<<10)
+		if head, _ := buffered.Peek(64); looksLikePlaylist(head) {
+			playlistHint = true
+		}
+	}
+	if playlistHint && request.Method == http.MethodHead {
 		writer.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		writer.WriteHeader(http.StatusOK)
 		return
 	}
-	if playlist && request.Method == http.MethodGet {
-		body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20+1))
+	if playlistHint && request.Method == http.MethodGet {
+		body, err := io.ReadAll(io.LimitReader(buffered, 4<<20+1))
 		if err != nil || len(body) > 4<<20 {
 			http.Error(writer, "播放列表过大或读取失败", http.StatusBadGateway)
 			return
@@ -329,6 +352,11 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	}
 	writer.WriteHeader(response.StatusCode)
 	if request.Method == http.MethodGet {
-		_, _ = io.Copy(writer, response.Body)
+		// buffered 已预读过开头，必须从它继续读，否则会丢字节。
+		body := io.Reader(response.Body)
+		if buffered != nil {
+			body = buffered
+		}
+		_, _ = io.Copy(writer, body)
 	}
 }

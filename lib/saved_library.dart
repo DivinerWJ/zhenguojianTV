@@ -230,9 +230,9 @@ class _SavedLibraryState extends State<SavedLibrary> {
       return LayoutBuilder(
         builder: (context, constraints) {
           if (AppLayout.isTelevision(context)) {
-            final columns = ((constraints.maxWidth - 36) / 150).floor().clamp(
+            final columns = ((constraints.maxWidth - 36) / 120).floor().clamp(
               1,
-              8,
+              10,
             );
             final tileWidth =
                 (constraints.maxWidth - 36 - (columns - 1) * 14) / columns;
@@ -253,8 +253,7 @@ class _SavedLibraryState extends State<SavedLibrary> {
                           ),
                           itemKeys: items.map((item) => item.id).toList(),
                           columns: columns,
-                          itemExtent:
-                              DramaTile.extentFor(context, tileWidth - 14) + 14,
+                          itemExtent: DramaTile.extentFor(context, tileWidth),
                           itemBuilder: (_, index, node, onFocus) => _tile(
                             items[index],
                             focusNode: node,

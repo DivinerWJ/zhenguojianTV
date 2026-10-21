@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
+
 import 'catalog_filters.dart';
 import 'core_bridge.dart';
 import 'detail_screen.dart';
@@ -243,7 +245,9 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
     );
     if (widget.embedded) return content;
     return Scaffold(
-      appBar: AppBar(title: const Text('红果推荐'), actions: [refresh]),
+      appBar: AppBar(
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
+        title: const Text('红果推荐'), actions: [refresh]),
       body: SafeArea(top: false, child: content),
     );
   }

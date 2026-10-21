@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
+
 import 'models.dart';
 import 'download_preferences.dart';
 import 'episode_browser.dart';
@@ -64,6 +66,7 @@ class _DownloadPickerState extends State<DownloadPicker> {
     );
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
         title: const Text('下载选集'),
         actions: [
           TextButton(

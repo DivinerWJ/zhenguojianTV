@@ -1,10 +1,37 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import 'app_layout.dart';
 import 'search_input.dart';
 import 'tv_keyboard.dart';
 
 import 'package:flutter/services.dart';
+
+/// 把获得焦点的控件滚进可视区域（0.8.7）。
+///
+/// `Scrollable.ensureVisible` 默认的对齐方式 `keepVisibleAtEnd` 只适合
+/// "往下 / 往右"走：焦点在视口上方时，它把控件对齐到视口**底部**，
+/// 遥控器从列表底部往上一格就滚不动。这里先看控件落在哪一层视口的
+/// 哪一侧，再决定用 `keepVisibleAtStart` 还是 `keepVisibleAtEnd`。
+void _revealFocused(BuildContext context) {
+  final box = context.findRenderObject();
+  if (box is! RenderBox || !box.attached || !box.hasSize) return;
+  var policy = ScrollPositionAlignmentPolicy.keepVisibleAtEnd;
+  final rect = box.localToGlobal(Offset.zero) & box.size;
+  RenderObject? node = box.parent;
+  while (node != null) {
+    if (node is RenderAbstractViewport && node is RenderBox) {
+      final area = node.localToGlobal(Offset.zero) & node.size;
+      if (rect.top < area.top || rect.left < area.left) {
+        policy = ScrollPositionAlignmentPolicy.keepVisibleAtStart;
+        break;
+      }
+      if (rect.bottom > area.bottom || rect.right > area.right) break;
+    }
+    node = node.parent;
+  }
+  Scrollable.ensureVisible(context, alignmentPolicy: policy);
+}
 
 /// 「切换站源」胶囊入口（0.8.2）。
 ///
@@ -42,14 +69,14 @@ class SourceSwitchPill extends StatelessWidget {
     final pill = Container(
       // 用 minHeight + 内边距而不是固定 height：系统字体放大（textScale 2.0）
       // 时固定高度会把标题裁掉，minHeight 能自然长高。
-      constraints: BoxConstraints(minHeight: tv ? 52 : 40),
+      constraints: const BoxConstraints(minHeight: 40),
       padding: EdgeInsets.symmetric(
-        horizontal: tv ? 14 : 10,
-        vertical: tv ? 6 : 4,
+        horizontal: tv ? 12 : 10,
+        vertical: tv ? 5 : 4,
       ),
       decoration: BoxDecoration(
         color: colors.surfaceContainerHighest.withValues(alpha: tv ? .62 : .78),
-        borderRadius: BorderRadius.circular(tv ? 14 : 12),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: colors.outlineVariant.withValues(alpha: .55),
           width: 1,
@@ -60,34 +87,34 @@ class SourceSwitchPill extends StatelessWidget {
         children: [
           Icon(
             icon ?? (tv ? Icons.live_tv_rounded : Icons.dns_rounded),
-            size: tv ? 22 : 17,
+            size: tv ? 18 : 17,
             color: enabled ? colors.primary : colors.onSurfaceVariant,
           ),
-          SizedBox(width: tv ? 10 : 7),
+          SizedBox(width: tv ? 8 : 7),
           Flexible(
             child: Text(
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: tv ? 20 : 16,
+              style: const TextStyle(
+                fontSize: 16,
                 fontWeight: FontWeight.w800,
               ),
             ),
           ),
           // 多站源时给出数量，避免「黄果」被误认为只有一个入口。
           if (tv && count > 1) ...[
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
               decoration: BoxDecoration(
                 color: colors.primary.withValues(alpha: .16),
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(7),
               ),
               child: Text(
                 '$count 源',
                 style: TextStyle(
-                  fontSize: 13,
+                  fontSize: 11,
                   fontWeight: FontWeight.w700,
                   color: colors.primary,
                 ),
@@ -98,7 +125,7 @@ class SourceSwitchPill extends StatelessWidget {
             const SizedBox(width: 2),
             Icon(
               Icons.expand_more_rounded,
-              size: tv ? 26 : 20,
+              size: 20,
               color: colors.onSurfaceVariant,
             ),
           ],
@@ -132,6 +159,13 @@ class RemoteTarget extends StatefulWidget {
     this.label,
     this.accent,
   });
+
+  /// 焦点框自身占掉的额外空间（四边各 4 的 padding）。
+  ///
+  /// 网格的 `itemExtent` 必须把它算进去，否则内容比格子高 8 像素，
+  /// 卡片底部的标题/集数会被裁掉。
+  static const double chrome = 8;
+
   final Widget child;
   final VoidCallback? onPressed;
   final FocusNode? focusNode;
@@ -194,12 +228,7 @@ class _RemoteTargetState extends State<RemoteTarget> {
         if (focused) {
           widget.onFocus?.call();
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && _focused) {
-              Scrollable.ensureVisible(
-                context,
-                alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
-              );
-            }
+            if (mounted && _focused) _revealFocused(context);
           });
         }
       },
@@ -280,17 +309,20 @@ class RemoteButton extends StatelessWidget {
     focusNode: focusNode,
     label: label,
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (icon != null) ...[Icon(icon, size: 22), const SizedBox(width: 8)],
+          if (icon != null) ...[
+            Icon(icon, size: 18),
+            const SizedBox(width: 7),
+          ],
           Text(
             label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 18,
+              fontSize: 15,
               color: onPressed == null
                   ? Theme.of(context).disabledColor
                   : Theme.of(context).colorScheme.onSurface,
@@ -354,12 +386,12 @@ class RemoteOptionSheet extends StatelessWidget {
             title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           for (var index = 0; index < options.length; index++)
             Padding(
-              padding: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.only(bottom: 8),
               child: RemoteTarget(
                 key: ValueKey('$keyPrefix-${options[index].$1}'),
                 autofocus: index == firstEnabled,
@@ -368,12 +400,12 @@ class RemoteOptionSheet extends StatelessWidget {
                     : null,
                 label: options[index].$2,
                 child: Container(
-                  height: 52,
+                  height: 42,
                   alignment: Alignment.centerLeft,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
                   decoration: BoxDecoration(
                     color: colors.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(color: colors.outlineVariant, width: 1),
                   ),
                   child: Text(
@@ -381,7 +413,7 @@ class RemoteOptionSheet extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: 15,
                       fontWeight: FontWeight.w600,
                       color: options[index].$3
                           ? colors.onSurface
@@ -398,16 +430,16 @@ class RemoteOptionSheet extends StatelessWidget {
               onPressed: () => Navigator.of(context).pop(),
               label: cancelLabel!,
               child: Container(
-                height: 52,
+                height: 42,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: colors.outlineVariant, width: 1),
                 ),
                 child: Text(
                   cancelLabel!,
                   style: TextStyle(
-                    fontSize: 18,
+                    fontSize: 15,
                     color: colors.onSurfaceVariant,
                   ),
                 ),
@@ -638,15 +670,15 @@ class RemoteEpisodeButton extends StatelessWidget {
               '$number',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 20),
+              style: const TextStyle(fontSize: 16),
             ),
           ),
           if (vip) ...[
-            const SizedBox(width: 4),
+            const SizedBox(width: 3),
             Icon(
               Icons.workspace_premium_rounded,
               color: Theme.of(context).colorScheme.tertiary,
-              size: 18,
+              size: 14,
             ),
           ],
         ],
@@ -743,10 +775,10 @@ class _TelevisionSearchDialogState extends State<TelevisionSearchDialog> {
     final colors = Theme.of(context).colorScheme;
     return AlertDialog(
       // 电视过扫描：四周留够，避免对话框边缘被切掉。
-      insetPadding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
-      title: Text(widget.title),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+      title: Text(widget.title, style: const TextStyle(fontSize: 19)),
       content: SizedBox(
-        width: 760,
+        width: 620,
         child: ConstrainedBox(
           // 720p 盒子也要放得下：内容超出时滚动，而不是撑破屏幕。
           constraints: BoxConstraints(
@@ -768,36 +800,36 @@ class _TelevisionSearchDialogState extends State<TelevisionSearchDialog> {
                   onChanged: (value) => setState(() {}),
                   onSearch: (value) => Navigator.pop(context, value),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 10),
                 TvSearchKeyboard(
                   onCharacter: _append,
                   onBackspace: _backspace,
                   onClear: _clear,
                   onSubmit: _submit,
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 8),
                 Text(
                   // 遥控器打中文很痛苦，明确告诉用户可以用拼音首字母。
                   '支持拼音首字母：如「黄金大逆转」输入 hjdnz 即可',
                   style: TextStyle(
-                    fontSize: 13,
+                    fontSize: 12,
                     color: colors.onSurfaceVariant,
                   ),
                 ),
                 if (keywords.isNotEmpty) ...[
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 12),
                   Text(
                     '热门搜索',
                     style: TextStyle(
-                      fontSize: 15,
+                      fontSize: 13,
                       fontWeight: FontWeight.w700,
                       color: colors.onSurfaceVariant,
                     ),
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 8),
                   Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
+                    spacing: 8,
+                    runSpacing: 8,
                     children: [
                       for (final word in keywords)
                         RemoteTarget(
@@ -806,18 +838,18 @@ class _TelevisionSearchDialogState extends State<TelevisionSearchDialog> {
                           label: '搜索 $word',
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 10,
+                              horizontal: 12,
+                              vertical: 7,
                             ),
                             decoration: BoxDecoration(
                               color: colors.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(10),
+                              borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
                               word,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 16),
+                              style: const TextStyle(fontSize: 14),
                             ),
                           ),
                         ),

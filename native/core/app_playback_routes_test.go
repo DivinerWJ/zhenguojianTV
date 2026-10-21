@@ -12,16 +12,16 @@ import (
 )
 
 func TestHongguoBackupAddressesAndCodecAlternatives(t *testing.T) {
-	media, err := selectHongguoAppMedia(map[string]any{"video_list": []any{
-		map[string]any{"main_url": "https://media.test/hevc.mp4", "video_meta": map[string]any{"codec_type": "hevc", "definition": "1080p"}},
+	media, err := selectHongguoAppVideoList(map[string]any{"video_list": []any{
+		map[string]any{"main_url": "https://media.test.qznovelvod.com/hevc.mp4", "video_meta": map[string]any{"codec_type": "hevc", "definition": "1080p"}},
 		map[string]any{
-			"main_url":    base64.StdEncoding.EncodeToString([]byte("https://media.test/main.mp4?token=a%2Fb")),
-			"backup_url":  "https://backup.test/main.mp4?token=unchanged",
-			"backup_urls": []any{"https://backup.test/main.mp4?token=unchanged", "file:///invalid", "https://third.test/main.mp4"},
+			"main_url":    base64.StdEncoding.EncodeToString([]byte("https://media.test.qznovelvod.com/main.mp4?token=a%2Fb")),
+			"backup_url":  "https://backup.test.qznovelvod.com/main.mp4?token=unchanged",
+			"backup_urls": []any{"https://backup.test.qznovelvod.com/main.mp4?token=unchanged", "file:///invalid", "https://third.test.qznovelvod.com/main.mp4"},
 			"video_meta":  map[string]any{"codec_type": "h264", "definition": "1080p"},
 		},
-		map[string]any{"main_url": "https://media.test/low.mp4", "video_meta": map[string]any{"codec_type": "h264", "definition": "720p"}},
-		map[string]any{"main_url": "https://media.test/unsupported.mp4", "backup_url": "https://backup.test/unsupported.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "2160p"}},
+		map[string]any{"main_url": "https://media.test.qznovelvod.com/low.mp4", "video_meta": map[string]any{"codec_type": "h264", "definition": "720p"}},
+		map[string]any{"main_url": "https://media.test.qznovelvod.com/unsupported.mp4", "backup_url": "https://backup.test.qznovelvod.com/unsupported.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "2160p"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -32,8 +32,8 @@ func TestHongguoBackupAddressesAndCodecAlternatives(t *testing.T) {
 		addresses = append(addresses, option.URL)
 	}
 	want := []string{
-		"https://media.test/main.mp4?token=a%2Fb", "https://backup.test/main.mp4?token=unchanged",
-		"https://third.test/main.mp4", "https://media.test/hevc.mp4", "https://media.test/low.mp4",
+		"https://media.test.qznovelvod.com/main.mp4?token=a%2Fb", "https://backup.test.qznovelvod.com/main.mp4?token=unchanged",
+		"https://third.test.qznovelvod.com/main.mp4", "https://media.test.qznovelvod.com/hevc.mp4", "https://media.test.qznovelvod.com/low.mp4",
 	}
 	if !reflect.DeepEqual(addresses, want) || !reflect.DeepEqual(choices.qualities, []int{1080, 720}) {
 		t.Fatalf("wrong fallback order: %+v; qualities=%v", addresses, choices.qualities)
@@ -65,7 +65,11 @@ func TestNativePlaybackFallbackPreservesKeysAndReleasesOnlyOldSession(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.URL != second.URL || next.Headers["Referer"] != second.Referer || next.Key != "66656463626139383736353433323130" || next.RouteIndex != 1 || next.Session == plan.Session {
+	// nativeOpenPlayback 会有意把上游地址换成本地代理地址（播放全代理），
+	// 所以这里不能原样比对 second.URL，只能校验代理前缀 + 凭据是否跟着换了。
+	if !strings.HasPrefix(next.URL, "http://127.0.0.1:") || next.URL == second.URL ||
+		next.Headers["Referer"] != second.Referer || next.Key != "66656463626139383736353433323130" ||
+		next.RouteIndex != 1 || next.Session == plan.Session {
 		t.Fatalf("alternate route lost its credentials: %+v", next)
 	}
 	engine.nativeReleasePlayback(plan.Session)
@@ -87,7 +91,7 @@ func TestNativePlaybackHLSAlternativesAreLazyAndIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	media := providerMedia{URL: "https://first.test/index.m3u8", Playlist: "#EXTM3U\n#EXT-X-ENDLIST\n", Quality: 1080}
-	media.Variants = []providerMedia{{URL: "https://backup.test/index.m3u8", Playlist: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ENDLIST\n", Quality: 720}}
+	media.Variants = []providerMedia{{URL: "https://backup.test.qznovelvod.com/index.m3u8", Playlist: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ENDLIST\n", Quality: 720}}
 	plan, err := engine.nativeOpenPlayback(context.Background(), nativePlaybackChoices(media, 0))
 	if err != nil {
 		t.Fatal(err)

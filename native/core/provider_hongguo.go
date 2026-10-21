@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -205,18 +206,69 @@ func (d *Downloader) resolveHongguoMedia(ctx context.Context, task Task) (provid
 	if err := ctx.Err(); err != nil {
 		return providerMedia{}, err
 	}
-	media, pageErr := d.resolveHongguoWebMedia(ctx, seriesID, videoID)
-	if pageErr == nil {
+	media, publicErr := d.resolveHongguoPublicMedia(ctx, videoID)
+	if publicErr == nil {
 		return media, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return providerMedia{}, err
 	}
-	media, apiErr := d.resolveHongguoPlaybackAPI(ctx, seriesID, videoID)
-	if apiErr == nil {
+	media, pageErr := d.resolveHongguoWebMedia(ctx, seriesID, videoID)
+	if pageErr == nil {
 		return media, nil
 	}
-	return providerMedia{}, fmt.Errorf("红果 App 取流失败：%v；网页取流失败：%v；备用取流失败：%w", publicError(nativeErr), publicError(pageErr), apiErr)
+	// 原先这里还有一级第三方解析（djapi.999888456.xyz）。实测该接口
+	// 解密后固定返回 {"parse":0,"url":""}，多剧多轮均无地址，已移除，
+	// 避免用户等待一个必然失败的请求。
+	return providerMedia{}, fmt.Errorf("红果 App 取流失败：%v；公开片源失败：%v；网页取流失败：%w", publicError(nativeErr), publicError(publicErr), pageErr)
+}
+
+// resolveHongguoPublicMedia 使用红果网页播放器同款的公开片源。
+//
+// 站点前端把免费试看集直接映射到 /video/public/{vid}/360p.mp4（见
+// player.3d3aa477ab.js 中的 "/video/public/" 分支），该地址不带签名、
+// 不带 Cookie，实测返回 video/mp4 且支持 Range。它只覆盖每部剧的前几集
+// （实测为前 3 集），因此仅作为 App 取流失败时的兜底，不能替代主链路。
+func (d *Downloader) resolveHongguoPublicMedia(ctx context.Context, videoID string) (providerMedia, error) {
+	if !hongguoNumericID.MatchString(videoID) {
+		return providerMedia{}, errors.New("红果视频 ID 无效")
+	}
+	bases := d.providerBaseCandidates(ctx, sourceHongguo, []string{hongguoBaseURL})
+	var lastErr error
+	for _, base := range bases {
+		if err := ctx.Err(); err != nil {
+			return providerMedia{}, err
+		}
+		address := base + "/video/public/" + url.PathEscape(videoID) + "/360p.mp4"
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		request.Header.Set("User-Agent", userAgent)
+		request.Header.Set("Range", "bytes=0-1")
+		response, err := d.doCatalogRequestWithTimeout(request, providerTimeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusPartialContent && response.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("红果公开片源不可用（HTTP %d）", response.StatusCode)
+			continue
+		}
+		contentType := strings.ToLower(response.Header.Get("Content-Type"))
+		if !strings.Contains(contentType, "video/") && !strings.Contains(contentType, "mp4") {
+			lastErr = errors.New("红果公开片源返回的不是视频内容")
+			continue
+		}
+		d.rememberProviderHost(sourceHongguo, base)
+		return providerMedia{URL: address, Referer: "", Quality: 360}, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("红果公开片源没有可用域名")
+	}
+	return providerMedia{}, lastErr
 }
 
 func (d *Downloader) resolveHongguoWebMedia(ctx context.Context, seriesID, videoID string) (providerMedia, error) {

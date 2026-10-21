@@ -115,6 +115,10 @@ func (transport rankingTransport) RoundTrip(request *http.Request) (*http.Respon
 
 func rankingTestDownloader(t *testing.T, transport rankingTransport) *Downloader {
 	t.Helper()
+	// 榜单用例断言的是"上游被请求了几次"。远程镜像配置会引入额外候选域名，
+	// 而竞速对每个候选要发 2 份请求，次数就变得不确定（且取决于能否连上
+	// jsDelivr）。这里把镜像缓存钉成空表，保证用例只打自己的 fixture。
+	withProviderMirrorCacheForTest(t, map[string][]string{})
 	d := sourceFixtureDownloader(t, sourceFixtureTransport(transport))
 	d.cfg.dataDir = t.TempDir()
 	d.limiter = newRequestLimiter(8, time.Nanosecond)

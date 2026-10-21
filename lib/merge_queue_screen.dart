@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
+
 import 'core_bridge.dart';
 import 'local_store.dart';
 import 'media_library.dart';
@@ -167,6 +169,7 @@ class _MergeQueueScreenState extends State<MergeQueueScreen> {
       final jobs = widget.library.merges.items;
       return Scaffold(
         appBar: AppBar(
+          automaticallyImplyLeading: !AppLayout.isTelevision(context),
           title: const Text('合并队列'),
           actions: [
             IconButton(

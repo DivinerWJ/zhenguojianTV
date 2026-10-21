@@ -43,7 +43,9 @@ func TestNativeBuildPreservesForeignDownloadRecordsAndRestrictsScheduling(t *tes
 	manager := downloadTestManager(t)
 	records := []*nativeDownloadRecord{}
 	for index, source := range []string{sourceHongguo, sourceHuangdou, sourceHuangguoVideo, sourceHuangguoAI, sourceCloudFront} {
-		drama := nativeDrama{ID: source + ":123", Source: source, Title: "合成下载"}
+		// 写入当前 schema：加载时 migrateNativeDrama 会把旧记录升级到 1，
+		// 用 0 构造会让"隐藏任务未被批量操作改动"的比对凭空失败。
+		drama := nativeDrama{MetadataSchema: 1, ID: source + ":123", Source: source, Title: "合成下载"}
 		record := &nativeDownloadRecord{nativeDownloadJob: nativeDownloadJob{
 			ID: nativeDownloadID(drama.ID, 1), Drama: drama, Index: 1,
 			Chapter: Chapter{ID: "1", Source: source, CurrentEpisode: json.RawMessage("1")}, State: "queued", Created: int64(index),

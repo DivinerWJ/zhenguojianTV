@@ -118,15 +118,17 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('tv-nav-0')), findsOneWidget);
-      await tester.tap(find.byTooltip('更多'));
+      // 0.8.7：电视版去掉顶部栏，「界面模式」改从左侧菜单进设置页切换。
+      await tester.tap(find.byKey(const ValueKey('tv-nav-settings')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('界面模式'));
+      await tester.tap(find.byKey(const ValueKey('display-mode-setting')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('手机 / 电脑'));
       await tester.pumpAndSettle();
       expect(store.displayMode, 'standard');
-      expect(find.byKey(const ValueKey('tv-nav-0')), findsNothing);
       expect(LocalStore(store.preferences).displayMode, 'standard');
+      await press(tester, LogicalKeyboardKey.goBack);
+      expect(find.byKey(const ValueKey('tv-nav-0')), findsNothing);
       await store.setDisplayMode('television');
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('tv-nav-0')), findsOneWidget);
@@ -149,7 +151,8 @@ void main() {
           // 0.8.2 起电视版站源入口是 RemoteTarget（可聚焦的胶囊），
           // 弹窗改成居中对话框 + 可聚焦勾选行，所以这里按真实遥控路径驱动：
           // 打开 → 清空 → 勾选第二个分组 → 确定。
-          final switcher = find.byKey(const ValueKey('source-switch'));
+          // 0.8.7：入口从顶部栏挪到左侧菜单。
+          final switcher = find.byKey(const ValueKey('tv-nav-source'));
           focusRemote(tester, switcher);
           await tester.pumpAndSettle();
           await press(tester, LogicalKeyboardKey.select);

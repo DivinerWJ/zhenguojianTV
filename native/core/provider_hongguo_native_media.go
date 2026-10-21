@@ -1,10 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -12,99 +14,296 @@ import (
 	"time"
 )
 
+// 红果 App 取流分两步：
+//  1. POST /novel/player/multi_video_model/v1/ 拿到本集的 video_model，
+//     其中 fallback_api 指向真正的片源清单地址；
+//  2. GET fallback_api 拿到 video_info.data，内含 video_list（各清晰度）与 key_seed。
+//
+// video_list 里的 main_url / backup_url 是 spade 密文，需用 key_seed 解密；
+// 每个清晰度的 spade_a 是 CENC 内容密钥。签名由 hongguoAppRequest 统一处理
+// （x-gorgon/x-argus/x-ladon/x-helios/x-medusa），这里只负责业务参数。
 func (downloader *Downloader) resolveHongguoAppMedia(ctx context.Context, videoID string) (providerMedia, error) {
 	if !hongguoNumericID.MatchString(videoID) {
 		return providerMedia{}, errors.New("红果视频 ID 无效")
 	}
 	payload := map[string]any{
-		"video_id": videoID, "content_type": 1,
-		"biz_param": map[string]any{"need_all_video_definition": true, "video_platform": 3},
+		"biz_param": map[string]any{
+			"detail_page_version":       0,
+			"device_level":              3,
+			"disable_digg_stat":         false,
+			"need_all_video_definition": true,
+			"need_mp4_align":            false,
+			"use_os_player":             false,
+			"use_server_dns":            false,
+			"video_platform":            1024,
+		},
+		"mixed_video_id_map": map[string]any{"1004": []string{videoID}},
 	}
-	result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", nil, payload)
+	result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/multi_video_model/v1/", nil, payload)
 	if err != nil {
 		return providerMedia{}, err
 	}
-	data := nestedMap(result, "data")
-	model, _ := data["video_model"].(map[string]any)
-	if encoded, ok := data["video_model"].(string); ok {
+	entry, _ := nestedMap(result, "data")[videoID].(map[string]any)
+	model, _ := entry["video_model"].(map[string]any)
+	if encoded, ok := entry["video_model"].(string); ok && len(model) == 0 {
 		decoder := json.NewDecoder(strings.NewReader(encoded))
 		decoder.UseNumber()
 		if err := decoder.Decode(&model); err != nil {
 			return providerMedia{}, errors.New("红果 App 播放信息格式异常")
 		}
 	}
-	return selectHongguoAppMedia(model)
+	if len(model) == 0 {
+		return providerMedia{}, errors.New("红果 App 未返回该集播放信息")
+	}
+	fallback := hongguoFallbackAddress(model["fallback_api"])
+	if fallback == "" {
+		return providerMedia{}, errors.New("红果 App 未返回该集片源地址")
+	}
+	outer, err := downloader.hongguoAppJSON(ctx, fallback)
+	if err != nil {
+		return providerMedia{}, err
+	}
+	if code := firstNonEmpty(mapString(outer, "Code", "code"), mapString(nestedMap(outer, "video_info"), "Code", "code")); code != "" && code != "0" {
+		return providerMedia{}, fmt.Errorf("红果 App 片源接口暂不可用（%s）", truncate(code, 20))
+	}
+	info := nestedMap(outer, "video_info", "data")
+	if len(info) == 0 {
+		return providerMedia{}, errors.New("红果 App 未返回该集片源清单")
+	}
+	return selectHongguoAppVideoList(info)
 }
 
-func selectHongguoAppMedia(model map[string]any) (providerMedia, error) {
-	variants := anyList(model["video_list"])
-	if rows, ok := model["video_list"].(map[string]any); ok && len(variants) == 0 {
-		keys := make([]string, 0, len(rows))
-		for key := range rows {
+// hongguoFallbackAddress 兼容 fallback_api 的三种形态：
+// 纯字符串、{fallback_api: "..."} 对象、字符串数组。
+func hongguoFallbackAddress(value any) string {
+	switch typed := value.(type) {
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return ""
+		}
+		if strings.HasPrefix(text, "{") || strings.HasPrefix(text, "[") {
+			var nested map[string]any
+			decoder := json.NewDecoder(strings.NewReader(text))
+			decoder.UseNumber()
+			if decoder.Decode(&nested) == nil {
+				return hongguoFallbackAddress(nested["fallback_api"])
+			}
+			return ""
+		}
+		return text
+	case map[string]any:
+		return hongguoFallbackAddress(typed["fallback_api"])
+	case []any:
+		if len(typed) > 0 {
+			return hongguoFallbackAddress(typed[0])
+		}
+	}
+	return ""
+}
+
+func (downloader *Downloader) hongguoAppJSON(ctx context.Context, rawURL string) (map[string]any, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if !isProviderHTTPMediaURL(rawURL) || !hongguoSpadeHostAllowed(rawURL) {
+		return nil, errors.New("红果 App 片源接口地址无效")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", hongguoAppUserAgent)
+	request.Header.Set("Accept", "application/json")
+	response, err := downloader.doCatalogRequestWithTimeout(request, 20*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	content, readErr := io.ReadAll(io.LimitReader(response.Body, providerMaxBodyBytes+1))
+	if readErr != nil || len(content) == 0 || len(content) > providerMaxBodyBytes {
+		return nil, errors.New("红果 App 片源接口未返回有效数据")
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("红果 App 片源接口 HTTP %d", response.StatusCode)
+	}
+	var result map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil || result == nil {
+		return nil, errors.New("红果 App 片源接口返回格式异常")
+	}
+	return result, nil
+}
+
+// selectHongguoAppVideoList 从片源清单里挑一条可用的播放地址。
+//
+// 排序策略沿用产品既有约定：**分辨率优先，同分辨率下编码更兼容者优先**
+// （h264 > hevc/bytevc1 > bytevc2）。bytevc2 属于新编码，多数 TV 播放器
+// 无法解码，因此只在没有任何其它可用档位时才作为兜底，避免出现
+// "整部剧一集都播不了"。
+func selectHongguoAppVideoList(info map[string]any) (providerMedia, error) {
+	seed, _ := decodeHongguoBase64(mapString(info, "key_seed"))
+	rows := hongguoVideoRows(info["video_list"])
+	if len(rows) == 0 {
+		return providerMedia{}, errors.New("红果 App 未返回可用清晰度")
+	}
+
+	type candidate struct {
+		media  providerMedia
+		rank   int
+		height int
+	}
+	var all []candidate
+	duration, _ := strconv.ParseFloat(mapString(info, "video_duration", "duration"), 64)
+	for _, row := range rows {
+		meta := nestedMap(row, "video_meta")
+		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(row, "codec_type"), mapString(row, "gear_des_key")))
+		rank := hongguoCodecRank(codec)
+		spade := firstNonEmpty(mapString(row, "spade_a"), mapString(nestedMap(row, "encrypt_info"), "spade_a"))
+		var contentKey []byte
+		if spade != "" {
+			key, err := hongguoContentKey(spade)
+			if err != nil {
+				continue
+			}
+			contentKey = key
+		}
+		height := hongguoDefinitionHeight(meta, row)
+		for _, address := range hongguoAppAddresses(row, seed) {
+			all = append(all, candidate{
+				media: providerMedia{
+					URL: address, Referer: "", Duration: time.Duration(duration * float64(time.Second)),
+					CENCKey: contentKey, Quality: height,
+				},
+				rank: rank, height: height,
+			})
+		}
+	}
+	if len(all) == 0 {
+		return providerMedia{}, errors.New("红果 App 未返回可解析的片源地址")
+	}
+	// 优先排除 bytevc2；只有在它之外一无所获时才回退到全量候选。
+	usable := make([]candidate, 0, len(all))
+	for _, item := range all {
+		if item.rank >= 2 {
+			usable = append(usable, item)
+		}
+	}
+	if len(usable) == 0 {
+		usable = all
+	}
+	sort.SliceStable(usable, func(i, j int) bool {
+		if usable[i].height != usable[j].height {
+			return usable[i].height > usable[j].height
+		}
+		return usable[i].rank > usable[j].rank
+	})
+	selected := usable[0].media
+	for _, item := range usable {
+		variant := item.media
+		variant.Variants = nil
+		selected.Variants = append(selected.Variants, variant)
+	}
+	return selected, nil
+}
+
+// hongguoVideoRows 兼容 video_list 的两种形态：对象（video_1..video_n）与数组。
+func hongguoVideoRows(value any) []map[string]any {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+		rows := make([]map[string]any, 0, len(keys))
 		for _, key := range keys {
-			variants = append(variants, rows[key])
-		}
-	}
-	duration, _ := strconv.ParseFloat(mapString(model, "video_duration", "duration"), 64)
-	var keyErr error
-	type scoredMedia struct {
-		media providerMedia
-		score int
-	}
-	var choices []scoredMedia
-	for _, row := range variants {
-		variant, _ := row.(map[string]any)
-		meta := nestedMap(variant, "video_meta")
-		codec := strings.ToLower(mapString(meta, "codec_type"))
-		if codec == "bytevc2" || strings.Contains(strings.ToLower(mapString(variant, "gear_des_key")), "bytevc2") {
-			continue
-		}
-		addresses := hongguoMediaAddresses(variant)
-		if len(addresses) == 0 {
-			continue
-		}
-		media := providerMedia{Referer: "https://novel.snssdk.com/", Duration: time.Duration(duration * float64(time.Second))}
-		encryption := nestedMap(variant, "encrypt_info")
-		spade := mapString(encryption, "spade_a")
-		if spade != "" || encryption["encrypt"] == true || mapString(encryption, "encryption_method") == "cenc-aes-ctr" {
-			var err error
-			media.CENCKey, err = hongguoContentKey(spade)
-			if err != nil {
-				keyErr = err
-				continue
+			if row, ok := typed[key].(map[string]any); ok && len(row) > 0 {
+				rows = append(rows, row)
 			}
 		}
-		height, _ := strconv.Atoi(mapString(meta, "vheight"))
-		if definition, err := strconv.Atoi(hongguoQualityNumber.FindString(mapString(meta, "definition"))); err == nil && definition > 0 {
-			height = definition
-		} else if width, _ := strconv.Atoi(mapString(meta, "vwidth")); width > 0 && (height == 0 || width < height) {
-			height = width
+		return rows
+	case []any:
+		rows := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if row, ok := item.(map[string]any); ok && len(row) > 0 {
+				rows = append(rows, row)
+			}
 		}
-		media.Quality = height
-		quality := height * 10
-		if codec == "h264" || codec == "avc1" {
-			quality++
+		return rows
+	}
+	return nil
+}
+
+func hongguoCodecRank(codec string) int {
+	switch {
+	case codec == "h264" || codec == "avc" || codec == "avc1":
+		return 3
+	case codec == "hevc" || codec == "h265" || codec == "hvc1" || codec == "hev1" || codec == "bytevc1":
+		return 2
+	case codec == "bytevc2":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func hongguoDefinitionHeight(meta, row map[string]any) int {
+	for _, source := range []map[string]any{meta, row} {
+		if height, err := strconv.Atoi(mapString(source, "vheight", "height")); err == nil && height > 0 {
+			return height
 		}
-		for _, address := range addresses {
-			media.URL = address
-			choices = append(choices, scoredMedia{media: media, score: quality})
+		if definition, err := strconv.Atoi(hongguoQualityNumber.FindString(mapString(source, "definition", "quality_desc"))); err == nil && definition > 0 {
+			return definition
 		}
 	}
-	if len(choices) > 0 {
-		sort.SliceStable(choices, func(i, j int) bool { return choices[i].score > choices[j].score })
-		selected := choices[0].media
-		for _, choice := range choices {
-			selected.Variants = append(selected.Variants, choice.media)
+	return 0
+}
+
+func hongguoAppAddresses(row map[string]any, seed []byte) []string {
+	var addresses []string
+	seen := map[string]bool{}
+	add := func(value any) {
+		text, ok := value.(string)
+		if !ok {
+			return
 		}
-		return selected, nil
+		address := hongguoAppAddress(text, seed)
+		if address == "" || !hongguoSpadeHostAllowed(address) || seen[address] {
+			return
+		}
+		seen[address] = true
+		addresses = append(addresses, address)
 	}
-	if keyErr != nil {
-		return providerMedia{}, fmt.Errorf("红果 App 媒体密钥不可用: %w", keyErr)
+	add(row["main_url"])
+	add(row["backup_url"])
+	for _, item := range anyList(row["backup_url_list"]) {
+		add(item)
 	}
-	return providerMedia{}, errors.New("红果 App 未返回兼容的媒体，已跳过不支持的编码")
+	for _, item := range anyList(row["backup_urls"]) {
+		add(item)
+	}
+	return addresses
+}
+
+// hongguoAppAddress 依次尝试：明文地址 → spade 密文 → base64 明文。
+// 三种形态在真实响应和历史数据里都出现过，任一成立即可。
+func hongguoAppAddress(value string, seed []byte) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if isProviderHTTPMediaURL(value) {
+		return value
+	}
+	if address, err := hongguoDecryptSpadeURL(value, seed); err == nil {
+		return address
+	}
+	if decoded, err := decodeHongguoBase64(value); err == nil {
+		if address := strings.TrimSpace(string(decoded)); isProviderHTTPMediaURL(address) {
+			return address
+		}
+	}
+	return ""
 }
 
 func hongguoMediaAddresses(info map[string]any) []string {

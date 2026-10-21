@@ -260,7 +260,7 @@ class _RankingsScreenState extends State<RankingsScreen> {
         .toList();
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: AppLayout.isTelevision(context) ? 64 : null,
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
         title: _sourceSwitcher(groups),
         actions: [
           RefreshAction(

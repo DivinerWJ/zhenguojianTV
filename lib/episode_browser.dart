@@ -232,12 +232,12 @@ class _EpisodeBrowserState extends State<EpisodeBrowser> {
               final columns =
                   ((constraints.maxWidth - 36) /
                           max(
-                            television ? 100 : 82,
-                            scale.scale(20) * digits * .65 + 40,
+                            television ? 84 : 82,
+                            scale.scale(16) * digits * .65 + 34,
                           ))
                       .floor()
-                      .clamp(1, 12);
-              final extent = max(56.0, scale.scale(20) + 30);
+                      .clamp(1, 14);
+              final extent = max(48.0, scale.scale(16) + 26);
               final target = max(
                 0,
                 visible.indexWhere(

@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'app_layout.dart';
+
 import 'core_bridge.dart';
 import 'local_store.dart';
 import 'media_library.dart';
@@ -191,12 +193,13 @@ class _LocalMediaScreenState extends State<LocalMediaScreen> {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: library,
-    builder: (_, _) {
+    builder: (context, _) {
       final items = library.items
           .where((item) => item.merged == _merged)
           .toList();
       return Scaffold(
         appBar: AppBar(
+          automaticallyImplyLeading: !AppLayout.isTelevision(context),
           title: const Text('本地媒体'),
           actions: [
             IconButton(

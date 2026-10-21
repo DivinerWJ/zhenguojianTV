@@ -23,13 +23,19 @@ type huangguoPreviewSession struct {
 
 func mediaRequestHeaders(request *http.Request, referer string) {
 	request.Header.Set("User-Agent", userAgent)
-	request.Header.Set("Referer", referer)
+	// 空 Referer 表示"不要发 Referer 头"。红果 App 片源（qznovelvod.com）
+	// 对带 Referer 的请求直接返回 403，因此这里必须区分"空"和"未设置"。
+	if referer != "" {
+		request.Header.Set("Referer", referer)
+	}
 	request.Header.Set("Accept", "*/*")
 	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	request.Header.Set("Sec-Fetch-Mode", "cors")
 	request.Header.Set("Sec-Fetch-Dest", "empty")
-	if origin, err := url.Parse(referer); err == nil && origin.Host != "" {
-		request.Header.Set("Origin", origin.Scheme+"://"+origin.Host)
+	if referer != "" {
+		if origin, err := url.Parse(referer); err == nil && origin.Host != "" {
+			request.Header.Set("Origin", origin.Scheme+"://"+origin.Host)
+		}
 	}
 }
 
@@ -189,7 +195,9 @@ func (d *Downloader) fetchMediaPlaylist(ctx context.Context, address, referer st
 	if err != nil {
 		return "", "", err
 	}
-	request.Header.Set("Referer", referer)
+	if referer != "" {
+		request.Header.Set("Referer", referer)
+	}
 	response, err := d.doMediaRequest(request)
 	if err != nil {
 		return "", "", err

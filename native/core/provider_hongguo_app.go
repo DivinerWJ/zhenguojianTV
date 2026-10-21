@@ -148,18 +148,22 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 			return nil, err
 		}
 	}
+	// 空响应耗时很短，属于可重试的临时状态，因此上限放宽到 8 次。
 	attempts := downloader.cfg.Retries
 	if attempts < 1 {
 		attempts = 1
 	}
-	if attempts > 3 {
-		attempts = 3
+	if attempts < 6 {
+		attempts = 6
+	}
+	if attempts > 8 {
+		attempts = 8
 	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			select {
-			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-time.After(providerQuickRetryDelay()):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -175,11 +179,15 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 		if payload != nil {
 			request.Header.Set("Content-Type", "application/json; charset=utf-8")
 		}
+		// 最后两次退回裸请求（单次约 60% 命中），避免签名失配时整源不可用。
+		signed := attempt < attempts-2
 		response, err := downloader.doPreparedCatalogRequest(request, 20*time.Second, func(prepared *http.Request) {
 			now := time.Now()
 			query.Set("_rticket", strconv.FormatInt(now.UnixMilli(), 10))
 			prepared.URL.RawQuery = query.Encode()
-			signHongguoRequest(prepared, body, now)
+			if signed {
+				signHongguoAppRequest(prepared, body, prepared.URL.RawQuery, deviceID, now)
+			}
 		})
 		if err != nil {
 			lastErr = err
@@ -202,14 +210,20 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 			}
 			continue
 		}
-		if len(content) == 0 || len(content) > providerMaxBodyBytes {
-			return nil, errors.New("红果 App 接口未返回有效数据")
+		if len(content) == 0 {
+			// 这是"随机空响应"，属于可重试的临时状态，不能当作终态错误。
+			lastErr = errors.New("红果 App 接口返回空响应")
+			continue
+		}
+		if len(content) > providerMaxBodyBytes {
+			return nil, errors.New("红果 App 接口返回的数据过大")
 		}
 		var result map[string]any
 		decoder := json.NewDecoder(bytes.NewReader(content))
 		decoder.UseNumber()
 		if err := decoder.Decode(&result); err != nil || result == nil {
-			return nil, errors.New("红果 App 接口返回格式异常")
+			lastErr = errors.New("红果 App 接口返回格式异常")
+			continue
 		}
 		code := firstNonEmpty(mapString(result, "code", "Code", "status_code"), mapString(nestedMap(result, "BaseResp"), "StatusCode"))
 		if code != "" && code != "0" {

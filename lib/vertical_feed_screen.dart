@@ -870,7 +870,7 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
         content: Text(
           message,
           // 0.8.1：电视上提示文字放大。
-          style: TextStyle(fontSize: television ? 17 : 14),
+          style: TextStyle(fontSize: television ? 15 : 14),
         ),
         duration: Duration(seconds: television ? 3 : 2),
         behavior: SnackBarBehavior.floating,
@@ -3732,7 +3732,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             style: TextStyle(
               color: Colors.white,
               // 0.8.1：电视上标题放大。
-              fontSize: _television ? 21 : 17,
+              fontSize: _television ? 18 : 17,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -5766,7 +5766,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           onPressed: onPressed,
           style: _overlayButtonStyle(context),
           // 0.8.1：电视上图标与标签放大（10 英尺可读）。
-          icon: Icon(icon, color: color, size: _television ? 28 : 24),
+          icon: Icon(icon, color: color, size: _television ? 25 : 24),
         ),
         Text(
           label,

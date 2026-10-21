@@ -30,6 +30,56 @@ var providerMirrorCache struct {
 	sources map[string][]string
 }
 
+// providerSourceOrigins 记录"镜像域名 → 站源"的映射。
+// 硬编码白名单只能认识内置域名，一旦 config/source_mirrors.json 里新增了
+// 备用域名（红果、黄剧这类经常换域名的站源尤其需要），providerSourceForURL
+// 就会认不出来，导致镜像机制形同虚设。这里把远程配置里的域名动态登记进来。
+var providerSourceOrigins struct {
+	sync.RWMutex
+	hosts map[string]string
+}
+
+func rememberProviderOrigins(sources map[string][]string) {
+	providerSourceOrigins.Lock()
+	defer providerSourceOrigins.Unlock()
+	if providerSourceOrigins.hosts == nil {
+		providerSourceOrigins.hosts = map[string]string{}
+	}
+	for source, origins := range sources {
+		canonical := canonicalProviderSource(source)
+		if canonical == "" {
+			canonical = source
+		}
+		for _, origin := range origins {
+			parsed, err := url.Parse(origin)
+			if err != nil || parsed.Hostname() == "" {
+				continue
+			}
+			providerSourceOrigins.hosts[strings.ToLower(parsed.Hostname())] = canonical
+		}
+	}
+}
+
+func providerSourceForHost(host string) string {
+	providerSourceOrigins.RLock()
+	defer providerSourceOrigins.RUnlock()
+	return providerSourceOrigins.hosts[host]
+}
+
+// resetProviderMirrorCaches 清空进程级的远程镜像缓存与"域名 → 站源"映射。
+// 这两份缓存都是包级变量、TTL 一小时，会跨用例共享：前一个用例写入的镜像
+// 会改变后一个用例里 providerBaseURL / providerSourceForURL 的结果，导致
+// 单跑通过、全量失败。测试用它在用例开始前恢复干净状态。
+func resetProviderMirrorCaches() {
+	providerMirrorCache.Lock()
+	providerMirrorCache.expires = time.Time{}
+	providerMirrorCache.sources = nil
+	providerMirrorCache.Unlock()
+	providerSourceOrigins.Lock()
+	providerSourceOrigins.hosts = nil
+	providerSourceOrigins.Unlock()
+}
+
 func validProviderMirrorOrigin(raw string) string {
 	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
 	parsed, err := url.Parse(raw)
@@ -118,11 +168,29 @@ func (d *Downloader) remoteProviderMirrors(ctx context.Context) map[string][]str
 		providerMirrorCache.Unlock()
 		return nil
 	}
+	rememberProviderOrigins(sources)
 	providerMirrorCache.Lock()
 	providerMirrorCache.sources = sources
 	providerMirrorCache.expires = now.Add(ttl)
 	providerMirrorCache.Unlock()
 	return sources
+}
+
+// cachedProviderMirrorOrigin 只读取已缓存的远程镜像，不触发网络请求。
+// 供 providerBaseURL 这类高频同步调用使用。
+func cachedProviderMirrorOrigin(source string) string {
+	if source == "" {
+		return ""
+	}
+	providerMirrorCache.Lock()
+	defer providerMirrorCache.Unlock()
+	if !time.Now().Before(providerMirrorCache.expires) {
+		return ""
+	}
+	if origins := providerMirrorCache.sources[source]; len(origins) > 0 {
+		return origins[0]
+	}
+	return ""
 }
 
 func (d *Downloader) providerBaseCandidates(ctx context.Context, source string, builtins []string) []string {

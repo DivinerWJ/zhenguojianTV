@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'app_layout.dart';
+
 import 'batch_downloads.dart';
 import 'core_bridge.dart';
 import 'downloads_screen.dart';
@@ -71,7 +73,9 @@ class _BatchDownloadScreenState extends State<BatchDownloadScreen> {
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: Listenable.merge([_batch, widget.store]),
     builder: (context, _) => Scaffold(
-      appBar: AppBar(title: const Text('批量下载')),
+      appBar: AppBar(
+        automaticallyImplyLeading: !AppLayout.isTelevision(context),
+        title: const Text('批量下载')),
       body: SafeArea(
         top: false,
         child: !_batch.hasAccess

@@ -56,7 +56,7 @@ Future<T?> _showTvSidePanel<T>(
 );
 
 Widget _panelHeader(String title, String subtitle) => Padding(
-  padding: const EdgeInsets.fromLTRB(28, 24, 28, 18),
+  padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
   child: Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
@@ -66,18 +66,18 @@ Widget _panelHeader(String title, String subtitle) => Padding(
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(
           color: Colors.white,
-          fontSize: 26,
+          fontSize: 19,
           fontWeight: FontWeight.w800,
         ),
       ),
-      const SizedBox(height: 5),
+      const SizedBox(height: 3),
       Text(
         subtitle,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
           color: Colors.white.withValues(alpha: .62),
-          fontSize: 15,
+          fontSize: 12,
         ),
       ),
     ],
@@ -136,7 +136,7 @@ Future<TvPlayerAction?> showTvPlayerMenu(
   final dialog = _showTvSidePanel<TvPlayerAction>(
     context,
     barrierLabel: '关闭播放设置',
-    width: 470,
+    width: 380,
     builder: (panelContext) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -144,7 +144,7 @@ Future<TvPlayerAction?> showTvPlayerMenu(
         Divider(height: 1, color: Colors.white.withValues(alpha: .10)),
         Expanded(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(18, 18, 18, 26),
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 18),
             child: Column(
               children: [
                 for (var index = 0; index < items.length; index++) ...[
@@ -168,10 +168,10 @@ Future<TvPlayerAction?> showTvPlayerMenu(
                       onPressed: () =>
                           Navigator.of(panelContext).pop(items[index].$1),
                       child: Container(
-                        constraints: const BoxConstraints(minHeight: 82),
+                        constraints: const BoxConstraints(minHeight: 62),
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 12,
+                          horizontal: 14,
+                          vertical: 9,
                         ),
                         decoration: BoxDecoration(
                           color: Colors.white.withValues(alpha: .07),
@@ -180,19 +180,19 @@ Future<TvPlayerAction?> showTvPlayerMenu(
                         child: Row(
                           children: [
                             Container(
-                              width: 48,
-                              height: 48,
+                              width: 36,
+                              height: 36,
                               decoration: BoxDecoration(
                                 color: _tvAccent.withValues(alpha: .15),
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(10),
                               ),
                               child: Icon(
                                 items[index].$2,
                                 color: _tvAccent,
-                                size: 27,
+                                size: 21,
                               ),
                             ),
-                            const SizedBox(width: 16),
+                            const SizedBox(width: 12),
                             Expanded(
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
@@ -202,11 +202,11 @@ Future<TvPlayerAction?> showTvPlayerMenu(
                                     items[index].$3,
                                     style: const TextStyle(
                                       color: Colors.white,
-                                      fontSize: 20,
+                                      fontSize: 16,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
-                                  const SizedBox(height: 4),
+                                  const SizedBox(height: 3),
                                   Text(
                                     items[index].$4,
                                     maxLines: 1,
@@ -215,7 +215,7 @@ Future<TvPlayerAction?> showTvPlayerMenu(
                                       color: Colors.white.withValues(
                                         alpha: .58,
                                       ),
-                                      fontSize: 14,
+                                      fontSize: 12,
                                     ),
                                   ),
                                 ],
@@ -223,6 +223,7 @@ Future<TvPlayerAction?> showTvPlayerMenu(
                             ),
                             Icon(
                               Icons.chevron_right_rounded,
+                              size: 18,
                               color: Colors.white.withValues(alpha: .48),
                             ),
                           ],
@@ -230,19 +231,19 @@ Future<TvPlayerAction?> showTvPlayerMenu(
                       ),
                     ),
                   ),
-                  if (index + 1 < items.length) const SizedBox(height: 10),
+                  if (index + 1 < items.length) const SizedBox(height: 8),
                 ],
               ],
             ),
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(28, 0, 28, 22),
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
           child: Text(
             'OK 播放/暂停 · 长按 OK 3 倍速 · ←/→ 快退快进 · 菜单键设置 · 返回逐层退出',
             style: TextStyle(
               color: Colors.white.withValues(alpha: .42),
-              fontSize: 13,
+              fontSize: 11,
             ),
           ),
         ),
@@ -268,7 +269,7 @@ Future<int?> showTvEpisodePanel(
   return _showTvSidePanel<int>(
     context,
     barrierLabel: '关闭选集',
-    width: 610,
+    width: 480,
     builder: (panelContext) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -281,9 +282,9 @@ Future<int?> showTvEpisodePanel(
           child: RemoteGrid(
             itemKeys: keys,
             columns: 3,
-            itemExtent: 72,
-            spacing: 12,
-            padding: const EdgeInsets.fromLTRB(22, 20, 22, 28),
+            itemExtent: 54,
+            spacing: 10,
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
             initialIndex: safeIndex,
             autofocus: true,
             itemBuilder: (_, index, node, onFocus) {
@@ -312,9 +313,9 @@ Future<int?> showTvEpisodePanel(
                         const Icon(
                           Icons.play_arrow_rounded,
                           color: _tvAccent,
-                          size: 22,
+                          size: 17,
                         ),
-                        const SizedBox(width: 3),
+                        const SizedBox(width: 2),
                       ],
                       Flexible(
                         child: Text(
@@ -323,7 +324,7 @@ Future<int?> showTvEpisodePanel(
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: Colors.white,
-                            fontSize: 17,
+                            fontSize: 14,
                             fontWeight: current
                                 ? FontWeight.w800
                                 : FontWeight.w600,

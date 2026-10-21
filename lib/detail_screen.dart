@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import 'app_layout.dart';
+import 'back_guard.dart';
 import 'core_bridge.dart';
 import 'download_picker.dart';
 import 'downloads_screen.dart';
@@ -303,13 +304,13 @@ class _DetailScreenState extends State<DetailScreen> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () =>
-            Navigator.of(context).maybePop(),
+            popWithBackGuard(context),
         const SingleActivator(LogicalKeyboardKey.goBack): () =>
-            Navigator.of(context).maybePop(),
+            popWithBackGuard(context),
       },
       child: Scaffold(
         appBar: AppBar(
-          toolbarHeight: television ? 64 : null,
+          automaticallyImplyLeading: !television,
           title: Text(drama.title, overflow: TextOverflow.ellipsis),
           actions: [
             RefreshAction(

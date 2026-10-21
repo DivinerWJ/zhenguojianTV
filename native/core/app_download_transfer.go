@@ -186,7 +186,9 @@ func (manager *nativeDownloads) downloadFileAttempt(ctx context.Context, address
 		return 0, false, err
 	}
 	request.Header.Set("User-Agent", userAgent)
-	request.Header.Set("Referer", referer)
+	if referer != "" {
+		request.Header.Set("Referer", referer)
+	}
 	request.Header.Set("Accept-Encoding", "identity")
 	if offset > 0 {
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))

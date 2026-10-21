@@ -350,8 +350,8 @@ class _SourcesScreenState extends State<SourcesScreen> {
         });
       return Scaffold(
         appBar: AppBar(
+          automaticallyImplyLeading: !television,
           title: const Text('站源管理'),
-          toolbarHeight: television ? 64 : null,
         ),
         body: Center(
           child: ConstrainedBox(

@@ -40,9 +40,9 @@ class TvSearchKeyboard extends StatelessWidget {
   static const _rows = <String>['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
   static const _digits = '1234567890';
 
-  /// 单个按键尺寸。10 键一行 × 52 + 间隙 ≈ 580，正好放进 760 宽的对话框。
-  static const double _keyWidth = 52;
-  static const double _keyHeight = 50;
+  /// 单个按键尺寸。10 键一行 × 44 + 间隙 ≈ 500，正好放进 620 宽的对话框。
+  static const double _keyWidth = 44;
+  static const double _keyHeight = 38;
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +79,7 @@ class TvSearchKeyboard extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         for (final child in keys)
-          Padding(padding: const EdgeInsets.all(3), child: child),
+          Padding(padding: const EdgeInsets.all(2), child: child),
       ],
     );
 
@@ -154,7 +154,7 @@ class _KeyCap extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 19,
+                fontSize: 15,
                 fontWeight: FontWeight.w600,
                 color: primary ? colors.primary : colors.onSurface,
               ),
@@ -164,15 +164,15 @@ class _KeyCap extends StatelessWidget {
               children: [
                 Icon(
                   icon,
-                  size: 20,
+                  size: 16,
                   color: primary ? colors.primary : colors.onSurface,
                 ),
                 if (label.isNotEmpty) ...[
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 5),
                   Text(
                     label,
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: 14,
                       fontWeight: FontWeight.w600,
                       color: primary ? colors.primary : colors.onSurface,
                     ),
