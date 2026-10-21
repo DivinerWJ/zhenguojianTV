@@ -15,9 +15,17 @@ on:
         description: '额外产出通用 APK'
         type: boolean
         default: true
+      publish_release:
+        description: '构建完成后发布到 GitHub Release'
+        type: boolean
+        default: true
+      release_tag:
+        description: '发布使用的标签（留空则用当前 ref）'
+        type: string
+        default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FLUTTER_VERSION: '3.47.4'
@@ -80,3 +88,48 @@ jobs:
             dist/android/*.txt
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    needs: android
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-${{ github.run_number }}
+          path: artifacts
+
+      - name: List artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find artifacts -type f | sort
+          test -n "$(find artifacts -name '*.apk' -type f)"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: artifacts/**/*.apk
+          body: |
+            ## 0.8.7
+
+            **新增站源**
+            - 51 短剧：Nuxt 3 devalue payload 解析，一次请求取全部分集，AES-128 HLS 走内置代理，支持搜索与分页
+
+            **TV 版式收紧**
+            - 返回键去重、双击退出、顶部栏移除、控件缩小、海报按 2:3 反算、焦点滚动、隐藏返回箭头
+
+            **站源与播放健壮性**
+            - 黄豆 9 个镜像、黄果 3 个泛解析入口，远程镜像配置热更新
+            - 红果 App 签名补齐，流代理对 EXT-X-KEY / EXT-X-MAP 的重写更稳
+
+            **构建**
+            - Build APK 工作流：Flutter 3.47.4 / Go 1.24.1 / NDK 28.2.13676358，产出 TV 版与通用版 APK
