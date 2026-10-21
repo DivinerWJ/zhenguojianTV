@@ -1,9 +1,6 @@
 name: Build APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       all_sources:
@@ -77,9 +74,9 @@ jobs:
         run: |
           set -euxo pipefail
           args=()
-          if [ '${{ github.event_name }}' != 'workflow_dispatch' ] || [ '${{ inputs.all_sources }}' = 'true' ]; then args+=(--all-sources); fi
-          if [ '${{ github.event_name }}' != 'workflow_dispatch' ] || [ '${{ inputs.tv }}' = 'true' ]; then args+=(--tv); fi
-          if [ '${{ github.event_name }}' != 'workflow_dispatch' ] || [ '${{ inputs.universal }}' = 'true' ]; then args+=(--universal); fi
+          if [ '${{ inputs.all_sources }}' = 'true' ]; then args+=(--all-sources); fi
+          if [ '${{ inputs.tv }}' = 'true' ]; then args+=(--tv); fi
+          if [ '${{ inputs.universal }}' = 'true' ]; then args+=(--universal); fi
           python3 scripts/build_android.py "${args[@]}"
 
       - name: Upload APK
@@ -94,7 +91,7 @@ jobs:
 
   release:
     needs: android
-    if: ${{ github.event_name == 'push' || inputs.publish_release }}
+    if: ${{ inputs.publish_release }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -114,24 +111,25 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'push' && 'v0.8.8' || (inputs.release_tag != '' && inputs.release_tag || github.ref_name) }}
-          name: ${{ github.event_name == 'push' && 'v0.8.8' || (inputs.release_tag != '' && inputs.release_tag || github.ref_name) }}
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
           target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
           files: artifacts/**/*.apk
           body: |
-            ## 0.8.8
+            ## 0.8.7
 
             **新增站源**
-            - 野果短剧：接入当前 Nuxt/AES 协议，逐集解析并校验正片播放地址
-            - 香蕉短剧：接入 guest session + full playback session，逐集验证完整播放
+            - 51 短剧：Nuxt 3 devalue payload 解析，一次请求取全部分集，AES-128 HLS 走内置代理，支持搜索与分页
 
-            **播放策略**
-            - 两个新站源均按整剧逐集正片验证后展示，拒绝试看地址降级
-            - 保留现有 0.8.7 全部站源与播放能力
+            **TV 版式收紧**
+            - 返回键去重、双击退出、顶部栏移除、控件缩小、海报按 2:3 反算、焦点滚动、隐藏返回箭头
+
+            **站源与播放健壮性**
+            - 黄豆 9 个镜像、黄果 3 个泛解析入口，远程镜像配置热更新
+            - 红果 App 签名补齐，流代理对 EXT-X-KEY / EXT-X-MAP 的重写更稳
 
             **构建**
-            - Flutter 3.47.4 / Go 1.24.1 / NDK 28.2.13676358
-            - 产出 TV ABI APK 与 universal APK
+            - Build APK 工作流：Flutter 3.47.4 / Go 1.24.1 / NDK 28.2.13676358，产出 TV 版与通用版 APK
