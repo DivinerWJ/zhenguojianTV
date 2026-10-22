@@ -63,6 +63,7 @@ type Downloader struct {
 	yeguoCryptoMu          sync.Mutex
 	yeguoCrypto            yeguoCryptoConfig
 	yeguoCryptoExpires     time.Time
+	yeguoCryptoRetryAfter  time.Time
 	xiangjiaoSessionMu     sync.Mutex
 	xiangjiaoDeviceID      string
 	xiangjiaoAccessToken   string

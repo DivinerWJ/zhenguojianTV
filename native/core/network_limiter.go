@@ -42,13 +42,29 @@ func catalogResponseBlockReason(response *http.Response, body []byte) string {
 		reason = "Cloudflare 拒绝了当前请求"
 	} else if strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge") || strings.Contains(page, "_cf_chl_opt") || strings.Contains(page, "<title>just a moment") && strings.Contains(page, "cloudflare") {
 		reason = "站点要求浏览器验证，当前请求无法通过"
+	} else if strings.Contains(page, `name="style-origin"`) || strings.Contains(page, "name='style-origin'") {
+		// 野果的镜像站会随机返回这种"JS 挑战页"：只有一个 <meta name="style-origin">
+		// 加一段 Base64 解码脚本，没有任何真实内容。0.8.9 之前它被当成正常页面返回，
+		// 于是镜像竞速有一半概率"赢"在挑战页上，密钥发现直接失败（实测 3/5）。
+		reason = "站点返回了反爬验证页，当前请求无法通过"
+	} else if strings.Contains(page, "document.write(base64.decode(") && strings.Contains(page, "<noscript>error") {
+		// 另一类兜底页：整页只有 document.write(Base64.decode("..."))，解出来是
+		// "51短剧官方入口"（51hub.com / 51shipin.cc），与野果毫无关系。
+		// 镜像竞速只看"HTTP 200 且有内容"，这种页会抢先赢下竞速，导致
+		// 首页 payload 解码失败、密钥发现报"配置已变化"（实测 1/5~5/6）。
+		reason = catalogBlockReasonInterstitial
 	}
 	return reason
 }
 
+// catalogBlockReasonInterstitial 是"站点随机塞兜底页"的情况：同一个域名下一
+// 秒就可能恢复正常，不是真的被封。所以它不能触发 host 级退避——一旦给域名
+// 挂上 60 秒退避，密钥发现会连续失败，整个站源直接不可用。
+const catalogBlockReasonInterstitial = "站点返回了入口导航页，当前请求被拦截"
+
 func (d *Downloader) catalogResponseError(request *http.Request, response *http.Response, body []byte) error {
 	reason := catalogResponseBlockReason(response, body)
-	if d.limiter != nil && reason != "" && response.StatusCode >= 200 && response.StatusCode < 300 {
+	if d.limiter != nil && reason != "" && reason != catalogBlockReasonInterstitial && response.StatusCode >= 200 && response.StatusCode < 300 {
 		d.limiter.observeBlock(request, response)
 	}
 

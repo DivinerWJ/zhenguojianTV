@@ -60,8 +60,8 @@ func TestXiangjiaoCatalogKeepsCoinLockedDramasVisible(t *testing.T) {
 		if request.URL.String() == providerMirrorConfigURL {
 			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
 		}
-		if request.Method == http.MethodGet && request.URL.Path == "/api/home/hot" {
-			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"title":"热播","items":[{"id":"coin-drama-fixture","content_type":"drama","title":"付费短剧","image_url":"https://media.example.test/cover.jpg","drama":{"id":"coin-drama-fixture","title":"付费短剧","cover_url":"https://media.example.test/cover.jpg","commerce":{"charge_type":"coin"},"episode_count":2}}]}}`), nil
+		if request.Method == http.MethodGet && request.URL.Path == "/api/theater" {
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"total":1,"next_cursor":"","items":[{"id":"coin-drama-fixture","title":"付费短剧","cover_url":"https://media.example.test/cover.jpg","commerce":{"charge_type":"coin"},"episode_count":2,"categories":[{"id":"cat-1","name":"校园青春","slug":"xiaoyuanqingchun"}]}]}}`), nil
 		}
 		if request.URL.Path == "/api/playback/sessions" {
 			playbackCalls.Add(1)
@@ -81,6 +81,114 @@ func TestXiangjiaoCatalogKeepsCoinLockedDramasVisible(t *testing.T) {
 	}
 	if playbackCalls.Load() != 0 {
 		t.Fatalf("catalog loading must not probe paid playback sessions, got %d", playbackCalls.Load())
+	}
+}
+
+// 列表项里嵌套的 categories[] 是分类对象，不能被当成剧集。
+func TestXiangjiaoCatalogIgnoresNestedCategories(t *testing.T) {
+	resetProviderMirrorCaches()
+	downloader := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		if request.Method == http.MethodGet && request.URL.Path == "/api/theater" {
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"total":2,"next_cursor":"","items":[
+				{"id":"drama-a","title":"剧A","commerce":{"charge_type":"free"},"categories":[{"id":"cat-1","name":"校园青春","slug":"xiaoyuanqingchun"}],"primary_category":{"id":"cat-2","name":"成人动漫","slug":"chengrendongman"}},
+				{"id":"drama-b","title":"剧B","commerce":{"charge_type":"coin"},"categories":[{"id":"cat-1","name":"校园青春","slug":"xiaoyuanqingchun"}]}
+			]}}`), nil
+		}
+		return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+	})
+
+	items, _, err := downloader.fetchXiangjiaoCatalogPage(context.Background(), 1, "")
+	if err != nil {
+		t.Fatalf("fetchXiangjiaoCatalogPage: %v", err)
+	}
+	if len(items) != 2 {
+		titles := make([]string, 0, len(items))
+		for _, item := range items {
+			titles = append(titles, item.Title)
+		}
+		t.Fatalf("got %d items %v, want exactly the 2 dramas", len(items), titles)
+	}
+	for _, item := range items {
+		if item.Title == "校园青春" || item.Title == "成人动漫" {
+			t.Fatalf("category leaked into catalog: %q", item.Title)
+		}
+	}
+}
+
+// 搜索必须走 /api/search?q=，且查询串要 URL 编码（直接塞中文站点回 400）。
+func TestXiangjiaoSearchUsesEncodedQuery(t *testing.T) {
+	resetProviderMirrorCaches()
+	var gotQuery, gotPath string
+	downloader := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		if request.Method == http.MethodGet && request.URL.Path == "/api/search" {
+			gotPath = request.URL.Path
+			gotQuery = request.URL.RawQuery
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"items":[{"id":"search-hit","title":"总裁的替身新娘","type":"drama"}]}}`), nil
+		}
+		return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+	})
+
+	items, _, err := downloader.fetchXiangjiaoCatalogPage(context.Background(), 1, "总裁")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if gotPath != "/api/search" {
+		t.Fatalf("search path = %q, want /api/search", gotPath)
+	}
+	if !strings.Contains(gotQuery, "q=%E6%80%BB%E8%A3%81") {
+		t.Fatalf("search query = %q, want percent-encoded 总裁", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "limit=30") {
+		t.Fatalf("search query = %q, want limit=30", gotQuery)
+	}
+	if len(items) != 1 || items[0].Title != "总裁的替身新娘" {
+		t.Fatalf("unexpected search result: %#v", items)
+	}
+}
+
+// 剧场只有 cursor 分页：第 2 页必须带第 1 页返回的 next_cursor。
+func TestXiangjiaoTheaterPaginationFollowsCursor(t *testing.T) {
+	resetProviderMirrorCaches()
+	xiangjiaoCursors.mu.Lock()
+	xiangjiaoCursors.pages = map[int]xiangjiaoCursorEntry{}
+	xiangjiaoCursors.mu.Unlock()
+	var cursors []string
+	downloader := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		if request.Method == http.MethodGet && request.URL.Path == "/api/theater" {
+			cursor := request.URL.Query().Get("cursor")
+			cursors = append(cursors, cursor)
+			if cursor == "" {
+				return sourceFixtureResponse(request, http.StatusOK, `{"data":{"total":2,"next_cursor":"cursor-page-2","items":[{"id":"drama-a","title":"剧A","commerce":{"charge_type":"free"}}]}}`), nil
+			}
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"total":2,"next_cursor":"","items":[{"id":"drama-b","title":"剧B","commerce":{"charge_type":"free"}}]}}`), nil
+		}
+		return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+	})
+
+	if _, _, err := downloader.fetchXiangjiaoCatalogPage(context.Background(), 1, ""); err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	items, more, err := downloader.fetchXiangjiaoCatalogPage(context.Background(), 2, "")
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if more {
+		t.Fatalf("page 2 should be the last page")
+	}
+	if len(items) != 1 || items[0].Title != "剧B" {
+		t.Fatalf("unexpected page 2 items: %#v", items)
+	}
+	if len(cursors) != 2 || cursors[0] != "" || cursors[1] != "cursor-page-2" {
+		t.Fatalf("cursor chain = %v, want [\"\" \"cursor-page-2\"]", cursors)
 	}
 }
 

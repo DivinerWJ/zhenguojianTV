@@ -114,24 +114,6 @@ func xiangjiaoMap(row map[string]any, keys ...string) map[string]any {
 	return nil
 }
 
-func walkXiangjiaoMaps(value any, visit func(map[string]any)) {
-	var walk func(any)
-	walk = func(current any) {
-		switch typed := current.(type) {
-		case map[string]any:
-			visit(typed)
-			for _, child := range typed {
-				walk(child)
-			}
-		case []any:
-			for _, child := range typed {
-				walk(child)
-			}
-		}
-	}
-	walk(value)
-}
-
 func xiangjiaoPaymentRequired(apiErr *xiangjiaoHTTPError) bool {
 	if apiErr == nil {
 		return false
@@ -152,71 +134,86 @@ func xiangjiaoPaymentRequired(apiErr *xiangjiaoHTTPError) bool {
 }
 
 func (d *Downloader) xiangjiaoJSON(ctx context.Context, method, path string, payload any, bearer string) (any, error) {
-	var lastErr error
-	for _, base := range d.providerBaseCandidates(ctx, sourceXiangjiao, xiangjiaoBaseMirrors) {
-		var body io.Reader
-		if payload != nil {
-			encoded, err := json.Marshal(payload)
-			if err != nil {
-				return nil, err
-			}
-			body = bytes.NewReader(encoded)
-		}
-		address := strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
-		req, err := http.NewRequestWithContext(ctx, method, address, body)
+	var encodedPayload []byte
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("Origin", strings.TrimRight(base, "/"))
-		req.Header.Set("Referer", strings.TrimRight(base, "/")+"/")
-		if payload != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		if strings.TrimSpace(bearer) != "" {
-			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearer))
-		}
-		resp, err := d.doCatalogRequestWithTimeout(req, 20*time.Second)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-		if len(data) > 4<<20 {
-			return nil, fmt.Errorf("香蕉接口响应过大")
-		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.UseNumber()
-		var decoded any
-		decodeErr := decoder.Decode(&decoded)
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			apiErr := &xiangjiaoHTTPError{Status: resp.StatusCode}
-			if root, ok := decoded.(map[string]any); ok {
-				apiErr.Code = firstNonEmpty(xiangjiaoText(root, "code", "error_code", "errorCode"), xiangjiaoText(xiangjiaoMap(root, "error"), "code"))
-				apiErr.Message = firstNonEmpty(xiangjiaoText(root, "message", "msg", "detail"), xiangjiaoText(xiangjiaoMap(root, "error"), "message", "msg", "detail"))
+		encodedPayload = encoded
+	}
+	var lastErr error
+	for _, base := range d.providerBaseCandidates(ctx, sourceXiangjiao, xiangjiaoBaseMirrors) {
+		address := strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
+		// 站点的 IPv6 出口时不时被重置（read: connection reset by peer），
+		// 单次失败就放弃会让首页偶发空白，所以网络级错误重试一次。
+		for attempt := 1; attempt <= 2; attempt++ {
+			var body io.Reader
+			if encodedPayload != nil {
+				body = bytes.NewReader(encodedPayload)
 			}
-			lastErr = apiErr
-			normalizedPath := strings.TrimRight(path, "/")
-			// 播放接口的 401 交给上层刷新游客 token；403 可能是购买限制，
-			// 即使服务端没有返回 JSON 错误体，也不能切换镜像尝试规避访问控制。
-			if normalizedPath == "/api/playback/sessions" &&
-				(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-				return nil, apiErr
+			req, err := http.NewRequestWithContext(ctx, method, address, body)
+			if err != nil {
+				return nil, err
 			}
-			continue
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("User-Agent", userAgent)
+			req.Header.Set("Origin", strings.TrimRight(base, "/"))
+			req.Header.Set("Referer", strings.TrimRight(base, "/")+"/")
+			if payload != nil {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			if strings.TrimSpace(bearer) != "" {
+				req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearer))
+			}
+			resp, err := d.doCatalogRequestWithTimeout(req, 20*time.Second)
+			if err != nil {
+				lastErr = err
+				if attempt == 1 && ctx.Err() == nil {
+					select {
+					case <-time.After(300 * time.Millisecond):
+					case <-ctx.Done():
+					}
+					continue
+				}
+				break
+			}
+			data, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				break
+			}
+			if len(data) > 4<<20 {
+				return nil, fmt.Errorf("香蕉接口响应过大")
+			}
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.UseNumber()
+			var decoded any
+			decodeErr := decoder.Decode(&decoded)
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				apiErr := &xiangjiaoHTTPError{Status: resp.StatusCode}
+				if root, ok := decoded.(map[string]any); ok {
+					apiErr.Code = firstNonEmpty(xiangjiaoText(root, "code", "error_code", "errorCode"), xiangjiaoText(xiangjiaoMap(root, "error"), "code"))
+					apiErr.Message = firstNonEmpty(xiangjiaoText(root, "message", "msg", "detail"), xiangjiaoText(xiangjiaoMap(root, "error"), "message", "msg", "detail"))
+				}
+				lastErr = apiErr
+				normalizedPath := strings.TrimRight(path, "/")
+				// 播放接口的 401 交给上层刷新游客 token；403 可能是购买限制，
+				// 即使服务端没有返回 JSON 错误体，也不能切换镜像尝试规避访问控制。
+				if normalizedPath == "/api/playback/sessions" &&
+					(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+					return nil, apiErr
+				}
+				break
+			}
+			if decodeErr != nil {
+				lastErr = fmt.Errorf("香蕉接口 JSON 无效: %w", decodeErr)
+				break
+			}
+			d.rememberProviderHost(sourceXiangjiao, base)
+			return decoded, nil
 		}
-		if decodeErr != nil {
-			lastErr = fmt.Errorf("香蕉接口 JSON 无效: %w", decodeErr)
-			continue
-		}
-		d.rememberProviderHost(sourceXiangjiao, base)
-		return decoded, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("香蕉接口请求失败")
@@ -290,43 +287,177 @@ func xiangjiaoDramaFromMap(row map[string]any) Drama {
 	}
 }
 
+// xiangjiaoListItems 取出列表响应里的数组。站点的列表都在 data.items 下
+// （/api/home/hot、/api/search、/api/theater 同构），/api/categories 则是 data 数组。
+func xiangjiaoListItems(value any) []any {
+	data := xiangjiaoPayloadData(value)
+	if list, ok := data.([]any); ok {
+		return list
+	}
+	if row, ok := data.(map[string]any); ok {
+		if list, ok := row["items"].([]any); ok {
+			return list
+		}
+	}
+	return nil
+}
+
+// xiangjiaoIsDramaItem 判断列表项是不是一部剧。列表项里嵌套的 categories[] /
+// primary_category 都是 {id,name,slug} 的分类对象，没有 commerce；分类接口的项
+// 还带 drama_count / definition。0.8.9 之前这里泛走整棵树，把这些分类对象当成
+// 剧集，于是 32 部热播变成 68 部，还混进「校园青春」「成人动漫」「明星换脸」。
+func xiangjiaoIsDramaItem(row map[string]any) bool {
+	if kind := strings.ToLower(xiangjiaoText(row, "content_type", "contentType", "type")); kind != "" && kind != "drama" {
+		return false
+	}
+	if _, ok := row["drama_count"]; ok {
+		return false
+	}
+	if _, ok := row["definition"]; ok {
+		return false
+	}
+	if _, ok := row["commerce"]; !ok {
+		if _, ok := row["slug"]; ok {
+			return false
+		}
+	}
+	return xiangjiaoText(row, "title", "name", "dramaTitle", "drama_title", "videoTitle", "video_title") != ""
+}
+
 func xiangjiaoDramas(value any) []Drama {
 	seen := map[string]bool{}
 	var items []Drama
-	walkXiangjiaoMaps(xiangjiaoPayloadData(value), func(row map[string]any) {
+	for _, raw := range xiangjiaoListItems(value) {
+		row, ok := raw.(map[string]any)
+		if !ok || !xiangjiaoIsDramaItem(row) {
+			continue
+		}
 		drama := xiangjiaoDramaFromMap(row)
 		if drama.ID == "" || seen[drama.ID] {
-			return
+			continue
 		}
 		seen[drama.ID] = true
 		items = append(items, drama)
-	})
+	}
 	return items
 }
 
-func (d *Downloader) fetchXiangjiaoCatalogPage(ctx context.Context, page int, query string) ([]Drama, bool, error) {
-	if page > 1 {
-		return nil, false, nil
+const (
+	xiangjiaoTheaterLimit = 50
+	xiangjiaoSearchLimit  = 30
+	xiangjiaoCursorTTL    = 10 * time.Minute
+)
+
+type xiangjiaoCursorEntry struct {
+	next    string
+	expires time.Time
+}
+
+// xiangjiaoCursors 记录"第 N 页之后的光标"。/api/theater 只认 cursor，没有
+// page/offset（实测都无效），所以要拿第 5 页必须依次走前 4 页；缓存下来后
+// 用户上下翻页就不用重复拉取。
+var xiangjiaoCursors = struct {
+	mu    sync.Mutex
+	pages map[int]xiangjiaoCursorEntry
+}{pages: map[int]xiangjiaoCursorEntry{}}
+
+func xiangjiaoCursorAfter(page int) (string, bool) {
+	xiangjiaoCursors.mu.Lock()
+	defer xiangjiaoCursors.mu.Unlock()
+	entry, ok := xiangjiaoCursors.pages[page]
+	if !ok || time.Now().After(entry.expires) {
+		return "", false
 	}
-	decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, "/api/home/hot", nil, "")
+	return entry.next, true
+}
+
+func xiangjiaoStoreCursor(page int, next string) {
+	xiangjiaoCursors.mu.Lock()
+	defer xiangjiaoCursors.mu.Unlock()
+	xiangjiaoCursors.pages[page] = xiangjiaoCursorEntry{next: next, expires: time.Now().Add(xiangjiaoCursorTTL)}
+}
+
+func xiangjiaoNextCursor(value any) string {
+	data := xiangjiaoPayloadData(value)
+	row, ok := data.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return xiangjiaoText(row, "next_cursor", "nextCursor")
+}
+
+func xiangjiaoTheaterPath(cursor string) string {
+	values := url.Values{}
+	values.Set("limit", strconv.Itoa(xiangjiaoTheaterLimit))
+	if cursor != "" {
+		values.Set("cursor", cursor)
+	}
+	return "/api/theater?" + values.Encode()
+}
+
+// xiangjiaoTheaterPage 取剧场第 page 页。站点没有页码参数，只能顺着
+// next_cursor 往前走。
+func (d *Downloader) xiangjiaoTheaterPage(ctx context.Context, page int) ([]Drama, bool, error) {
+	if page < 1 {
+		page = 1
+	}
+	cursor := ""
+	for current := 1; current < page; current++ {
+		if next, ok := xiangjiaoCursorAfter(current); ok {
+			if next == "" {
+				return nil, false, nil
+			}
+			cursor = next
+			continue
+		}
+		decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, xiangjiaoTheaterPath(cursor), nil, "")
+		if err != nil {
+			return nil, false, err
+		}
+		next := xiangjiaoNextCursor(decoded)
+		xiangjiaoStoreCursor(current, next)
+		if next == "" {
+			return nil, false, nil
+		}
+		cursor = next
+	}
+	decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, xiangjiaoTheaterPath(cursor), nil, "")
 	if err != nil {
 		return nil, false, err
 	}
 	items := xiangjiaoDramas(decoded)
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query != "" {
-		filtered := items[:0]
-		for _, drama := range items {
-			if strings.Contains(strings.ToLower(drama.DisplayTitle()+" "+drama.Desc), query) {
-				filtered = append(filtered, drama)
-			}
-		}
-		items = filtered
+	next := xiangjiaoNextCursor(decoded)
+	xiangjiaoStoreCursor(page, next)
+	return items, next != "" && len(items) > 0, nil
+}
+
+func xiangjiaoSearchPath(query string) string {
+	values := url.Values{}
+	values.Set("q", query)
+	values.Set("limit", strconv.Itoa(xiangjiaoSearchLimit))
+	return "/api/search?" + values.Encode()
+}
+
+func (d *Downloader) fetchXiangjiaoCatalogPage(ctx context.Context, page int, query string) ([]Drama, bool, error) {
+	if page < 1 {
+		page = 1
 	}
-	// Do not hide an entire drama just because its episodes require coins.
-	// The live API exposes access metadata per episode; detail parsing marks
-	// paid episodes as locked and playback still rejects purchase-required 403s.
-	return items, false, nil
+	if strings.TrimSpace(query) != "" {
+		// /api/search 只认 q（keyword/query/term 一律 400），而且查询串必须做
+		// URL 编码——直接塞中文会 400。返回结构同样是 data.items。
+		if page > 1 {
+			return nil, false, nil
+		}
+		decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, xiangjiaoSearchPath(query), nil, "")
+		if err != nil {
+			return nil, false, err
+		}
+		items := xiangjiaoDramas(decoded)
+		return items, len(items) >= xiangjiaoSearchLimit, nil
+	}
+	// 目录走 /api/theater（total 7000+，cursor 分页），不再用只有 32 部的
+	// /api/home/hot，也不再在本地对首页做关键词过滤。
+	return d.xiangjiaoTheaterPage(ctx, page)
 }
 
 func xiangjiaoEpisodeLocked(row map[string]any) bool {
@@ -395,14 +526,9 @@ func (d *Downloader) fetchXiangjiaoDetail(ctx context.Context, sourceID string) 
 	}
 
 	var drama Drama
-	walkXiangjiaoMaps(xiangjiaoPayloadData(detailRaw), func(row map[string]any) {
-		if drama.ID == "" {
-			candidate := xiangjiaoDramaFromMap(row)
-			if candidate.SourceID == sourceID || candidate.SourceID == "" {
-				drama = candidate
-			}
-		}
-	})
+	if row, ok := xiangjiaoPayloadData(detailRaw).(map[string]any); ok {
+		drama = xiangjiaoDramaFromMap(row)
+	}
 	if drama.ID == "" {
 		drama = Drama{ID: providerDramaID(sourceXiangjiao, sourceID), Source: sourceXiangjiao, SourceID: sourceID, Title: "香蕉 " + sourceID, Name: "香蕉 " + sourceID, ChannelName: "香蕉"}
 	}
@@ -415,10 +541,23 @@ func (d *Downloader) fetchXiangjiaoDetail(ctx context.Context, sourceID string) 
 	}
 	seen := map[string]bool{}
 	var episodes []episodeRow
-	walkXiangjiaoMaps(xiangjiaoPayloadData(episodesRaw), func(row map[string]any) {
+	// 分集在 data 数组里，每项是 {id, drama_id, episode_number, title, commerce}。
+	// 不要泛走整棵树：每项里嵌套的 primary_category / categories 也带 id，
+	// 会被当成"分集"混进来。
+	for _, raw := range xiangjiaoListItems(episodesRaw) {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasCategory := row["slug"]; hasCategory {
+			continue
+		}
+		if _, hasCount := row["drama_count"]; hasCount {
+			continue
+		}
 		id, index, ok := xiangjiaoEpisodeRecord(row)
 		if !ok || seen[id] {
-			return
+			continue
 		}
 		seen[id] = true
 		episodes = append(episodes, episodeRow{
@@ -427,7 +566,7 @@ func (d *Downloader) fetchXiangjiaoDetail(ctx context.Context, sourceID string) 
 			title:  xiangjiaoText(row, "title", "name", "episodeTitle", "episode_title"),
 			locked: xiangjiaoEpisodeLocked(row),
 		})
-	})
+	}
 	if len(episodes) == 0 {
 		return Drama{}, nil, fmt.Errorf("香蕉详情未返回分集")
 	}

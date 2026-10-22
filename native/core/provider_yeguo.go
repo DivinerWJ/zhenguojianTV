@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -31,18 +30,29 @@ const (
 	yeguoPageSize     = 20
 	yeguoCryptoTTL    = 30 * time.Minute
 	yeguoMaxChunkScan = 96
+	// 密钥发现要抓 1 个首页 + 若干个 _nuxt chunk。站点正常时 3 秒内完成；
+	// 被拦截时会一直重试，所以给个硬上限。
+	yeguoCryptoDiscoverTimeout = 40 * time.Second
+	yeguoCryptoRetryBackoff    = 60 * time.Second
 )
 
+// 0.8.9：原来还有 ygdj16.com 与 hoamqvgal.cc。实测这两个已不可用——
+// ygdj16.com 一律返回反爬挑战页（<meta name="style-origin"> + Base64 脚本），
+// hoamqvgal.cc 直接 EOF。四个域名一起竞速时，坏镜像有约一半概率"赢"，
+// 密钥发现因此 3/5 失败，整个站源时好时坏。留两个能用的即可。
 var yeguoBaseMirrors = []string{
 	"https://blue.ekzhadks.cc",
 	"https://yeguodj.com",
-	"https://ygdj16.com",
-	"https://hoamqvgal.cc",
 }
 
 var (
 	yeguoPayloadRefPattern = regexp.MustCompile(`(?i)([^"'<>\s]*_payload\.json(?:\?[^"'<>\s]*)?)`)
 	yeguoScriptSrcPattern  = regexp.MustCompile(`(?is)<script\b[^>]*\bsrc=["']([^"']+\.js(?:\?[^"']*)?)["'][^>]*>`)
+	// 0.8.9：站点把入口改成 importmap 之后，首页只有 1 个 `<script src>`，但整页
+	// 通过 importmap / modulepreload / 预连接一共引用了约 28 个 `_nuxt/*.js`，
+	// 加解密配置模块（325 字节，含 key/iv/sign_key）就在其中。只认 `<script src>`
+	// 会连入口都找不到，BFS 直接空转 → 密钥发现失败。
+	yeguoNuxtRefPattern    = regexp.MustCompile(`(/_nuxt/[A-Za-z0-9_\-]+\.js)`)
 	yeguoJSRefPattern      = regexp.MustCompile(`["']([^"']+\.js(?:\?[^"']*)?)["']`)
 	yeguoKeyWrappedPattern = regexp.MustCompile("(?i)\\bkey\\s*:\\s*[A-Za-z_$][A-Za-z0-9_$]*\\(\\s*[`\\\"']([^`\\\"']{16})[`\\\"']")
 	yeguoKeyPattern        = regexp.MustCompile("(?i)\\bkey\\s*:\\s*[`\\\"']([^`\\\"']{16})[`\\\"']")
@@ -214,34 +224,6 @@ func yeguoInt(row map[string]any, keys ...string) int {
 	return 0
 }
 
-func yeguoHasExplicitAccess(row map[string]any) bool {
-	for _, key := range []string{"can_play", "canPlay", "playable", "owned", "is_free", "isFree", "free", "content_access_type", "contentAccessType", "charge_type", "chargeType", "access_type"} {
-		if _, ok := row[key]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func yeguoLocked(row map[string]any) bool {
-	if playable, ok := yeguoBool(row, "can_play", "canPlay", "playable", "owned"); ok {
-		return !playable
-	}
-	if free, ok := yeguoBool(row, "is_free", "isFree", "free"); ok && free {
-		return false
-	}
-	access := strings.ToLower(yeguoText(row, "content_access_type", "contentAccessType", "charge_type", "chargeType", "access_type"))
-	switch access {
-	case "coin", "vip", "paid", "pay", "member", "membership":
-		return true
-	case "free", "public", "":
-		return false
-	default:
-		// 未知权益类型不主动当作可绕过的免费内容。
-		return true
-	}
-}
-
 func yeguoDramas(root any) []Drama {
 	seen := map[string]bool{}
 	var dramas []Drama
@@ -256,8 +238,10 @@ func yeguoDramas(root any) []Drama {
 		if strings.HasPrefix(cover, "//") {
 			cover = "https:" + cover
 		}
-		locked := yeguoLocked(row)
-		vip := locked
+		// 站点的 content_access_type 分 free/coin/vip，但实测这三类都能从
+		// /api/playlet/play 拿到 m3u8，播放接口并不拦付费。标成 VIP 只会让
+		// 详情页弹"这是一集 VIP 内容"的确认框，所以列表一律按可播处理。
+		vip := false
 		dramas = append(dramas, Drama{
 			VIP:          &vip,
 			ID:           providerDramaID(sourceYeguo, id),
@@ -302,7 +286,7 @@ func (d *Downloader) fetchYeguoCatalogPage(ctx context.Context, page int, query 
 			items := yeguoDramas(root)
 			if len(items) > 0 {
 				// 首页是多栏目聚合，不代表完整剧库；允许继续翻 API 历史分页。
-				return d.filterYeguoFullyPlayable(ctx, items), true, nil
+				return items, true, nil
 			}
 		}
 	}
@@ -328,16 +312,19 @@ func (d *Downloader) fetchYeguoCatalogPage(ctx context.Context, page int, query 
 		}
 		items := yeguoDramas(decoded)
 		if len(items) > 0 {
-			return d.filterYeguoFullyPlayable(ctx, items), len(items) >= yeguoPageSize, nil
+			return items, len(items) >= yeguoPageSize, nil
 		}
 	}
 	if strings.TrimSpace(query) != "" && page == 1 {
 		root, _, err := d.fetchYeguoPayload(ctx, "/")
 		if err == nil {
-			items := yeguoFilterDramas(yeguoDramas(root), query)
-			return d.filterYeguoFullyPlayable(ctx, items), false, nil
+			if items := yeguoFilterDramas(yeguoDramas(root), query); len(items) > 0 {
+				return items, false, nil
+			}
 		}
 	}
+	// 搜索接口失败时如果静默返回空列表，UI 会显示"没有找到"，把站点故障
+	// 伪装成"没有这部剧"。这里把真实错误抛上去。
 	if lastErr == nil {
 		lastErr = fmt.Errorf("野果暂未返回剧集")
 	}
@@ -357,77 +344,105 @@ func yeguoMarkerEpisode(raw string) string {
 	return strings.TrimSpace(value)
 }
 
+// yeguoDramaObject 从详情响应里找出"剧级对象"：带 episodes 数组，且 id 与请求一致。
+// 站点的 related_list 里挂着别的剧（同样带 episodes 数组），泛走整棵树会把别人的
+// 分集算进来，所以必须锚定在剧级对象上。
+func yeguoDramaObject(root any, sourceID string) map[string]any {
+	var target map[string]any
+	var fallback map[string]any
+	walkYeguoMaps(root, func(row map[string]any) {
+		if target != nil {
+			return
+		}
+		episodes, ok := row["episodes"].([]any)
+		if !ok || len(episodes) == 0 {
+			return
+		}
+		if fallback == nil {
+			fallback = row
+		}
+		id := yeguoText(row, "video_id", "videoId", "playlet_id", "playletId", "drama_id", "dramaId", "id")
+		if sourceID != "" && id == sourceID {
+			target = row
+		}
+	})
+	if target != nil {
+		return target
+	}
+	return fallback
+}
+
+type yeguoEpisode struct {
+	id    string
+	index int
+	title string
+}
+
+// yeguoEpisodeRows 读剧级对象的 episodes[]。真实分集字段是 id（不是 episode_id），
+// 序号字段是 sort；两者都缺时退回数组下标。
+func yeguoEpisodeRows(drama map[string]any) []yeguoEpisode {
+	raw, _ := drama["episodes"].([]any)
+	seen := map[string]bool{}
+	rows := make([]yeguoEpisode, 0, len(raw))
+	for position, item := range raw {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if adv, exists := yeguoBool(row, "is_adv", "isAdv"); exists && adv {
+			continue
+		}
+		id := yeguoText(row, "id", "episode_id", "episodeId")
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		index := yeguoInt(row, "sort", "episode_number", "episodeNumber", "episode_no", "episodeNo", "episode", "index")
+		if index <= 0 {
+			index = position + 1
+		}
+		rows = append(rows, yeguoEpisode{
+			id:    id,
+			index: index,
+			title: yeguoText(row, "title", "episode_title", "episodeTitle", "name"),
+		})
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].index < rows[j].index })
+	return rows
+}
+
 func (d *Downloader) fetchYeguoDetail(ctx context.Context, sourceID string) (Drama, []Chapter, error) {
 	sourceID = strings.TrimSpace(sourceID)
 	if sourceID == "" {
 		return Drama{}, nil, fmt.Errorf("野果剧集 ID 为空")
-	}
-	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
-	fullyPlayable := d.yeguoDramaFullyPlayable(probeCtx, sourceID)
-	probeCancel()
-	if !fullyPlayable {
-		return Drama{}, nil, fmt.Errorf("野果该剧未通过全集正片校验，已隐藏")
 	}
 	path := yeguoDetailPath(sourceID)
 	root, pageURL, err := d.fetchYeguoPayload(ctx, path)
 	if err != nil {
 		return Drama{}, nil, err
 	}
-
-	var meta map[string]any
-	type episodeRow struct {
-		id             string
-		index          int
-		title          string
-		locked         bool
-		explicitAccess bool
+	// 0.8.9：分集只从剧级对象的 episodes[] 取。原来泛走整棵树、用 episode_id 作键，
+	// 但站点真实字段是 id，episode_id 恒为空 —— 结果抓到了 related_list 里别的剧的
+	// 分集（标题串剧），播放接口回"剧集不存在或不属于该短剧"。
+	meta := yeguoDramaObject(root, sourceID)
+	if meta == nil {
+		return Drama{}, nil, fmt.Errorf("野果详情未返回剧集，站点结构可能已变化")
 	}
-	seenEpisodes := map[string]bool{}
-	var episodes []episodeRow
-	walkYeguoMaps(root, func(row map[string]any) {
-		if meta == nil && yeguoText(row, "video_id", "videoId", "drama_id", "dramaId") == sourceID && yeguoText(row, "title", "video_title", "drama_name", "name") != "" {
-			meta = row
-		}
-		episodeID := yeguoText(row, "episode_id", "episodeId")
-		if episodeID == "" || seenEpisodes[episodeID] {
-			return
-		}
-		seenEpisodes[episodeID] = true
-		index := yeguoInt(row, "episode_number", "episodeNumber", "episode_no", "episodeNo", "episode", "sort", "index")
-		episodes = append(episodes, episodeRow{
-			id:             episodeID,
-			index:          index,
-			title:          yeguoText(row, "title", "episode_title", "episodeTitle", "name"),
-			locked:         false,
-			explicitAccess: yeguoHasExplicitAccess(row),
-		})
-	})
+	episodes := yeguoEpisodeRows(meta)
 	if len(episodes) == 0 {
 		return Drama{}, nil, fmt.Errorf("野果详情未返回分集，站点结构可能已变化")
 	}
-	metaLocked := false
-	for index := range episodes {
-		// 当前站点的剧级对象带 content_access_type，但分集对象不一定重复携带。
-		// 若剧级已经明确 coin/vip，而某集没有独立权益字段，按锁定处理；
-		// 只有分集自己明确 can_play/free/owned 时才允许覆盖剧级状态。
-		if metaLocked && !episodes[index].explicitAccess {
-			episodes[index].locked = true
-		}
-		if episodes[index].index <= 0 {
-			episodes[index].index = index + 1
-		}
-	}
-	sort.SliceStable(episodes, func(i, j int) bool { return episodes[i].index < episodes[j].index })
 
+	// 不再逐集探测播放地址：原先"每集真播一遍"才放行，32 部首页要 110 秒。
+	// 实测 content_access_type 为 free/coin/vip 的剧集都能从 /api/playlet/play
+	// 拿到 m3u8（站点没有在播放接口上拦付费），所以既不标 VIP 也不做全集校验。
 	chapters := make([]Chapter, 0, len(episodes))
-	freeFound := false
 	for _, episode := range episodes {
 		title := strings.TrimSpace(episode.title)
 		if title == "" {
 			title = fmt.Sprintf("第%d集", episode.index)
 		}
 		chapter := Chapter{
-			VIP:            episode.locked,
 			ID:             providerChapterID(sourceYeguo, sourceID, episode.id),
 			Source:         sourceYeguo,
 			Title:          title,
@@ -436,23 +451,16 @@ func (d *Downloader) fetchYeguoDetail(ctx context.Context, sourceID string) (Dra
 			CurrentEpisode: rawEpisode(episode.index),
 		}
 		chapter.VideoURL = yeguoEpisodeMarker(episode.id)
-		if !episode.locked {
-			freeFound = true
-		}
 		chapters = append(chapters, chapter)
 	}
 
-	title := "野果 " + sourceID
-	cover, description := "", ""
-	if meta != nil {
-		title = firstNonEmpty(yeguoText(meta, "title", "video_title", "drama_name", "name"), title)
-		cover = yeguoText(meta, "cover", "cover_url", "coverUrl", "cover_img")
-		description = yeguoText(meta, "intro", "description", "desc")
-	}
+	title := firstNonEmpty(yeguoText(meta, "title", "video_title", "drama_name", "name"), "野果 "+sourceID)
+	cover := yeguoText(meta, "cover", "cover_url", "coverUrl", "cover_img")
 	if strings.HasPrefix(cover, "//") {
 		cover = "https:" + cover
 	}
-	vip := !freeFound
+	description := yeguoText(meta, "intro", "description", "desc")
+	vip := false
 	drama := Drama{
 		VIP:          &vip,
 		ID:           providerDramaID(sourceYeguo, sourceID),
@@ -541,9 +549,19 @@ func (d *Downloader) yeguoAPICall(ctx context.Context, endpoint string, extras m
 	decoded, err := d.decryptYeguoData(ctx, ciphertext, false)
 	if err != nil {
 		// 前端刚更新时缓存 key 可能已经过期，强制重扫一次 chunk。
-		return d.decryptYeguoData(ctx, ciphertext, true)
+		// 但如果这次连 key 都没发现出来，重扫只会把等待时间翻倍。
+		if d.yeguoKeyCached() {
+			return d.decryptYeguoData(ctx, ciphertext, true)
+		}
+		return nil, err
 	}
 	return decoded, nil
+}
+
+func (d *Downloader) yeguoKeyCached() bool {
+	d.yeguoCryptoMu.Lock()
+	defer d.yeguoCryptoMu.Unlock()
+	return d.yeguoCrypto.Key != "" && time.Now().Before(d.yeguoCryptoExpires)
 }
 
 func (d *Downloader) decryptYeguoData(ctx context.Context, ciphertext string, force bool) (any, error) {
@@ -599,8 +617,17 @@ func (d *Downloader) yeguoCryptoConfig(ctx context.Context, force bool) (yeguoCr
 	if !force && d.yeguoCrypto.Key != "" && time.Now().Before(d.yeguoCryptoExpires) {
 		return d.yeguoCrypto, nil
 	}
-	config, err := d.discoverYeguoCrypto(ctx)
+	// 站点被拦截时整个发现流程会一直重试到调用方的 deadline（实测能吃掉
+	// 4 分钟），期间每次请求都白等。这里给发现本身加一个上限，并在失败后
+	// 短暂拒绝重试，让用户尽快看到"站点当前不可用"。
+	if !force && time.Now().Before(d.yeguoCryptoRetryAfter) {
+		return yeguoCryptoConfig{}, fmt.Errorf("野果站点当前不可用，请稍后重试")
+	}
+	discoverCtx, cancel := context.WithTimeout(ctx, yeguoCryptoDiscoverTimeout)
+	defer cancel()
+	config, err := d.discoverYeguoCrypto(discoverCtx)
 	if err != nil {
+		d.yeguoCryptoRetryAfter = time.Now().Add(yeguoCryptoRetryBackoff)
 		return yeguoCryptoConfig{}, err
 	}
 	d.yeguoCrypto = config
@@ -624,6 +651,20 @@ func (d *Downloader) discoverYeguoCrypto(ctx context.Context) (yeguoCryptoConfig
 					queue = append(queue, script)
 				}
 			}
+		}
+		// 补上 importmap / modulepreload 里的 chunk 引用（0.8.9）。
+		for _, match := range yeguoNuxtRefPattern.FindAllStringSubmatch(body, -1) {
+			if len(match) > 1 {
+				if chunk := resolveProviderReference(home, match[1]); chunk != "" {
+					queue = append(queue, chunk)
+				}
+			}
+		}
+		if len(queue) == 0 {
+			// 正常的 Nuxt 首页至少有 20 多个 _nuxt chunk 引用。一个都没有，
+			// 说明拿到的是兜底页而不是真首页，此时报"配置已变化"会误导排查。
+			lastErr = fmt.Errorf("野果首页没有前端脚本引用，可能被站点拦截")
+			continue
 		}
 		seen := map[string]bool{}
 		for len(queue) > 0 && len(seen) < yeguoMaxChunkScan {
@@ -653,7 +694,10 @@ func (d *Downloader) discoverYeguoCrypto(ctx context.Context) (yeguoCryptoConfig
 			results := make(chan result, len(batch))
 			for _, address := range batch {
 				go func(address string) {
-					chunk, fetchErr := d.fetchProviderText(ctx, address, home)
+					// chunk 和首页在同一个域名上，必须直取。走 fetchProviderText 会
+					// 触发镜像竞速（4 个候选 × 2 副本 × 3 波），一个 chunk 最多
+					// 24 次请求；30 个 chunk 叠加起来，站点一被拦就要跑几分钟。
+					chunk, fetchErr := d.fetchProviderTextTimeout(ctx, address, address, home, 8*time.Second)
 					results <- result{url: address, body: chunk, err: fetchErr}
 				}(address)
 			}
@@ -695,68 +739,6 @@ func (d *Downloader) discoverYeguoCrypto(ctx context.Context) (yeguoCryptoConfig
 		return yeguoCryptoConfig{}, fmt.Errorf("野果前端加密配置发现失败: %w", lastErr)
 	}
 	return yeguoCryptoConfig{}, fmt.Errorf("野果前端加密配置已变化，请更新站源适配")
-}
-
-type yeguoPlayableCacheEntry struct {
-	playable bool
-	expires  time.Time
-}
-
-var yeguoPlayableCache sync.Map
-
-func yeguoEpisodeIDs(value any, sourceID string) []string {
-	sourceID = strings.TrimSpace(sourceID)
-	var fallback []any
-	var target []any
-	var walk func(any)
-	walk = func(current any) {
-		switch typed := current.(type) {
-		case map[string]any:
-			if episodes, ok := typed["episodes"].([]any); ok && len(episodes) > 0 {
-				if fallback == nil {
-					fallback = episodes
-				}
-				id := yeguoText(typed, "video_id", "videoId", "playlet_id", "playletId", "drama_id", "dramaId", "id")
-				if sourceID != "" && id == sourceID {
-					target = episodes
-					return
-				}
-			}
-			for _, child := range typed {
-				if target == nil {
-					walk(child)
-				}
-			}
-		case []any:
-			for _, child := range typed {
-				if target == nil {
-					walk(child)
-				}
-			}
-		}
-	}
-	walk(value)
-	rows := target
-	if rows == nil {
-		rows = fallback
-	}
-	seen := map[string]bool{}
-	ids := make([]string, 0, len(rows))
-	for _, item := range rows {
-		row, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if adv, exists := yeguoBool(row, "is_adv", "isAdv"); exists && adv {
-			continue
-		}
-		id := yeguoText(row, "id", "episode_id", "episodeId")
-		if id != "" && !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }
 
 func yeguoPlaybackMap(value any) map[string]any {
@@ -821,80 +803,6 @@ func (d *Downloader) yeguoFullPlaybackURL(ctx context.Context, dramaID, episodeI
 		lastErr = fmt.Errorf("野果正片播放地址获取失败")
 	}
 	return "", lastErr
-}
-
-func (d *Downloader) yeguoDramaFullyPlayable(ctx context.Context, sourceID string) bool {
-	sourceID = strings.TrimSpace(sourceID)
-	if sourceID == "" {
-		return false
-	}
-	if cached, ok := yeguoPlayableCache.Load(sourceID); ok {
-		entry := cached.(yeguoPlayableCacheEntry)
-		if time.Now().Before(entry.expires) {
-			return entry.playable
-		}
-		yeguoPlayableCache.Delete(sourceID)
-	}
-	detail, err := d.yeguoAPICall(ctx, "/api/playlet/detail", map[string]string{
-		"video_id":      sourceID,
-		"id":            sourceID,
-		"episode_id":    "0",
-		"related_limit": "0",
-	})
-	if err != nil {
-		return false
-	}
-	episodeIDs := yeguoEpisodeIDs(detail, sourceID)
-	if len(episodeIDs) == 0 {
-		return false
-	}
-	playable := true
-	for _, episodeID := range episodeIDs {
-		if _, err := d.yeguoFullPlaybackURL(ctx, sourceID, episodeID); err != nil {
-			playable = false
-			break
-		}
-	}
-	ttl := 30 * time.Minute
-	if !playable {
-		ttl = 2 * time.Minute
-	}
-	yeguoPlayableCache.Store(sourceID, yeguoPlayableCacheEntry{playable: playable, expires: time.Now().Add(ttl)})
-	return playable
-}
-
-func (d *Downloader) filterYeguoFullyPlayable(ctx context.Context, items []Drama) []Drama {
-	if len(items) == 0 {
-		return items
-	}
-	allowed := make([]bool, len(items))
-	sem := make(chan struct{}, 6)
-	var wg sync.WaitGroup
-	for i := range items {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				return
-			}
-			probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			allowed[index] = d.yeguoDramaFullyPlayable(probeCtx, items[index].SourceID)
-		}(i)
-	}
-	wg.Wait()
-	filtered := make([]Drama, 0, len(items))
-	for i, drama := range items {
-		if allowed[i] {
-			vip := false
-			drama.VIP = &vip
-			filtered = append(filtered, drama)
-		}
-	}
-	return filtered
 }
 
 func yeguoFindMediaURL(value any) string {
