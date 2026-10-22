@@ -95,6 +95,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            README.md
+            pubspec.yaml
+          sparse-checkout-cone-mode: false
+
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
@@ -108,6 +116,44 @@ jobs:
           find artifacts -type f | sort
           test -n "$(find artifacts -name '*.apk' -type f)"
 
+      # 发布说明原来是在下面硬编码的 0.8.7 文案，之后每版都忘了改，
+      # 于是每个 Release 都写着 0.8.7。现在从 README 的「更新」章节里
+      # 抓出当前版本的所有 `### <版本> · <主题>` 小节，生成主题清单。
+      # 版本号取自 pubspec.yaml，改版本时两处自动对齐。
+      - name: Compose release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' pubspec.yaml | head -n1)
+          if [ -z "$version" ]; then
+            echo "pubspec.yaml 里没读到版本号" >&2
+            exit 1
+          fi
+          titles=$(LC_ALL=C awk -v v="$version" '
+            /^### / {
+              if (index($0, "### " v " · ") == 1) {
+                print "- " substr($0, length("### " v " · ") + 1)
+              }
+            }
+          ' README.md)
+          {
+            echo "## $version"
+            echo
+            if [ -n "$titles" ]; then
+              printf '%s\n' "$titles"
+            else
+              echo "本版构建产物见下方附件，详细说明见 README 的更新章节。"
+            fi
+            echo
+            echo "**产物**：\`all\` / \`arm64-v8a\` / \`armeabi-v7a\`"
+            echo
+            echo "**构建环境**：Flutter 3.47.4 / Go 1.24.1 / NDK 28.2.13676358"
+            echo
+            echo "详细说明见 [README 的更新章节](https://github.com/ai0by/zhenguojianTV/blob/main/README.md#二更新)。"
+          } > release_body.md
+          echo "--- release_body.md ---"
+          cat release_body.md
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -118,18 +164,4 @@ jobs:
           prerelease: false
           fail_on_unmatched_files: true
           files: artifacts/**/*.apk
-          body: |
-            ## 0.8.7
-
-            **新增站源**
-            - 51 短剧：Nuxt 3 devalue payload 解析，一次请求取全部分集，AES-128 HLS 走内置代理，支持搜索与分页
-
-            **TV 版式收紧**
-            - 返回键去重、双击退出、顶部栏移除、控件缩小、海报按 2:3 反算、焦点滚动、隐藏返回箭头
-
-            **站源与播放健壮性**
-            - 黄豆 9 个镜像、黄果 3 个泛解析入口，远程镜像配置热更新
-            - 红果 App 签名补齐，流代理对 EXT-X-KEY / EXT-X-MAP 的重写更稳
-
-            **构建**
-            - Build APK 工作流：Flutter 3.47.4 / Go 1.24.1 / NDK 28.2.13676358，产出 TV 版与通用版 APK
+          body_path: release_body.md
