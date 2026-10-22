@@ -170,3 +170,77 @@ func TestEZDMWLiveCatalogDetailPlayback(t *testing.T) {
 	}
 	t.Logf("live E站 playback passed: %d search results, %d episodes, upstream=%s, native HLS gateway and first resource verified", len(items), len(chapters), parsed.Host)
 }
+
+// TestEZDMWLivePlaybackSpacedTitle 专门盯"标题里带空格"的番剧（0.8.9）。
+//
+// 之前 0.8.9 的冒烟测试挑的是「学生会也有洞」——标题没有空格，正好绕过了
+// iframe 地址未转义的坑，于是测试全绿而线上首页约一半番剧播不了。
+// 这个用例从真实目录里**只挑标题含空格**的番剧，确保转义逻辑不会退化。
+func TestEZDMWLivePlaybackSpacedTitle(t *testing.T) {
+	if os.Getenv("EZDMW_LIVE_TEST") != "1" {
+		t.Skip("set EZDMW_LIVE_TEST=1 to test the live E站 spaced-title playback")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	engine, err := newNativeEngine(t.TempDir())
+	if err != nil {
+		t.Fatalf("initialize native engine: %v", err)
+	}
+	d := engine.downloader
+
+	items, _, err := d.fetchEZDMWCatalogPage(ctx, 1, "", "")
+	if err != nil {
+		t.Fatalf("live E站 catalog failed: %v", err)
+	}
+	var selected Drama
+	for _, item := range items {
+		if strings.ContainsAny(item.Title, " \u00a0") {
+			selected = item
+			break
+		}
+	}
+	if selected.ID == "" {
+		t.Skipf("live E站 catalog has no spaced title among %d items", len(items))
+	}
+
+	drama, chapters, err := d.fetchEZDMWDetail(ctx, selected.SourceID)
+	if err != nil {
+		t.Fatalf("live E站 detail for %q failed: %v", drama.DisplayTitle(), err)
+	}
+	if len(chapters) == 0 {
+		t.Fatalf("live E站 detail %q returned no episodes", drama.DisplayTitle())
+	}
+	task := Task{DramaID: drama.ID, DramaTitle: drama.DisplayTitle(), Chapter: chapters[0]}
+	media, err := d.resolveProviderMedia(ctx, task)
+	if err != nil {
+		t.Fatalf("live E站 spaced-title playback failed (%q): %v", drama.DisplayTitle(), err)
+	}
+	if strings.ContainsAny(media.URL, " \t\r\n") {
+		t.Fatalf("resolved media URL still contains raw whitespace: %q", media.URL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, media.URL, nil)
+	if err != nil {
+		t.Fatalf("create media probe: %v", err)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Referer", media.Referer)
+	req.Header.Set("Range", "bytes=0-1023")
+	resp, err := d.client.Do(req)
+	if err != nil {
+		t.Fatalf("live E站 media request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		t.Fatalf("live E站 media endpoint returned HTTP %d", resp.StatusCode)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		t.Fatalf("read media body: %v", readErr)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(body)), "#EXTM3U") {
+		t.Fatalf("live E站 media is not an HLS playlist (%q)", string(body[:min(len(body), 40)]))
+	}
+	t.Logf("live E站 spaced-title playback passed: %q (%d episodes) -> %s", drama.DisplayTitle(), len(chapters), media.URL)
+}

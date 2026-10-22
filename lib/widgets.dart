@@ -494,7 +494,8 @@ class DramaTile extends StatelessWidget {
           // 卡片自身范围内，不会被网格视口裁掉。
           focusStyle: RemoteFocusStyle.corners,
           label:
-              '${drama.title}，${drama.episodes}集${badge == null ? '' : '，$badge'}',
+              '${drama.title}${drama.episodes > 0 ? '，${drama.episodes}集' : ''}'
+              '${badge == null ? '' : '，$badge'}',
           child: content,
         ),
       );
@@ -502,7 +503,7 @@ class DramaTile extends StatelessWidget {
     return Semantics(
       button: true,
       selected: selected,
-      label: '${drama.title}，${drama.episodes}集',
+      label: '${drama.title}${drama.episodes > 0 ? '，${drama.episodes}集' : ''}',
       child: InkWell(
         onTap: onTap,
         onLongPress: onLongPress ?? onMore,

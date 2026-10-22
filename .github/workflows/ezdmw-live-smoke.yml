@@ -3,6 +3,7 @@ name: E站 Live Smoke Test
 on:
   push:
     branches: [feat/ezdmw-anime-source]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,4 +22,6 @@ jobs:
         working-directory: native
         env:
           EZDMW_LIVE_TEST: '1'
-        run: go test ./core -run '^TestEZDMWLiveCatalogDetailPlayback$' -count=1 -v
+        # 0.8.9：连"标题带空格"的番剧一起跑。之前只测无空格标题，
+        # 正好绕过 iframe 地址未转义的坑，测试全绿但线上播不了。
+        run: go test ./core -run '^TestEZDMWLive' -count=1 -v
