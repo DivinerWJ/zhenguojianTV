@@ -491,10 +491,13 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
   static const double _posterTitleSize = 13;
   static const double _posterSubtitleSize = 11;
 
-  /// 海报行高度按"封面 2:3 + 两行文字 + 焦点框"反算。
+  /// 海报行高度按"封面 2:3 + 两行文字"反算。
   ///
   /// 写死高度会让封面被 `BoxFit.cover` 裁掉上下两端（标题、主演名字都没了），
   /// 或者反过来比格子高、底部文字被裁。1.45 是 CJK 字体的行高上界。
+  ///
+  /// 0.8.9：焦点装饰不再外扩（`RemoteTarget.chrome` 为 0），
+  /// 这里按封面实际尺寸算即可，不需要再预留焦点环的空间。
   static double _posterHeight(BuildContext context) {
     final scaler = MediaQuery.textScalerOf(context);
     return ((_posterWidth - RemoteTarget.chrome) * 1.5 +
@@ -518,6 +521,9 @@ class _TvHomeScreenState extends State<TvHomeScreen> {
     height: _posterHeight(context),
     child: RemoteTarget(
       autofocus: autofocus,
+      // 0.8.9：海报用四角标记，不画整圈边框（整圈边框会像"虚框"，且容易被
+      // 横向列表的视口裁掉一半）。
+      focusStyle: RemoteFocusStyle.corners,
       onPressed: onPressed,
       label: subtitle == null ? drama.title : '${drama.title}，$subtitle',
       child: Column(

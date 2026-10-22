@@ -290,4 +290,57 @@ void main() {
     expect(find.text('退出播放？'), findsOneWidget);
     expect(find.text('继续观看'), findsOneWidget);
   });
+
+  testWidgets(
+    'TV up/down still switch episodes while a control button has focus',
+    (tester) async {
+      final (_, repo, platform) = await _mount(tester);
+      expect(repo.requestedEpisodes.last, 1);
+
+      // 短按 OK：暂停，并把焦点交给底部播放按钮。
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pumpAndSettle();
+      expect(platform.state.playing, isFalse);
+      expect(FocusManager.instance.primaryFocus?.debugLabel, 'feed-play-button');
+
+      // 焦点停在按钮上时，上下键仍然必须是「下一集 / 上一集」（0.8.9），
+      // 不能退化成焦点遍历——控件只有一行，遍历的结果就是按了没反应。
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await _pumpFrames(tester, 20);
+      expect(repo.requestedEpisodes.last, 2);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await _pumpFrames(tester, 20);
+      expect(repo.requestedEpisodes.last, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('TV resuming from the play button returns focus to the page', (
+    tester,
+  ) async {
+    final (_, _, platform) = await _mount(tester);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+    expect(platform.state.playing, isFalse);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'feed-play-button');
+
+    // 在播放按钮上再按一次确定 → 恢复播放，焦点必须还给播放画面，
+    // 否则控件会因为"有焦点"而永远不自动隐藏（0.8.9）。
+    await tester.sendKeyEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+    expect(platform.state.playing, isTrue);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'vertical-feed');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('TV hides the fullscreen button', (tester) async {
+    await _mount(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('feed-landscape')), findsNothing);
+    expect(find.byKey(const ValueKey('fullscreen-exit')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }

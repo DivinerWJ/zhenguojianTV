@@ -638,21 +638,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// 电视返回键（0.8.1，0.8.7 改为"再按一次退出"）。
+  /// 电视返回键（0.8.1，0.8.7 改为"再按一次退出"，0.8.9 修回首页焦点）。
   ///
-  /// 逐层退让：选择模式 → 退出选择；不在首页 → 回首页；搜索有词 → 清空搜索；
-  /// 都没有 → 第一次按提示、两秒内再按一次才退出应用。
+  /// 逐层退让：选择模式 → 退出选择；不在首页 → 回首页（**并把左侧菜单的
+  /// 焦点一并移回「首页」**）；搜索有词 → 清空搜索；都没有 → 第一次按提示、
+  /// 两秒内再按一次才退出应用。
   ///
   /// 0.8.7 不再弹"是否退出"对话框：电视上返回键会先把对话框关掉，
   /// 下一次返回又被同一条逻辑重新弹出来，用户绕不出去。
+  ///
+  /// 0.8.9 修两个真机问题：
+  /// 1. 在「发现」页按返回，偶尔直接弹"再按一次退出"。部分盒子一次按键会
+  ///    同时产生键盘事件和系统 `popRoute`，两条都走到这里：第一条把页面退回
+  ///    首页，第二条到达时 `_tab` 已经是首页，于是被当成"在首页按返回"。
+  ///    现在把去重窗口放宽到 [_backRepeatWindow]（见下方 `_backGuard` 的注释），
+  ///    同一次按键的第二条事件在入口就被丢掉，不会再往下逐层退让。
+  /// 2. 界面退回首页了，但左侧菜单的光标还停在「最近观看」上。
+  ///    现在退回首页时显式把焦点交给「首页」那一项（[_focusNavItem]）。
   Future<void> _televisionBack() async {
     if (!_backGuard.claim()) return;
     if (_selectionMode) {
       _cancelSelection();
       return;
     }
+    // 0.8.9：发现页里打开的"推荐分类"是一层子页面，先退这一层，
+    // 再退到首页，否则一次返回会连跳两级。
+    //
+    // 这里必须走 `_changeCategory('')` 而不是裸 `setState`：后者只把标记翻掉，
+    // 列表里仍是推荐内容，而且不会重新拉取分类数据（`_changeCategory` 会清空
+    // `_items`、重置分页、回滚滚动位置并 `_load`）。
+    if (_showRecommendations) {
+      _changeCategory('');
+      return;
+    }
     if (_tab != _feedIndex) {
-      setState(() => _tab = _feedIndex);
+      _changeTab(_feedIndex);
+      _focusNavItem(_feedIndex);
       return;
     }
     if (_search.text.isNotEmpty || _pinyinQuery.isNotEmpty) {
@@ -662,7 +683,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _armExit();
   }
 
-  final _backGuard = BackGuard();
+  /// 左侧菜单每项的焦点节点（0.8.9）。
+  ///
+  /// 为什么需要：`IndexedStack` 只切换显示页，左侧菜单始终在树里，
+  /// 焦点会**留在原来那一项**上。返回键退回首页时如果不显式移焦，
+  /// 光标就停在「最近观看」上，和当前页面不一致。
+  final Map<int, FocusNode> _navFocusNodes = {};
+
+  FocusNode _navFocusNode(int tab) => _navFocusNodes.putIfAbsent(
+    tab,
+    () => FocusNode(debugLabel: 'tv-nav-focus-$tab'),
+  );
+
+  /// 把左侧菜单焦点移到指定项（下一帧，等页面切换完成）。
+  void _focusNavItem(int tab) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _navFocusNode(tab).requestFocus();
+    });
+  }
+
+  /// 电视返回键去重（0.8.9：窗口 180ms → 400ms）。
+  ///
+  /// 部分盒子把**一次**返回按键同时报成键盘事件和系统 `popRoute`，两条都会
+  /// 走到 [_televisionBack]。原来 180ms 只够覆盖"两条都在处理前到达"的情况；
+  /// 一旦第一条已经把页面退到首页、第二条稍后才到（实测间隔 100~200ms，
+  /// 加上退页动画还会更久），去重就失效，第二条被当成"在首页又按了一次"，
+  /// 于是直接弹出"再按一次退出"。
+  ///
+  /// 400ms 的依据：重复事件间隔实测在 200ms 以内，留一倍余量；同时不会吃掉
+  /// 用户为了退出而**真的**再按一次（提示出现后人手再按通常 ≥500ms）。
+  /// 这个 guard 只有电视返回键在用，不影响手机端。
+  final _backGuard = BackGuard(window: const Duration(milliseconds: 400));
   DateTime? _exitArmedAt;
   Timer? _exitTimer;
   static const _exitWindow = Duration(seconds: 2);
@@ -755,6 +807,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _debounce?.cancel();
     _search.dispose();
     _scroll.dispose();
+    for (final node in _navFocusNodes.values) {
+      node.dispose();
+    }
     super.dispose();
   }
 
@@ -1204,6 +1259,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       required VoidCallback onPressed,
       bool selected = false,
       bool autofocus = false,
+      FocusNode? focusNode,
     }) => Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: RemoteButton(
@@ -1212,6 +1268,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon: icon,
         selected: selected,
         autofocus: autofocus,
+        focusNode: focusNode,
         onPressed: onPressed,
       ),
     );
@@ -1227,6 +1284,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               key: ValueKey('tv-nav-${entry.$3}'),
               selected: _tab == entry.$3,
               autofocus: index == 0,
+              // 每项一个稳定的焦点节点：返回键退回首页时要把光标移回「首页」
+              // （见 _televisionBack / _focusNavItem）。
+              focusNode: _navFocusNode(entry.$3),
               onPressed: () {
                 // 电视没有"双击标签"这个手势：已经在当前页时再按一次 = 刷新剧库。
                 if (_tab == entry.$3) {

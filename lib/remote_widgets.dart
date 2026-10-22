@@ -151,6 +151,22 @@ class SourceSwitchPill extends StatelessWidget {
   }
 }
 
+/// 焦点装饰的两种画法（0.8.9）。
+///
+/// 0.8.7 及之前统一用「四边各 4px 内边距 + 3px 白描边 + 1.045 放大 + 外发光」，
+/// 三个问题在电视上都会被放大：
+///
+/// 1. **放大和外发光画在自身边界之外**。横向海报行的视口、海报的 `ClipRRect`、
+///    弹窗里的 `SingleChildScrollView` 都会把它裁掉，表现就是"选框只显示一半"，
+///    焦点越靠边越明显（首尾两张海报、热门搜索的最后一个词）。
+/// 2. 描边与内容之间留了 4px 间隙，看上去像一个悬空的框，而不是"选中了这张卡"。
+/// 3. 那 8px 的 chrome 是从海报身上挤出来的，封面平白小了 8px。
+///
+/// 现在所有焦点装饰都画在**自身边界之内**，任何父级裁剪都切不到它：
+/// - [RemoteFocusStyle.ring]：紧贴内容的描边 + 填充，用于按钮、胶囊、列表项；
+/// - [RemoteFocusStyle.corners]：四角标记，用于海报（不画整圈边框）。
+enum RemoteFocusStyle { ring, corners }
+
 class RemoteTarget extends StatefulWidget {
   const RemoteTarget({
     super.key,
@@ -162,13 +178,15 @@ class RemoteTarget extends StatefulWidget {
     this.selected = false,
     this.label,
     this.accent,
+    this.focusStyle = RemoteFocusStyle.ring,
   });
 
-  /// 焦点框自身占掉的额外空间（四边各 4 的 padding）。
+  /// 焦点样式额外占用的布局空间（0.8.9 起为 0）。
   ///
-  /// 网格的 `itemExtent` 必须把它算进去，否则内容比格子高 8 像素，
-  /// 卡片底部的标题/集数会被裁掉。
-  static const double chrome = 8;
+  /// 焦点装饰不再外扩、也不再放大，所以不需要预留空间。常量保留是为了
+  /// 让 [DramaTile.extentFor] / 电视海报行的高度反算不必分版本判断，
+  /// 读到 0 即为"按内容实际尺寸算"。
+  static const double chrome = 0;
 
   final Widget child;
   final VoidCallback? onPressed;
@@ -177,6 +195,9 @@ class RemoteTarget extends StatefulWidget {
   final bool autofocus;
   final bool selected;
   final String? label;
+
+  /// 焦点装饰画法，默认 [RemoteFocusStyle.ring]。
+  final RemoteFocusStyle focusStyle;
 
   /// 焦点色覆盖（0.8.2）。
   ///
@@ -199,10 +220,18 @@ class _RemoteTargetState extends State<RemoteTarget> {
     final focusFill = widget.accent != null
         ? accent.withValues(alpha: .22)
         : colors.primaryContainer;
-    // 0.8.1 焦点样式增强（10 英尺 UI）：
-    // - 缩放 1.03：远距离一眼能看出"当前在哪"；
-    // - 焦点环 3.5px + 外发光：海报本身颜色杂乱时，纯描边容易糊掉；
-    // - 选中态（selected）保持细一档的描边，与焦点态区分开。
+    final ring = widget.focusStyle == RemoteFocusStyle.ring;
+    // 0.8.9 焦点样式：
+    // - 不再缩放、不再外发光、不再留 4px 间隙，装饰全部落在自身边界内，
+    //   父级怎么裁剪都切不到（详见 [RemoteFocusStyle] 的说明）；
+    // - 海报用四角标记，避免整圈边框在封面四周形成"虚框"；
+    // - 按钮/胶囊用紧贴内容的描边 + 填充，观感是"这张卡亮了"而不是"套了个框"。
+    final borderColor = _focused
+        ? Colors.white
+        : widget.selected
+        ? accent
+        : Colors.transparent;
+    final borderWidth = _focused ? 3.0 : 2.0;
     return FocusableActionDetector(
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
@@ -248,41 +277,120 @@ class _RemoteTargetState extends State<RemoteTarget> {
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: widget.onPressed,
-            child: AnimatedScale(
-              scale: _focused ? 1.045 : 1,
-              duration: const Duration(milliseconds: 140),
-              curve: Curves.easeOutCubic,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: _focused || widget.selected
-                      ? focusFill
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: _focused
-                        ? Colors.white
-                        : widget.selected
-                        ? accent
-                        : Colors.transparent,
-                    width: _focused ? 3 : 2.5,
-                  ),
-                  boxShadow: _focused
-                      ? [
-                          BoxShadow(
-                            color: accent.withValues(alpha: .45),
-                            blurRadius: 18,
-                            spreadRadius: 2,
-                          ),
-                        ]
-                      : null,
-                ),
-                child: ExcludeFocus(child: widget.child),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              decoration: BoxDecoration(
+                // 海报不铺底色，否则焦点时整块卡片蒙上一层色，封面发灰。
+                color: ring && (_focused || widget.selected)
+                    ? focusFill
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              // 画在内容之上、且在自身矩形之内：不会被父级裁剪，也不会
+              // 因为描边而让内容位移（foregroundDecoration 不参与布局）。
+              foregroundDecoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: ring
+                    ? Border.all(color: borderColor, width: borderWidth)
+                    : null,
+              ),
+              child: Stack(
+                fit: StackFit.passthrough,
+                // 角标全部落在自身矩形内，禁止裁切没有意义，但保留 none
+                // 以免以后有人往这一层加外扩装饰时被静默切掉。
+                clipBehavior: Clip.none,
+                children: [
+                  ExcludeFocus(child: widget.child),
+                  if (!ring)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: _FocusCorners(
+                          visible: _focused,
+                          // 选集等"选中态"没有焦点时也给一圈极细的提示，
+                          // 否则多选场景看不出哪些已经勾上。
+                          selected: widget.selected,
+                          accent: accent,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 海报的焦点四角标记（0.8.9）。
+///
+/// 只在自身矩形**内部**画四个 L 形角标，不描整圈边框：
+/// - 不会像整圈边框那样在封面外形成"虚框"，也不会被父级裁剪切掉；
+/// - 在满屏封面的网格里，四角标记比细边框更容易一眼定位（10 英尺 UI）。
+class _FocusCorners extends StatelessWidget {
+  const _FocusCorners({
+    required this.visible,
+    required this.selected,
+    required this.accent,
+  });
+
+  final bool visible;
+  final bool selected;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    const inset = 3.0;
+    const length = 16.0;
+    const stroke = 3.0;
+    Widget corner(Alignment alignment, {required Color color}) {
+      final isTop = alignment.y < 0;
+      final isLeft = alignment.x < 0;
+      final side = BorderSide(color: color, width: stroke);
+      return Align(
+        alignment: alignment,
+        child: Container(
+          width: length,
+          height: length,
+          decoration: BoxDecoration(
+            border: Border(
+              top: isTop ? side : BorderSide.none,
+              bottom: isTop ? BorderSide.none : side,
+              left: isLeft ? side : BorderSide.none,
+              right: isLeft ? BorderSide.none : side,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(inset),
+      child: Stack(
+        children: [
+          if (selected && !visible)
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(color: accent, width: 2),
+                ),
+              ),
+            ),
+          AnimatedOpacity(
+            opacity: visible ? 1 : 0,
+            duration: const Duration(milliseconds: 120),
+            child: Stack(
+              children: [
+                corner(Alignment.topLeft, color: Colors.white),
+                corner(Alignment.topRight, color: Colors.white),
+                corner(Alignment.bottomLeft, color: Colors.white),
+                corner(Alignment.bottomRight, color: Colors.white),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -278,4 +278,34 @@ void main() {
     expect(FocusManager.instance.primaryFocus?.debugLabel, 'remote-125');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('TV back from a non-home tab returns home and moves nav focus', (
+    tester,
+  ) async {
+    size(tester, const Size(960, 540));
+    final store = await makeStore();
+    await tester.pumpWidget(
+      DuanjuApp(
+        repository: FixtureRepository(),
+        store: store,
+        television: true,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 切到「最近观看」（下标 3）。
+    focusRemote(tester, find.byKey(const ValueKey('tv-nav-3')));
+    await tester.pumpAndSettle();
+    await press(tester, LogicalKeyboardKey.select);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'tv-nav-focus-3');
+
+    // 返回：页面回首页，左侧菜单焦点必须一并回到「首页」（0.8.9）。
+    await press(tester, LogicalKeyboardKey.goBack);
+    expect(
+      FocusManager.instance.primaryFocus?.debugLabel,
+      'tv-nav-focus-0',
+      reason: '退回首页后光标不能停在「最近观看」上',
+    );
+    expect(tester.takeException(), isNull);
+  });
 }

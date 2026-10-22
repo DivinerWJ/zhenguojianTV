@@ -371,6 +371,8 @@ class DramaTile extends StatelessWidget {
       MediaQuery.textScalerOf(context).scale(12) * 1.3;
 
   static double extentFor(BuildContext context, double width) {
+    // 0.8.9：焦点装饰不再占用额外空间（`RemoteTarget.chrome` 为 0），
+    // 格子高度 = 封面 2:3 + 间距 + 两行文字，不再预留焦点环的 8px。
     final chrome = AppLayout.isTelevision(context) ? RemoteTarget.chrome : 0.0;
     return ((width - chrome) * 1.5 +
             13 +
@@ -488,6 +490,9 @@ class DramaTile extends StatelessWidget {
           onFocus: onFocus,
           onPressed: onTap,
           selected: selected ?? false,
+          // 0.8.9：海报用四角标记（不画整圈边框），焦点样式完全落在
+          // 卡片自身范围内，不会被网格视口裁掉。
+          focusStyle: RemoteFocusStyle.corners,
           label:
               '${drama.title}，${drama.episodes}集${badge == null ? '' : '，$badge'}',
           child: content,
