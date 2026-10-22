@@ -16,6 +16,15 @@ import (
 const ezdmwBaseURL = "https://www.ezdmw.org"
 const ezdmwPageSize = 20
 
+// ezdmwSearchPageSize 是 /Index/search_some.html 每页写死的条数，改不了
+// （`num`/`limit`/`pagesize`/`size`/`count` 全部无效，实测一律 10 条）。
+const ezdmwSearchPageSize = 10
+
+// ezdmwBrowseKeyword 用来把「全站」当一次搜索：站点搜索除了标题也匹配年份字段
+// （`2019年1月【连载中】`），而每一部都有年份，所以搜「年」等价于全部番剧。
+// 实测结果集约 2080 部，标题里不含「年」的也在内。
+const ezdmwBrowseKeyword = "年"
+
 var ezdmwBaseMirrors = []string{
 	"https://www.ezdmw.org",
 	"https://m.ezdmw.org",
@@ -29,16 +38,22 @@ var (
 	ezdmwParagraphPattern   = regexp.MustCompile("(?is)<p\\b([^>]*)>(.*?)</p>")
 	// 集数：`更新到：&nbsp;24` 经 cleanText 变成 `更新到： 24`（全角冒号 + NBSP），
 	// 所以数字前要允许 空白 / NBSP(\x{00a0}) / 半角与全角冒号（0.8.9）。
-	ezdmwEpisodeCountPattern = regexp.MustCompile("(?i)(?:更新到|更新至)[\\s\\x{00a0}：:]*0*([0-9]+)|(?:共|全)\\s*0*([0-9]+)\\s*(?:集|话|期)|([0-9]+)\\s*集\\s*完结")
-	ezdmwMediaURLPattern     = regexp.MustCompile("(?i)(?:https?:)?//[^\\\"'<>\\s]+?\\.(?:m3u8|mp4)(?:\\?[^\\\"'<>\\s]*)?")
-	ezdmwVideoTagPattern     = regexp.MustCompile("(?is)<(?:video|source)\\b[^>]*>")
-	ezdmwIframePattern       = regexp.MustCompile("(?is)<iframe\\b[^>]*>")
-	ezdmwPlayerDataPattern   = regexp.MustCompile("(?is)(?:player_data|playerData|video_data|videoData)\\s*[:=]\\s*[\\\"']([^\\\"']{16,})[\\\"']")
-	ezdmwImageTagPattern     = regexp.MustCompile("(?is)<img\\b[^>]*>")
-	ezdmwTitleEpisodeSuffix  = regexp.MustCompile("(?i)\\s*第\\s*0*[0-9]+\\s*集.*$")
-	ezdmwTitleSiteSuffix     = regexp.MustCompile("(?i)\\s*[-|_—·]*\\s*(?:E站弹幕网|E站动漫|E站)\\s*$")
-	ezdmwHTMLCommentPattern  = regexp.MustCompile("(?s)<!--.*?-->")
-	ezdmwNumericIDPattern    = regexp.MustCompile("^[0-9]{1,12}$")
+	// search_some 的结果卡片用的是 `更至12话`，简写也要收（0.8.9）。
+	ezdmwEpisodeCountPattern = regexp.MustCompile("(?i)(?:更新到|更新至|更至)[\\s\\x{00a0}：:]*0*([0-9]+)|(?:共|全)\\s*0*([0-9]+)\\s*(?:集|话|期)|([0-9]+)\\s*集\\s*完结")
+	// 卡片标题后面的元信息尾巴：`标题&nbsp;&nbsp;更至12话`。
+	// `共/全 + 数字 + 集/话/期` 要求带数字，否则「全金属狂潮」这类标题会被砍掉。
+	ezdmwCardMetaPattern = regexp.MustCompile("(?i)[\\s\\x{00a0}]*(?:更至|更新至|更新到|共\\s*0*[0-9]+\\s*[集话期]|全\\s*0*[0-9]+\\s*[集话期]).*$")
+	// 结果卡片右上角的年份/状态，`<span style="float:right;">2019年1月【连载中】`。
+	ezdmwFloatRightSpanPattern = regexp.MustCompile("(?is)<span\\b[^>]*float\\s*:\\s*right[^>]*>.*?</span>")
+	ezdmwMediaURLPattern       = regexp.MustCompile("(?i)(?:https?:)?//[^\\\"'<>\\s]+?\\.(?:m3u8|mp4)(?:\\?[^\\\"'<>\\s]*)?")
+	ezdmwVideoTagPattern       = regexp.MustCompile("(?is)<(?:video|source)\\b[^>]*>")
+	ezdmwIframePattern         = regexp.MustCompile("(?is)<iframe\\b[^>]*>")
+	ezdmwPlayerDataPattern     = regexp.MustCompile("(?is)(?:player_data|playerData|video_data|videoData)\\s*[:=]\\s*[\\\"']([^\\\"']{16,})[\\\"']")
+	ezdmwImageTagPattern       = regexp.MustCompile("(?is)<img\\b[^>]*>")
+	ezdmwTitleEpisodeSuffix    = regexp.MustCompile("(?i)\\s*第\\s*0*[0-9]+\\s*集.*$")
+	ezdmwTitleSiteSuffix       = regexp.MustCompile("(?i)\\s*[-|_—·]*\\s*(?:E站弹幕网|E站动漫|E站)\\s*$")
+	ezdmwHTMLCommentPattern    = regexp.MustCompile("(?s)<!--.*?-->")
+	ezdmwNumericIDPattern      = regexp.MustCompile("^[0-9]{1,12}$")
 )
 
 // ezdmwRequestURL 把 E站页面里原样出现的地址整理成可以直接发请求的形式（0.8.9）。
@@ -123,11 +138,33 @@ func ezdmwCardTitle(inner string) string {
 		if strings.Contains(strings.ToLower(match[1]), "info") {
 			continue
 		}
-		if title := ezdmwCleanTitle(match[2]); title != "" {
+		if title := ezdmwCardText(match[2]); title != "" {
 			return title
 		}
 	}
-	return ezdmwCleanTitle(cleanText(inner))
+	return ezdmwCardText(inner)
+}
+
+// ezdmwCardText 把卡片里的一段 HTML 收成干净的标题。
+//
+// search_some 的结果卡片把标题和元信息塞在同一个 <p> 里（0.8.9）：
+//
+//	<p>来自深渊剧场版&nbsp;&nbsp;更至PV话<span style="float:right;">2019年1月【连载中】<span></span></p>
+//
+// 直接 cleanText 会得到「来自深渊剧场版 更至PV话 2019年1月【连载中】」。
+// 所以先删注释、删掉右浮动的年份/状态 span，再砍掉 `更至12话` 这类尾巴。
+func ezdmwCardText(raw string) string {
+	// 注释要**先**整段删掉：卡片里有一段被注释掉的
+	// `<!--<span class="play_some"><img/> 1970-01-01</span>-->`，
+	// 靠 cleanText 去标签只会把 `<!--` 和 `-->` 留下，标题就变成
+	// 「1970-01-01 -->来自深渊剧场版」。
+	raw = ezdmwHTMLCommentPattern.ReplaceAllString(raw, " ")
+	raw = ezdmwFloatRightSpanPattern.ReplaceAllString(raw, " ")
+	title := ezdmwCleanTitle(raw)
+	if loc := ezdmwCardMetaPattern.FindStringIndex(title); loc != nil && loc[0] > 0 {
+		title = strings.TrimSpace(title[:loc[0]])
+	}
+	return title
 }
 
 func ezdmwMirrorHost(host string) bool {
@@ -284,12 +321,17 @@ func parseEZDMWCatalogItems(raw, pageURL string) []Drama {
 				coverURL = resolved
 			}
 		}
+		// search_some 的结果卡片把 `更至12话`、`【连载中】` 放在 <a> 内部，
+		// 首页卡片则在 .info-card 里；两处都要看，所以拼起来再解析（0.8.9）。
 		contextText := cleanText(contextBlock(scope, match[0], match[1], 180))
-		count := parseEZDMWEpisodeCount(contextText)
+		metaText := cleanText(inner) + " " + contextText
+		count := parseEZDMWEpisodeCount(metaText)
 		releaseStatus := ""
-		if strings.Contains(contextText, "完结") {
+		// 站点的完结标记是「【全集完】」，不是「完结」——只查「完结」会漏掉，
+		// 于是所有完结番都被当成未知状态（0.8.9）。
+		if strings.Contains(metaText, "全集完") || strings.Contains(metaText, "完结") {
 			releaseStatus = "finished"
-		} else if strings.Contains(contextText, "连载") || strings.Contains(contextText, "更新") {
+		} else if strings.Contains(metaText, "连载") || strings.Contains(metaText, "更新") {
 			releaseStatus = "ongoing"
 		}
 		drama := Drama{
@@ -327,17 +369,37 @@ func parseEZDMWCatalogItems(raw, pageURL string) []Drama {
 	return out
 }
 
-func ezdmwHasMore(raw string, count int) bool {
-	for _, match := range ezdmwAnchorPattern.FindAllStringSubmatch(raw, -1) {
-		if len(match) < 3 {
-			continue
-		}
-		label := strings.ToLower(cleanText(match[2]))
-		if strings.Contains(label, "下一页") || strings.Contains(label, "下页") || label == "next" {
-			return true
-		}
+// ezdmwSearchSomeURL 构造 /Index/search_some.html 的列表地址。
+//
+// 这个入口的 `page` 参数是**条目偏移量**，不是页码：站点直接把 page 当 offset 用，
+// 每页固定 10 条。实测 page=1 与 page=2 的结果重叠 9 条、与 page=11 零重叠，
+// 步长正好 1 条，所以取第 n 页必须传 (n-1)*10。
+//
+// 注意站点的 /Index/search.html 是另一个控制器：结果固定截断在 5 条，而且完全不认
+// page —— 0.8.9 之前用的就是它，所以搜索永远只有 5 条、也没有"加载更多"。
+func ezdmwSearchSomeURL(base, keyword string, offset int) string {
+	if offset < 0 {
+		offset = 0
 	}
-	return count >= ezdmwPageSize
+	values := url.Values{}
+	values.Set("searchText", keyword)
+	values.Set("page", strconv.Itoa(offset))
+	return base + "/Index/search_some.html?" + values.Encode()
+}
+
+// fetchEZDMWListPage 取一页 search_some 结果。
+//
+// 空页不算错误：它表示已经翻到底，返回 hasMore=false 让客户端收手。报错反而更糟——
+// catalog_browser.dart 里 `hasMore = result.hasMore || result.warning.isNotEmpty`，
+// 一旦带 warning，"加载更多"会变成无限重试。
+func (d *Downloader) fetchEZDMWListPage(ctx context.Context, address string) ([]Drama, bool, error) {
+	base := strings.TrimRight(d.providerBaseURL(sourceEZDMW), "/")
+	body, err := d.fetchProviderText(ctx, address, base+"/")
+	if err != nil {
+		return nil, false, err
+	}
+	items := parseEZDMWCatalogItems(body, address)
+	return items, len(items) >= ezdmwSearchPageSize, nil
 }
 
 func (d *Downloader) fetchEZDMWCatalogPage(ctx context.Context, page int, category, query string) ([]Drama, bool, error) {
@@ -348,39 +410,36 @@ func (d *Downloader) fetchEZDMWCatalogPage(ctx context.Context, page int, catego
 		page = 1
 	}
 	base := strings.TrimRight(d.providerBaseURL(sourceEZDMW), "/")
-	address := base + "/"
-	if query = strings.TrimSpace(query); query != "" {
-		address = base + "/Index/search.html?searchText=" + url.QueryEscape(query)
-	}
-	if page > 1 {
-		separator := "?"
-		if strings.Contains(address, "?") {
-			separator = "&"
-		}
-		address += separator + "page=" + strconv.Itoa(page)
-	}
-	body, err := d.fetchProviderText(ctx, address, base+"/")
-	if err != nil {
-		return nil, false, err
-	}
-	items := parseEZDMWCatalogItems(body, address)
-	if len(items) == 0 && query == "" && page == 1 {
-		homeURL := base + "/"
-		if homeBody, homeErr := d.fetchProviderText(ctx, homeURL, homeURL); homeErr == nil {
-			items = parseEZDMWCatalogItems(homeBody, homeURL)
-			if len(items) > 0 {
-				body = homeBody
-			}
-		}
-	}
-	if len(items) == 0 {
-		return nil, false, errors.New("E站目录未解析到番剧，站点页面结构可能已变化")
-	}
-	more := false
+	query = strings.TrimSpace(query)
+
+	// 搜索：走 search_some 的偏移分页，能把整个结果集翻完。
+	// 站点对空结果会输出「搜索结果为空」，此时返回空页而不是报错，
+	// 否则"搜不到"会被渲染成"站点结构变了"。
 	if query != "" {
-		more = ezdmwHasMore(body, len(items))
+		return d.fetchEZDMWListPage(ctx, ezdmwSearchSomeURL(base, query, (page-1)*ezdmwSearchPageSize))
 	}
-	return items, more, nil
+
+	// 目录首页仍然用站点编排好的首页：最近更新 20 + 新番 9 + 排行榜 11，一次 40 部。
+	// 站点对 `/` 和 `/Index/anime.html` 的 `page` 参数一律忽略，没有真正的翻页接口，
+	// 所以"加载更多"只能靠 search_some 的偏移继续往下走（0.8.9）。
+	if page == 1 {
+		homeURL := base + "/"
+		body, err := d.fetchProviderText(ctx, homeURL, homeURL)
+		if err != nil {
+			return nil, false, err
+		}
+		items := parseEZDMWCatalogItems(body, homeURL)
+		if len(items) == 0 {
+			return nil, false, errors.New("E站目录未解析到番剧，站点页面结构可能已变化")
+		}
+		return items, true, nil
+	}
+
+	// 后续页从偏移 0 开始，而不是从首页条数（40）接着走：首页是按"最近更新"编排的，
+	// 和 search_some 默认的 ID 倒序只重叠 11/40，跳过前 40 条会漏掉约 29 部。
+	// 重叠部分由 catalog_browser 按 item.id 建 Map 合并时自然去重。
+	offset := (page - 2) * ezdmwSearchPageSize
+	return d.fetchEZDMWListPage(ctx, ezdmwSearchSomeURL(base, ezdmwBrowseKeyword, offset))
 }
 
 func ezdmwEpisodeTitle(raw string, index int) string {

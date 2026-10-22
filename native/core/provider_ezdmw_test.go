@@ -242,3 +242,96 @@ func TestEZDMWCatalogTitleHandlesOtherCardLayouts(t *testing.T) {
 		t.Fatalf("排行榜标题 = %q，want 葬送的芙莉莲", ranked[0].Title)
 	}
 }
+
+// search_some 的 page 是**条目偏移量**而不是页码：站点每页固定 10 条，page 直接当
+// offset 用。曾经按"页码"传（page=2 表示第 2 页），结果永远只挪动 1 条（0.8.9 修）。
+func TestEZDMWSearchSomeURLUsesItemOffset(t *testing.T) {
+	got := ezdmwSearchSomeURL(ezdmwBaseURL, "史莱姆", 30)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("解析地址失败：%v", err)
+	}
+	if parsed.Path != "/Index/search_some.html" {
+		t.Fatalf("路径 = %q，want /Index/search_some.html", parsed.Path)
+	}
+	values := parsed.Query()
+	if values.Get("searchText") != "史莱姆" {
+		t.Fatalf("searchText = %q，want 史莱姆", values.Get("searchText"))
+	}
+	if values.Get("page") != "30" {
+		t.Fatalf("page = %q，want 30（偏移量）", values.Get("page"))
+	}
+	// 负数偏移要夹到 0，否则站点会当成没传
+	if negative := ezdmwSearchSomeURL(ezdmwBaseURL, "x", -5); !strings.Contains(negative, "page=0") {
+		t.Fatalf("负偏移未夹到 0：%q", negative)
+	}
+}
+
+// search_some 的结果卡片把标题和元信息塞在同一个 <p> 里：
+//
+//	<p>来自深渊剧场版&nbsp;&nbsp;更至PV话<span style="float:right;">2019年1月【连载中】<span></span></p>
+//
+// 直接 cleanText 会得到「来自深渊剧场版 更至PV话 2019年1月【连载中】」（0.8.9 修）。
+func TestEZDMWSearchSomeCardParsesTitleAndEpisodes(t *testing.T) {
+	body := `<section class="some_drama" id="some_drama">` +
+		`<h2 style="padding-top:0px;">【2019年】动漫</h2>` +
+		`<div style="padding:20px;height:130px;border:1px solid #ccc;clear:both;">` +
+		`<a href="/Index/bangumi/39789.html" target="_blank">` +
+		`<img src="https://www.ezdmw.org/Public/atlas_oss/Public/images/some_img/1608.jpg" class="img1" />` +
+		`<p style="display:block;width:920px;float:left;">` +
+		`<!--<span class="play_some"><img src="/Public/images/clock1.png" /> 1970-01-01</span>-->` +
+		`来自深渊剧场版&nbsp;&nbsp;更至PV话<span style="float:right;">2019年1月【连载中】<span></span></p>` +
+		`</a>` +
+		`<p style="display:block;width:920px;float:left;">简介：剧场版后篇。</p>` +
+		`</div>` +
+		`<div style="padding:20px;height:130px;border:1px solid #ccc;clear:both;">` +
+		`<a href="/Index/bangumi/39788.html" target="_blank">` +
+		`<img src="https://www.ezdmw.org/Public/atlas_oss/Public/images/some_img/1607.jpg" class="img1" />` +
+		`<p style="display:block;width:920px;float:left;">` +
+		`狂赌之渊××&nbsp;&nbsp;更至12话<span style="float:right;">2019年1月【全集完】<span></span></p>` +
+		`</a></div>` +
+		`</section>`
+	items := parseEZDMWCatalogItems(body, ezdmwBaseURL+"/Index/search_some.html?searchText=%E5%B9%B4&page=0")
+	if len(items) != 2 {
+		t.Fatalf("解析出 %d 条，want 2", len(items))
+	}
+	if items[0].Title != "来自深渊剧场版" {
+		t.Fatalf("标题 = %q，want 来自深渊剧场版", items[0].Title)
+	}
+	// 更至PV话 没有数字，集数应当留 0，不能瞎猜
+	if nativeText(items[0].Episodes) != "0" {
+		t.Fatalf("PV 集数 = %v，want 0", items[0].Episodes)
+	}
+	if items[0].ReleaseStatus != "ongoing" {
+		t.Fatalf("连载状态 = %q，want ongoing", items[0].ReleaseStatus)
+	}
+	if items[0].Cover != "https://www.ezdmw.org/Public/atlas_oss/Public/images/some_img/1608.jpg" {
+		t.Fatalf("封面 = %q", items[0].Cover)
+	}
+	if items[1].Title != "狂赌之渊××" {
+		t.Fatalf("标题 = %q，want 狂赌之渊××", items[1].Title)
+	}
+	if nativeText(items[1].Episodes) != "12" {
+		t.Fatalf("更至12话 解析成 %v，want 12", items[1].Episodes)
+	}
+	if items[1].ReleaseStatus != "finished" {
+		t.Fatalf("完结状态 = %q，want finished", items[1].ReleaseStatus)
+	}
+}
+
+// 砍元信息尾巴的正则必须要求「共/全 + 数字 + 集话期」，否则「全金属狂潮」
+// 「全部成为F」这类以「全」开头的标题会被整条吃掉。
+func TestEZDMWCardTextKeepsTitlesStartingWithQuan(t *testing.T) {
+	cases := map[string]string{
+		"全金属狂潮":                      "全金属狂潮",
+		"全部成为F":                      "全部成为F",
+		"全金属狂潮&nbsp;&nbsp;共12话":      "全金属狂潮",
+		"标题&nbsp;&nbsp;更至36话":        "标题",
+		"标题&nbsp;&nbsp;更新到：&nbsp;24": "标题",
+	}
+	for raw, want := range cases {
+		if got := ezdmwCardText(raw); got != want {
+			t.Fatalf("ezdmwCardText(%q) = %q，want %q", raw, got, want)
+		}
+	}
+}

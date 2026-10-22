@@ -244,3 +244,112 @@ func TestEZDMWLivePlaybackSpacedTitle(t *testing.T) {
 	}
 	t.Logf("live E站 spaced-title playback passed: %q (%d episodes) -> %s", drama.DisplayTitle(), len(chapters), media.URL)
 }
+
+// TestEZDMWLiveCatalogPagination 盯"能不能枚举整个站"（0.8.9）。
+//
+// 站点的 `/` 和 `/Index/anime.html` 都忽略 `page`，目录长期只能拿首页 40 部；
+// 真正的翻页只有 /Index/search_some.html，而且它的 page 是**条目偏移量**。
+// 这个用例验证三件事：目录第 2 页之后确实在往下走、搜索能翻页、翻到底不报错。
+func TestEZDMWLiveCatalogPagination(t *testing.T) {
+	if os.Getenv("EZDMW_LIVE_TEST") != "1" {
+		t.Skip("set EZDMW_LIVE_TEST=1 to test the live E站 pagination")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	engine, err := newNativeEngine(t.TempDir())
+	if err != nil {
+		t.Fatalf("initialize native engine: %v", err)
+	}
+	d := engine.downloader
+
+	first, more, err := d.fetchEZDMWCatalogPage(ctx, 1, "", "")
+	if err != nil {
+		t.Fatalf("live E站 catalog page 1 failed: %v", err)
+	}
+	if len(first) == 0 {
+		t.Fatal("live E站 catalog page 1 is empty")
+	}
+	if !more {
+		t.Fatal("目录第 1 页之后必须能继续翻（hasMore=false 会让首页永远只有 40 部）")
+	}
+	seen := map[string]bool{}
+	for _, item := range first {
+		seen[item.ID] = true
+	}
+
+	second, more, err := d.fetchEZDMWCatalogPage(ctx, 2, "", "")
+	if err != nil {
+		t.Fatalf("live E站 catalog page 2 failed: %v", err)
+	}
+	if len(second) != ezdmwSearchPageSize {
+		t.Fatalf("目录第 2 页拿到 %d 条，want %d", len(second), ezdmwSearchPageSize)
+	}
+	if !more {
+		t.Fatal("目录第 2 页之后仍应有下一页")
+	}
+	fresh := 0
+	for _, item := range second {
+		if !seen[item.ID] {
+			fresh++
+		}
+	}
+	if fresh == 0 {
+		t.Fatalf("目录第 2 页没有带来任何新番剧，分页参数可能又退化成页码了：%v", second)
+	}
+
+	third, _, err := d.fetchEZDMWCatalogPage(ctx, 3, "", "")
+	if err != nil {
+		t.Fatalf("live E站 catalog page 3 failed: %v", err)
+	}
+	for _, item := range second {
+		seen[item.ID] = true
+	}
+	thirdFresh := 0
+	for _, item := range third {
+		if !seen[item.ID] {
+			thirdFresh++
+		}
+	}
+	if thirdFresh != len(third) {
+		t.Fatalf("目录第 3 页与第 2 页重叠了 %d 条，偏移步长不对", len(third)-thirdFresh)
+	}
+
+	// 搜索：第 1、2 页必须是不相交的两批（站点每页 10 条）
+	searchFirst, searchMore, err := d.fetchEZDMWCatalogPage(ctx, 1, "", "之")
+	if err != nil {
+		t.Fatalf("live E站 search page 1 failed: %v", err)
+	}
+	if len(searchFirst) == 0 {
+		t.Skip("live E站 search for 之 returned nothing")
+	}
+	if !searchMore {
+		t.Fatalf("搜索结果只有 %d 条就报 hasMore=false，分页没生效", len(searchFirst))
+	}
+	searchSecond, _, err := d.fetchEZDMWCatalogPage(ctx, 2, "", "之")
+	if err != nil {
+		t.Fatalf("live E站 search page 2 failed: %v", err)
+	}
+	overlap := 0
+	for _, a := range searchFirst {
+		for _, b := range searchSecond {
+			if a.ID == b.ID {
+				overlap++
+			}
+		}
+	}
+	if overlap != 0 {
+		t.Fatalf("搜索第 1、2 页重叠 %d 条，偏移步长不对", overlap)
+	}
+
+	// 搜不到时必须是"空页"而不是错误，否则 UI 会显示成站点结构变了
+	empty, emptyMore, err := d.fetchEZDMWCatalogPage(ctx, 1, "", "zzzzqqqzzzz")
+	if err != nil {
+		t.Fatalf("无结果搜索不应该报错：%v", err)
+	}
+	if len(empty) != 0 || emptyMore {
+		t.Fatalf("无结果搜索返回了 %d 条（hasMore=%v）", len(empty), emptyMore)
+	}
+	t.Logf("live E站 pagination passed: page1=%d, page2 新增 %d/%d, page3 全部新, 搜索两页无重叠",
+		len(first), fresh, len(second))
+}
