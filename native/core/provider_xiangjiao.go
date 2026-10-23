@@ -17,9 +17,12 @@ import (
 )
 
 // 香蕉短剧是明文 REST 站点。播放正片必须先创建 guest session，
-// 再调用 /api/playback/sessions。这里明确不调用 trial/sessions：
-// 如果服务端返回 PAYMENT_REQUIRED，就把该集作为受限内容交给 UI，
-// 不把试看地址伪装成“完整可播放”。
+// 再调用 /api/playback/sessions。
+//
+// 0.8.10 起：正片会话对游客返回 403 `purchase_required` 时，会再试一次
+// `/api/trial/sessions`（站点对游客开放的试看）。拿到试看 manifest 就播
+// 试看片段，拿不到才把该集作为受限内容交给 UI —— 客户端没有合法路径
+// 拿全集，不做付费绕过。
 const (
 	sourceXiangjiao     = "xiangjiao"
 	xiangjiaoBaseURL    = "https://xiangjiaoai.ai"
@@ -684,6 +687,15 @@ func (d *Downloader) xiangjiaoFullPlaybackManifest(ctx context.Context, dramaID,
 					continue
 				}
 				if apiErr.Status == http.StatusForbidden || xiangjiaoPaymentRequired(apiErr) {
+					// 0.8.10：正片被拒时退一步拿试看会话。
+					//
+					// 香蕉的正片对游客一律 403 `purchase_required`，客户端没有
+					// 合法路径拿全集。但站点对游客开放了 trial 会话（前几分钟），
+					// 原来这里直接报错，用户看到的就是"香蕉完全不能播放"。
+					// 现在先试试看：能拿到就播（时长由服务端截断），拿不到再报错。
+					if preview, previewErr := d.xiangjiaoTrialManifest(ctx, dramaID, episodeID, token); previewErr == nil && preview != "" {
+						return preview, nil
+					}
 					return "", fmt.Errorf("香蕉该集需要会员或购买，服务端拒绝游客正片播放")
 				}
 			}
@@ -691,8 +703,9 @@ func (d *Downloader) xiangjiaoFullPlaybackManifest(ctx context.Context, dramaID,
 		}
 		data, _ := xiangjiaoPayloadData(decoded).(map[string]any)
 		mode := strings.ToLower(xiangjiaoText(data, "play_mode", "playMode"))
-		if mode != "full" {
-			return "", fmt.Errorf("香蕉服务端未返回 full 正片会话")
+		// 0.8.10：trial / preview 会话同样可用（就是试看片段），不再直接判失败。
+		if mode != "full" && mode != "trial" && mode != "preview" {
+			return "", fmt.Errorf("香蕉服务端未返回可用播放会话（%s）", firstNonEmpty(mode, "空"))
 		}
 		media := xiangjiaoMap(data, "media")
 		manifest := xiangjiaoText(media, "manifest_url", "manifestUrl", "url")
@@ -705,6 +718,40 @@ func (d *Downloader) xiangjiaoFullPlaybackManifest(ctx context.Context, dramaID,
 		return manifest, nil
 	}
 	return "", fmt.Errorf("香蕉游客会话刷新失败")
+}
+
+// xiangjiaoTrialManifest 取"试看会话"的播放列表（0.8.10）。
+//
+// 只在正片会话被 403 时调用：站点对游客开放试看，能拿到 manifest 就说明
+// 这一集至少能看前几分钟，比直接报"不能播放"有用。
+// 返回空字符串表示站点没有试看接口或不给试看。
+func (d *Downloader) xiangjiaoTrialManifest(ctx context.Context, dramaID, episodeID, token string) (string, error) {
+	// 正片那次 403 会给 host 挂上退避，紧接着的试看请求会被限流器直接挡回
+	// （连请求都发不出去），所以这里跳过源级门/退避 —— 只是一次性的兜底请求。
+	ctx = context.WithValue(ctx, skipCatalogGateKey{}, true)
+	payload := map[string]any{"episode_id": episodeID}
+	if strings.TrimSpace(dramaID) != "" {
+		payload["drama_id"] = strings.TrimSpace(dramaID)
+	}
+	for _, path := range []string{"/api/trial/sessions", "/api/preview/sessions"} {
+		decoded, err := d.xiangjiaoJSON(ctx, http.MethodPost, path, payload, token)
+		if err != nil {
+			continue
+		}
+		data, _ := xiangjiaoPayloadData(decoded).(map[string]any)
+		manifest := xiangjiaoText(xiangjiaoMap(data, "media"), "manifest_url", "manifestUrl", "url")
+		if manifest == "" {
+			manifest = xiangjiaoText(data, "manifest_url", "manifestUrl", "trial_url", "url")
+		}
+		if manifest == "" {
+			continue
+		}
+		if strings.HasPrefix(manifest, "/") {
+			manifest = strings.TrimRight(d.providerBaseURL(sourceXiangjiao), "/") + manifest
+		}
+		return manifest, nil
+	}
+	return "", nil
 }
 
 func (d *Downloader) resolveXiangjiaoPlayback(ctx context.Context, task Task) (providerMedia, error) {

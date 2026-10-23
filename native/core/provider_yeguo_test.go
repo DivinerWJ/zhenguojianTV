@@ -1,6 +1,12 @@
 package core
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"testing"
+	"time"
+)
 
 // 详情响应里 related_list 挂着别的剧（同样带 episodes），剧级对象必须锚定在
 // 请求的那一部上，否则分集标题会串到别的剧。
@@ -78,5 +84,45 @@ func TestYeguoCatalogDoesNotMarkPaidDramasAsVip(t *testing.T) {
 		if item.VIP == nil || *item.VIP {
 			t.Fatalf("%q marked VIP, want playable: %#v", item.Title, item.VIP)
 		}
+	}
+}
+
+// 0.8.10：密钥发现必须跳过「源级并发门」。
+//
+// 真机现象：野果点播永远失败，报「站点当前不可用」，而单独跑发现只要 2 秒。
+// 根因是 `yeguoAPICall` 读完响应、还没关 body 时就去解密，解密要触发密钥发现，
+// 发现又要发请求 —— 但源级并发门还被这次请求占着，于是发现一直在等自己，
+// 直到超时。这里把门手动占住，验证发现仍能完成。
+func TestYeguoCryptoDiscoveryIgnoresSourceGate(t *testing.T) {
+	resetProviderMirrorCaches()
+	downloader := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		switch {
+		case request.URL.Path == "/":
+			return sourceFixtureResponse(request, http.StatusOK,
+				`<html><head><script type="module" src="/_nuxt/config.js"></script></head><body></body></html>`), nil
+		case request.URL.Path == "/_nuxt/config.js":
+			return sourceFixtureResponse(request, http.StatusOK,
+				"var n={mode:'CBC',key:t('2acf7e91e9864673'),iv:t('1c29882d3ddfcfd6'),sign_key:t('5589d41f92a597d016b037ac37db243d')};"), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	})
+	// 把野果源的门占住，并且把请求间隔调到很大：只要发现请求走了门，就一定超时。
+	downloader.limiter.interval = time.Minute
+	downloader.limiter.mu.Lock()
+	downloader.limiter.gates[sourceYeguo] = &requestGate{busy: true}
+	downloader.limiter.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	config, err := downloader.discoverYeguoCrypto(ctx)
+	if err != nil {
+		t.Fatalf("discovery must bypass the source gate, got %v", err)
+	}
+	if config.Key != "2acf7e91e9864673" || config.IV != "1c29882d3ddfcfd6" {
+		t.Fatalf("unexpected crypto config: %#v", config)
 	}
 }

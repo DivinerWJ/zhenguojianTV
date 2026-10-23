@@ -252,6 +252,9 @@ func TestXiangjiaoPlayback403IsTreatedAsPaymentDenial(t *testing.T) {
 		case request.URL.Path == "/api/playback/sessions":
 			mirrorPlaybackCalls.Add(1)
 			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"play_mode":"full","media":{"manifest_url":"https://media.example.test/ep.m3u8"}}}`), nil
+		case request.URL.Path == "/api/trial/sessions" || request.URL.Path == "/api/preview/sessions":
+			// 站点没有试看接口时也不能影响"需要会员"这个结论。
+			return sourceFixtureResponse(request, http.StatusNotFound, ""), nil
 		default:
 			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
 		}
@@ -263,5 +266,33 @@ func TestXiangjiaoPlayback403IsTreatedAsPaymentDenial(t *testing.T) {
 	}
 	if playbackCalls.Load() != 1 || mirrorPlaybackCalls.Load() != 0 {
 		t.Fatalf("403 must not retry playback on another host; primary=%d mirror=%d", playbackCalls.Load(), mirrorPlaybackCalls.Load())
+	}
+}
+
+// 0.9.0：正片 403 时退一步拿试看会话，让"需要付费"的剧至少能看前几分钟。
+func TestXiangjiaoPlaybackFallsBackToTrialPreview(t *testing.T) {
+	resetProviderMirrorCaches()
+	downloader := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/api/guest-sessions":
+			return sourceFixtureResponse(request, http.StatusCreated, `{"data":{"access_token":"fixture-token","expires_at":"2099-01-01T00:00:00Z"}}`), nil
+		case request.Method == http.MethodPost && request.URL.Path == "/api/playback/sessions":
+			return sourceFixtureResponse(request, http.StatusForbidden, `{"code":"purchase_required","message":"need purchase"}`), nil
+		case request.Method == http.MethodPost && request.URL.Path == "/api/trial/sessions":
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"play_mode":"trial","media":{"manifest_url":"https://media.example.test/trial.m3u8"}}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	})
+
+	manifest, err := downloader.xiangjiaoFullPlaybackManifest(context.Background(), "payment-fixture", "ep-locked")
+	if err != nil {
+		t.Fatalf("expected the trial preview to be used, got error %v", err)
+	}
+	if manifest != "https://media.example.test/trial.m3u8" {
+		t.Fatalf("manifest = %q, want the trial playlist", manifest)
 	}
 }

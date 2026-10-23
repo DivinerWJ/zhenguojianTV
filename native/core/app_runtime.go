@@ -472,7 +472,41 @@ func nativeDispatch(input nativeInput) (any, error) {
 	}
 }
 
+// nativeCatalog 是目录拉取的统一入口，负责处理 host 级退避（0.8.10）。
+//
+// 用户反馈：红果源偶发一直转圈不可播放，手机下拉刷新一直提示"查找新剧"
+// 但永远不成功，去设置里点一次「检查链接」就好了。
+//
+// 根因是限流器：请求被 Cloudflare / 403 拦过一次后，会给该 host 挂上
+// 最长 30 分钟的退避，此后所有普通请求**在 acquire 阶段就直接失败**，
+// 客户端看到的只有一个不会结束的转圈。「检查链接」能救回来，是因为它带
+// Force 并重新竞速镜像，天然绕开了被退避的 host。
+//
+// 现在两件事保证这种状态不会长期存在：
+//  1. Force（下拉刷新 / 重试 / 检查链接）先清退避，等价于"重新试一次"；
+//  2. 普通请求如果**因为退避**失败，自动清退避再重试一次。
 func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput) (nativeCatalogResult, error) {
+	limiter := engine.downloader.limiter
+	if input.Force && limiter != nil {
+		limiter.clearBackoffs()
+	}
+	result, err := engine.nativeCatalogOnce(ctx, input)
+	if err == nil {
+		return result, nil
+	}
+	var backoff *requestBackoff
+	if !errors.As(err, &backoff) || limiter == nil {
+		return result, err
+	}
+	// 只有"被退避挡住"才重试；真正的解析失败重试没有意义。
+	limiter.clearBackoffs()
+	if ctx.Err() != nil {
+		return result, err
+	}
+	return engine.nativeCatalogOnce(ctx, input)
+}
+
+func (engine *nativeEngine) nativeCatalogOnce(ctx context.Context, input nativeInput) (nativeCatalogResult, error) {
 	source := canonicalProviderSource(input.Source)
 	if !isHuangguoProviderSource(source) {
 		return nativeCatalogResult{}, errors.New("请选择有效站源")
@@ -765,6 +799,13 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 	}
 	task := Task{DramaID: input.Drama.ID, DramaTitle: input.Drama.Title, Chapter: input.Chapter, Index: input.Index}
 	media, err := engine.downloader.resolveProviderMedia(ctx, task)
+	// 0.8.10：被 host 退避挡住时自动重试一次（与 `nativeCatalog` 同一套理由）。
+	// 否则一次 403 就会让整个站源的播放"一直转圈"，只能靠手动检查链接恢复。
+	var backoff *requestBackoff
+	if err != nil && errors.As(err, &backoff) && engine.downloader.limiter != nil && ctx.Err() == nil {
+		engine.downloader.limiter.clearBackoffs()
+		media, err = engine.downloader.resolveProviderMedia(ctx, task)
+	}
 	if err != nil {
 		return nativePlan{}, err
 	}

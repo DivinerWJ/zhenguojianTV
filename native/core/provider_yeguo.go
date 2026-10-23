@@ -30,10 +30,14 @@ const (
 	yeguoPageSize     = 20
 	yeguoCryptoTTL    = 30 * time.Minute
 	yeguoMaxChunkScan = 96
-	// 密钥发现要抓 1 个首页 + 若干个 _nuxt chunk。站点正常时 3 秒内完成；
-	// 被拦截时会一直重试，所以给个硬上限。
-	yeguoCryptoDiscoverTimeout = 40 * time.Second
-	yeguoCryptoRetryBackoff    = 60 * time.Second
+	// 密钥发现要抓 1 个首页 + 若干个 _nuxt chunk。站点正常时 3~6 秒内完成。
+	//
+	// 0.8.10：直取 + 跳过源级串行门之后，发现过程不会再被排队放大，
+	// 所以超时从 40 秒收到 25 秒；失败后的负缓存也从 60 秒收到 20 秒——
+	// 原来一旦某次发现失败，接下来整整一分钟里每次点播都直接报
+	// 「站点当前不可用」，用户看到的就是"野果完全不能播"。
+	yeguoCryptoDiscoverTimeout = 25 * time.Second
+	yeguoCryptoRetryBackoff    = 20 * time.Second
 )
 
 // 0.8.9：原来还有 ygdj16.com 与 hoamqvgal.cc。实测这两个已不可用——
@@ -527,6 +531,13 @@ func (d *Downloader) yeguoAPICall(ctx context.Context, endpoint string, extras m
 	if err != nil {
 		return nil, err
 	}
+	// 0.8.10：**读完立刻关掉 body**，把源级并发门还给限流器。
+	//
+	// 下面的 `decryptYeguoData` 在密钥还没缓存时会触发密钥发现，而发现要再发
+	// HTTP 请求；限流器对同一个站源只允许 1 个并发请求，如果这里还占着门，
+	// 发现就在等自己 —— 一路等到发现超时，用户看到的是「野果整站不可用」。
+	// 实测：不预热时点播 27 秒后失败，预热后 1.8 秒拿到 m3u8。
+	resp.Body.Close()
 	if len(body) > 4<<20 {
 		return nil, fmt.Errorf("野果 API 响应过大")
 	}
@@ -636,10 +647,22 @@ func (d *Downloader) yeguoCryptoConfig(ctx context.Context, force bool) (yeguoCr
 }
 
 func (d *Downloader) discoverYeguoCrypto(ctx context.Context) (yeguoCryptoConfig, error) {
+	// 密钥发现有可能在"某个野果请求还占着源级并发门"时被触发
+	// （例如 `yeguoAPICall` 拿到密文后立刻解密）。这里整体跳过源级门，
+	// 否则发现请求会排队等自己，直接把发现拖到超时。
+	// 并发量本身是可控的：1 个首页 + 每批最多 8 个 chunk。
+	ctx = context.WithValue(ctx, skipCatalogGateKey{}, true)
 	var lastErr error
 	for _, base := range d.providerBaseCandidates(ctx, sourceYeguo, yeguoBaseMirrors) {
 		home := strings.TrimRight(base, "/") + "/"
-		body, err := d.fetchProviderText(ctx, home, home)
+		// 0.8.10：首页也改直取。
+		//
+		// 原来这里走 `fetchProviderText`，也就是镜像竞速（候选 × 2 副本 × 3 波）。
+		// 只要其中一个镜像在重置连接，竞速会一路等到三波超时，单个候选就能吃掉
+		// 20 秒以上；两个候选叠起来正好撞上 40 秒的发现超时，表现就是
+		// 「野果整站不可用」——而实测密钥其实一直都在（只是没时间扫到）。
+		// 现在按候选顺序直取，失败就换下一个，最坏也就 8 秒 × 候选数。
+		body, err := d.fetchProviderTextTimeout(ctx, home, home, home, 10*time.Second)
 		if err != nil {
 			lastErr = err
 			continue
@@ -697,7 +720,14 @@ func (d *Downloader) discoverYeguoCrypto(ctx context.Context) (yeguoCryptoConfig
 					// chunk 和首页在同一个域名上，必须直取。走 fetchProviderText 会
 					// 触发镜像竞速（4 个候选 × 2 副本 × 3 波），一个 chunk 最多
 					// 24 次请求；30 个 chunk 叠加起来，站点一被拦就要跑几分钟。
-					chunk, fetchErr := d.fetchProviderTextTimeout(ctx, address, address, home, 8*time.Second)
+					//
+					// 0.8.10：再补上「跳过源级串行门」。
+					// 限流器对同一个站源只允许 **1 个并发请求**（`gate.busy`），
+					// 每个请求之间还隔 250ms，于是 30 个 chunk 要排 15 秒以上，
+					// 经常把密钥发现拖过超时。这里和镜像竞速一样带上
+					// `skipCatalogGateKey`：批量大小已经限死在 8，不会打爆站点。
+					chunkCtx := context.WithValue(ctx, skipCatalogGateKey{}, true)
+					chunk, fetchErr := d.fetchProviderTextTimeout(chunkCtx, address, address, home, 6*time.Second)
 					results <- result{url: address, body: chunk, err: fetchErr}
 				}(address)
 			}

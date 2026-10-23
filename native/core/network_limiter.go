@@ -215,6 +215,22 @@ func (limiter *requestLimiter) acquire(ctx context.Context, request *http.Reques
 	}, nil
 }
 
+// clearBackoffs 清掉所有 host 级退避（0.8.10）。
+//
+// 使用场景：用户明确要求"重新拉一次"（下拉刷新、重试、检查链接），
+// 或者一次目录请求**因为退避**直接失败。
+//
+// 为什么可以整体清掉：退避只是一层保护，它的前提是"站点在拒绝我们"；
+// 而镜像竞速本来就会换 host 重试，长期挂着一个 30 分钟的退避只会让
+// 站源彻底不可用（用户看到的是永远转圈，只有手动检查链接才能救回来）。
+func (limiter *requestLimiter) clearBackoffs() {
+	limiter.mu.Lock()
+	limiter.backoffs = map[string]*requestBackoff{}
+	limiter.backgroundBackoffs = map[string]*requestBackoff{}
+	limiter.notifyLocked()
+	limiter.mu.Unlock()
+}
+
 func (limiter *requestLimiter) observe(request *http.Request, response *http.Response) {
 	if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusTooManyRequests && !strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge") {
 		return

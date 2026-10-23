@@ -1728,6 +1728,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 只保留中央的加载提示；任何用户操作都会立刻解除该状态、恢复常态。
   bool _autoAdvancing = false;
 
+  /// 本次换集是否"静默"（0.8.10）。
+  ///
+  /// 与 [_autoAdvancing] 的区别：那个表示"自动连播"，只影响全屏层的控件；
+  /// 本标记表示"这次换集不要主动把控件弹出来"，手动换集（下一集按钮、
+  /// 上滑切集、选集）同样生效。`_prepare` 成功时读它决定 `_controlsVisible`，
+  /// 读完即复位。错误态一律弹控件，否则用户看不到重试按钮。
+  bool _silentSwitch = false;
+
   int _generation = 0;
   int _episodeIndex = 0;
   int _quality = 0;
@@ -2255,10 +2263,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     //   - 单集 3 分钟以上的剧，25% 意味着要看到 45 秒后才开始预载；
     //   - 用户常常看到十几秒就滑走，等于**从未预载**。
     //
-    // 现在改为**开播满 3 秒即预载**：短剧一集才几十秒，早一点准备才可能来得及。
-    // 代价是每集多一次预取（原生侧上限 4MB），Wi-Fi 下可接受；
-    // 移动网络下未点播时 `_autoPlayBlocked` 会拦在前面，不会偷跑流量。
-    if (duration <= 0 || position < 3000) {
+    // 现在改为**开播满 1.2 秒即预载**（0.8.10 从 3 秒再提前）。
+    // 短剧一集常常只有 40~90 秒，用户又经常十几秒就滑走，越早准备越可能来得及；
+    // 原生侧预取上限 4MB，Wi-Fi 下这点开销可以忽略，移动网络下未点播时
+    // `_autoPlayBlocked` 会拦在前面，不会偷跑流量。
+    if (duration <= 0 || position < 1200) {
       return;
     }
     // 弱网保护（0.5.0，0.6.9 放宽阈值）。
@@ -2394,9 +2403,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           // 重置计数：若这次恢复也没能起播，下一轮仍会再试
           // （总次数由 `_recovery` 限制，超过后会转为显示"点击重试"）。
           _firstFrameTicks = 0;
-          // 连续两轮起不来 → 先怀疑硬解（0.8.3），别急着切备用线路。
-          _decodeStalls++;
-          if (_decodeStalls >= 2 && _escalateDecode()) return;
+          // 0.8.10：**"迟迟不起播"不再算硬解坏**。
+          //
+          // 0.8.3 曾把"连续两轮起不来"当作硬解问题的证据，真机反馈
+          // 「电视看一会儿就提示改用软件解码，退出再进又正常」——弱网下
+          // 切集起播慢两次就够 30 秒，于是被判成解码坏了。起播慢只可能是
+          // 网络/服务端问题（解码器坏掉时播放器会报告 playing 但没有帧，
+          // 见下面的兜底四），所以这里只走恢复流程。
           unawaited(_recover());
           return;
         }
@@ -2435,18 +2448,26 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 兜底四（0.7.7）：**报告在播但一直拿不到画面尺寸**（弱网首帧迟迟不来）。
       // 这种状态三条旧兜底都覆盖不到（playing=true 又没过 stalled 阈值），
       // 表现为纯黑屏长时间不恢复。
+      //
+      // 0.8.10：**必须排除缓冲中**。`state.playing` 表达的是"播放意图"，
+      // 弱网下它一直是 true、同时在 buffering，看上去就像"在播却没有画面"，
+      // 于是被判成硬解坏掉（真机现象：看一会儿提示改用软件解码，退出重进又好了）。
+      // 缓冲中的"没有帧"是网络问题，交给 `_recover()` 换线路/刷地址。
       if (_ready &&
           _error == null &&
           _foreground &&
           !current.state.completed &&
           current.state.playing &&
+          !current.state.buffering &&
           !_hasVideoFrame) {
         _noFrameTicks++;
         if (_noFrameTicks >= _noFrameTicksLimit) {
           _noFrameTicks = 0;
-          // "报告在播、却拿不到画面尺寸"是硬解坏掉的**强信号**（0.8.3）：
-          // 网络问题不会让播放器报告 playing=true。这里先降级再谈切线路。
-          if (_escalateDecode()) return;
+          // "不缓冲、报告在播、却拿不到画面尺寸"才是硬解坏掉的**强信号**：
+          // 网络问题至少会处于 buffering。0.8.10 起要求连续两轮强信号才降级，
+          // 单次 12 秒的抖动（例如切片不连续）只走恢复流程。
+          _decodeStalls++;
+          if (_decodeStalls >= 2 && _escalateDecode()) return;
           unawaited(_recover());
           return;
         }
@@ -3412,8 +3433,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (_closed || detail == null) return;
     if (index < 0 || index >= detail.episodes.length) return;
     // 0.7.2（XQ-0104）：auto = 自动连播切来的，本次换集不弹整套控件。
-    // 任何手动换集（上下滑 / 选集 / 上一集按钮）都传默认 false，行为不变。
+    // 0.8.10：**手动换集也不再弹控件**（用户反馈"切下一集时现在会弹出播放器"）。
+    // 换集本来就是"接着看下一集"，控件跳出来挡画面反而是噪音；用户要看控件
+    // 按一下画面/确定键即可。这里记下"本次是静默换集"，由 `_prepare` 读取。
     _autoAdvancing = auto;
+    _silentSwitch = _ready;
     // 换集前先把当前集的进度存下来，否则切走就丢。
     await _saveProgress();
     // 0.3.5：等待落盘期间页面可能已被滑走（播放器已释放）。
@@ -3439,6 +3463,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 0.3.5：拿不到播放器时不能静默退出，否则页面会停在"既不加载也不报错"。
       // 只有"页面已被滑走/销毁"属于正常停止，此时不动状态，等滑回来重试。
       if (!_closed && !_playerReleased && mounted) {
+        _silentSwitch = false;
         setState(() {
           _loading = false;
           _error = '播放器未能启动，请返回上一集重试';
@@ -3599,7 +3624,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // 0.7.2（XQ-0104）：自动连播换集时保持控件收起。
         // 0.7.5：**竖屏保留控件显示**（非全屏连播也要能看到剧名/按钮）；
         // 全屏的静默由 `_autoAdvancing` 在控件条件里拦截，与这里无关。
-        _controlsVisible = true;
+        //
+        // 0.8.10：换集（含手动切下一集）不再主动弹控件 —— 用户要的是
+        // "换一集接着看"，控件跳出来只是挡画面。首次加载仍然显示控件，
+        // 让用户知道有哪些按钮。
+        _controlsVisible = !_silentSwitch;
         // 0.6.9：`open()` 返回 ≠ 已起播。这里开始"等待第一帧"，
         // 期间**保留加载提示**（避免纯黑无反应），并在健康检查里兜底自动恢复。
         // 注意：有错误时不能显示加载提示，否则会盖住"点击重试"。
@@ -3627,7 +3656,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _acknowledgeHandoff();
       // 就绪是重要状态切换，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
-      _scheduleHide();
+      // 静默换集不弹控件，也就不需要排"自动隐藏"。
+      _silentSwitch = false;
+      if (_controlsVisible) _scheduleHide();
       // 兜底：某些平台 videoParams 流不会补发，这里主动读一次分辨率。
       _refreshAspectRatio();
     } catch (error) {
@@ -3635,11 +3666,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 0.7.2（XQ-0104）：自动连播失败时必须解除静默，否则控件会一直不出现，
       // 用户连"重试"以外的操作都摸不到。
       _autoAdvancing = false;
+      _silentSwitch = false;
       setState(() {
         _loading = false;
         // 0.6.9：进入错误态后不再"等待第一帧"，否则加载提示会盖住"点击重试"。
         _awaitingFirstFrame = false;
         _firstFrameTicks = 0;
+        // 0.8.10：失败时把控件弹出来，否则用户连"重试/切集"都摸不到。
+        _controlsVisible = true;
         _error = error is AppFailure ? error.message : error.toString();
       });
       _refreshFullscreen(immediate: true);

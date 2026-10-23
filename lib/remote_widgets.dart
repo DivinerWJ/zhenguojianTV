@@ -70,6 +70,12 @@ class SourceSwitchPill extends StatelessWidget {
     final tv = television ?? AppLayout.isTelevision(context);
     final colors = Theme.of(context).colorScheme;
     final enabled = onPressed != null;
+    // 0.8.10：电视上只写「站源」两个字。
+    //
+    // 多站源时原来会拼成「黄果 · 红果 · 黄豆 3 源」这样的长串，顶栏宽度有限，
+    // 文字直接顶出胶囊边界（用户反馈"文字过多展示超范围"）。电视用户也不靠
+    // 这个名字区分站源——点进去就是站源设置页，所以固定显示「站源」最稳。
+    final displayLabel = tv ? '站源' : label;
     final pill = Container(
       // 用 minHeight + 内边距而不是固定 height：系统字体放大（textScale 2.0）
       // 时固定高度会把标题裁掉，minHeight 能自然长高。
@@ -97,7 +103,7 @@ class SourceSwitchPill extends StatelessWidget {
           SizedBox(width: tv ? 8 : 7),
           Flexible(
             child: Text(
-              label,
+              displayLabel,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -107,7 +113,8 @@ class SourceSwitchPill extends StatelessWidget {
             ),
           ),
           // 多站源时给出数量，避免「黄果」被误认为只有一个入口。
-          if (tv && count > 1) ...[
+          // 电视上文案已经收敛成「站源」，数量徽标也一并去掉（同样会撑宽胶囊）。
+          if (!tv && count > 1) ...[
             const SizedBox(width: 6),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
@@ -151,21 +158,24 @@ class SourceSwitchPill extends StatelessWidget {
   }
 }
 
-/// 焦点装饰的两种画法（0.8.9）。
+/// 焦点装饰的两种画法（0.8.10 重做）。
 ///
-/// 0.8.7 及之前统一用「四边各 4px 内边距 + 3px 白描边 + 1.045 放大 + 外发光」，
-/// 三个问题在电视上都会被放大：
+/// 历史教训（写在这里免得下次又走回头路）：
+/// - 0.8.7：四边 4px 内边距 + 3px **白**描边 + 1.045 放大 + 外发光。放大和外发光
+///   画在自身边界之外，会被横向海报行的视口、封面 `ClipRRect`、弹窗滚动区裁掉，
+///   焦点越靠边越明显。
+/// - 0.8.9：改成"四角白 L 形标记"，裁剪问题解决了，但电视上看起来像老式
+///   摄像机取景框（用户反馈"太丑"）。
+/// - 0.8.10：**主色描边 + 内部渐变**。焦点用品牌橙描边（不是刺眼的纯白），
+///   海报再加一层自下而上的暗色渐变，观感是"这张卡被托起来了"，
+///   全部落在自身矩形之内，父级怎么裁都切不到。
 ///
-/// 1. **放大和外发光画在自身边界之外**。横向海报行的视口、海报的 `ClipRRect`、
-///    弹窗里的 `SingleChildScrollView` 都会把它裁掉，表现就是"选框只显示一半"，
-///    焦点越靠边越明显（首尾两张海报、热门搜索的最后一个词）。
-/// 2. 描边与内容之间留了 4px 间隙，看上去像一个悬空的框，而不是"选中了这张卡"。
-/// 3. 那 8px 的 chrome 是从海报身上挤出来的，封面平白小了 8px。
-///
-/// 现在所有焦点装饰都画在**自身边界之内**，任何父级裁剪都切不到它：
-/// - [RemoteFocusStyle.ring]：紧贴内容的描边 + 填充，用于按钮、胶囊、列表项；
-/// - [RemoteFocusStyle.corners]：四角标记，用于海报（不画整圈边框）。
+/// - [RemoteFocusStyle.ring]：按钮、胶囊、列表项 —— 描边 + 主色淡填充；
+/// - [RemoteFocusStyle.corners]：海报 —— 描边 + 底部渐变，不铺底色（避免封面发灰）。
 enum RemoteFocusStyle { ring, corners }
+
+/// 焦点圆角。海报与按钮统一，避免同一屏里出现两种圆角。
+const double _focusRadius = 14;
 
 class RemoteTarget extends StatefulWidget {
   const RemoteTarget({
@@ -217,21 +227,20 @@ class _RemoteTargetState extends State<RemoteTarget> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final accent = widget.accent ?? colors.primary;
-    final focusFill = widget.accent != null
-        ? accent.withValues(alpha: .22)
-        : colors.primaryContainer;
     final ring = widget.focusStyle == RemoteFocusStyle.ring;
-    // 0.8.9 焦点样式：
-    // - 不再缩放、不再外发光、不再留 4px 间隙，装饰全部落在自身边界内，
-    //   父级怎么裁剪都切不到（详见 [RemoteFocusStyle] 的说明）；
-    // - 海报用四角标记，避免整圈边框在封面四周形成"虚框"；
-    // - 按钮/胶囊用紧贴内容的描边 + 填充，观感是"这张卡亮了"而不是"套了个框"。
-    final borderColor = _focused
-        ? Colors.white
-        : widget.selected
-        ? accent
+    // 0.8.10 焦点样式（详见 [RemoteFocusStyle] 的历史）：
+    // - 描边用**主色**而不是纯白：纯白 3px 在深色界面上过于刺眼，也是
+    //   "太丑"的主要来源；主色描边和品牌色一致，观感更整体；
+    // - 海报不铺底色（会发灰），改用底部渐变做"托起"感；
+    // - 按钮/胶囊保留淡填充，和描边一起表达"当前停在这一点"。
+    final active = _focused || widget.selected;
+    final borderColor = active ? accent : Colors.transparent;
+    final borderWidth = _focused ? 2.5 : 2.0;
+    final fill = ring && active
+        ? (widget.accent != null
+              ? accent.withValues(alpha: _focused ? .18 : .12)
+              : colors.primaryContainer)
         : Colors.transparent;
-    final borderWidth = _focused ? 3.0 : 2.0;
     return FocusableActionDetector(
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
@@ -278,38 +287,45 @@ class _RemoteTargetState extends State<RemoteTarget> {
             behavior: HitTestBehavior.opaque,
             onTap: widget.onPressed,
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
+              duration: const Duration(milliseconds: 140),
+              curve: Curves.easeOut,
               decoration: BoxDecoration(
-                // 海报不铺底色，否则焦点时整块卡片蒙上一层色，封面发灰。
-                color: ring && (_focused || widget.selected)
-                    ? focusFill
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(12),
+                color: fill,
+                borderRadius: BorderRadius.circular(_focusRadius),
               ),
               // 画在内容之上、且在自身矩形之内：不会被父级裁剪，也不会
               // 因为描边而让内容位移（foregroundDecoration 不参与布局）。
               foregroundDecoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: ring
-                    ? Border.all(color: borderColor, width: borderWidth)
-                    : null,
+                borderRadius: BorderRadius.circular(_focusRadius),
+                border: Border.all(color: borderColor, width: borderWidth),
               ),
               child: Stack(
                 fit: StackFit.passthrough,
-                // 角标全部落在自身矩形内，禁止裁切没有意义，但保留 none
+                // 装饰全部落在自身矩形内，禁止裁切没有意义，但保留 none
                 // 以免以后有人往这一层加外扩装饰时被静默切掉。
                 clipBehavior: Clip.none,
                 children: [
                   ExcludeFocus(child: widget.child),
-                  if (!ring)
+                  // 海报的"托起"效果：只在焦点态加一层自下而上的暗色渐变，
+                  // 让封面下方压暗、上方保持原亮度，视觉上像卡片浮起来了一点。
+                  // 这层也在自身矩形内，圆角与描边一致，不会溢出。
+                  if (!ring && _focused)
                     Positioned.fill(
                       child: IgnorePointer(
-                        child: _FocusCorners(
-                          visible: _focused,
-                          // 选集等"选中态"没有焦点时也给一圈极细的提示，
-                          // 否则多选场景看不出哪些已经勾上。
-                          selected: widget.selected,
-                          accent: accent,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(_focusRadius),
+                            gradient: LinearGradient(
+                              begin: Alignment.bottomCenter,
+                              end: Alignment.topCenter,
+                              colors: [
+                                Colors.black.withValues(alpha: .34),
+                                Colors.black.withValues(alpha: .04),
+                                Colors.transparent,
+                              ],
+                              stops: const [0, .45, 1],
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -318,79 +334,6 @@ class _RemoteTargetState extends State<RemoteTarget> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// 海报的焦点四角标记（0.8.9）。
-///
-/// 只在自身矩形**内部**画四个 L 形角标，不描整圈边框：
-/// - 不会像整圈边框那样在封面外形成"虚框"，也不会被父级裁剪切掉；
-/// - 在满屏封面的网格里，四角标记比细边框更容易一眼定位（10 英尺 UI）。
-class _FocusCorners extends StatelessWidget {
-  const _FocusCorners({
-    required this.visible,
-    required this.selected,
-    required this.accent,
-  });
-
-  final bool visible;
-  final bool selected;
-  final Color accent;
-
-  @override
-  Widget build(BuildContext context) {
-    const inset = 3.0;
-    const length = 16.0;
-    const stroke = 3.0;
-    Widget corner(Alignment alignment, {required Color color}) {
-      final isTop = alignment.y < 0;
-      final isLeft = alignment.x < 0;
-      final side = BorderSide(color: color, width: stroke);
-      return Align(
-        alignment: alignment,
-        child: Container(
-          width: length,
-          height: length,
-          decoration: BoxDecoration(
-            border: Border(
-              top: isTop ? side : BorderSide.none,
-              bottom: isTop ? BorderSide.none : side,
-              left: isLeft ? side : BorderSide.none,
-              right: isLeft ? BorderSide.none : side,
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.all(inset),
-      child: Stack(
-        children: [
-          if (selected && !visible)
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(9),
-                  border: Border.all(color: accent, width: 2),
-                ),
-              ),
-            ),
-          AnimatedOpacity(
-            opacity: visible ? 1 : 0,
-            duration: const Duration(milliseconds: 120),
-            child: Stack(
-              children: [
-                corner(Alignment.topLeft, color: Colors.white),
-                corner(Alignment.topRight, color: Colors.white),
-                corner(Alignment.bottomLeft, color: Colors.white),
-                corner(Alignment.bottomRight, color: Colors.white),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
