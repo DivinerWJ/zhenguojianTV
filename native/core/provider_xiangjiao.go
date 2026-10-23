@@ -232,7 +232,40 @@ func (d *Downloader) xiangjiaoJSON(ctx context.Context, method, path string, pay
 	if lastErr == nil {
 		lastErr = fmt.Errorf("香蕉接口请求失败")
 	}
-	return nil, lastErr
+	return nil, xiangjiaoRequestError(lastErr)
+}
+
+// xiangjiaoRequestError 把网络层原始错误换成用户看得懂的说明（0.8.10）。
+//
+// 用户截图里那行 "443，connection reset by peer" 是 Go 的原文，
+// 界面上看只有一个 443 和一句 reset，既分不清是站点挂了还是本地网络问题，
+// 也不知道客户端已经试过 IPv4 兜底。这里补一句人话，同时保留原始错误
+// （用 %w 包住），排查时仍然能拿到根因。
+func xiangjiaoRequestError(err error) error {
+	if err == nil {
+		return nil
+	}
+	// 接口层错误（401/403/购买限制）已经有明确语义，不要再包一层。
+	var apiErr *xiangjiaoHTTPError
+	if errors.As(err, &apiErr) {
+		return err
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection reset",
+		"broken pipe",
+		"unexpected eof",
+		"connection refused",
+		"i/o timeout",
+		"tls handshake timeout",
+		"no such host",
+		"network is unreachable",
+	} {
+		if strings.Contains(text, marker) {
+			return fmt.Errorf("香蕉站源网络连接被中断（已自动改用 IPv4 重试仍失败，可试试切换网络或关闭代理）: %w", err)
+		}
+	}
+	return err
 }
 
 // xiangjiaoCatalogJSON 取目录 / 搜索 / 详情接口，必要时自动补游客会话（0.8.10）。

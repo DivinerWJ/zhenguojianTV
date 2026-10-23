@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -360,5 +361,26 @@ func TestXiangjiaoCatalogRecoversFromTransientServerError(t *testing.T) {
 	}
 	if len(result.Items) != 1 || theaterCalls.Load() < 2 {
 		t.Fatalf("catalog did not retry after a transient failure: items=%d calls=%d", len(result.Items), theaterCalls.Load())
+	}
+}
+
+// 0.8.10：用户看到的 "443，connection reset by peer" 要换成人话，
+// 同时不能把接口层错误（401/403/购买限制）也包掉 —— 上层靠它决定补游客会话。
+func TestXiangjiaoRequestErrorKeepsAPIErrorsAndExplainsNetworkFailures(t *testing.T) {
+	resetErr := fmt.Errorf("Get \"https://xiangjiaoai.ai/api/theater\": read tcp 10.0.0.2:5321->104.21.24.81:443: read: connection reset by peer")
+	wrapped := xiangjiaoRequestError(resetErr)
+	if !strings.Contains(wrapped.Error(), "已自动改用 IPv4 重试仍失败") {
+		t.Fatalf("network error was not explained: %v", wrapped)
+	}
+	if !errors.Is(wrapped, resetErr) {
+		t.Fatalf("original error lost, cannot inspect root cause: %v", wrapped)
+	}
+
+	apiErr := &xiangjiaoHTTPError{Status: http.StatusUnauthorized, Code: "unauthorized"}
+	if got := xiangjiaoRequestError(apiErr); got != error(apiErr) {
+		t.Fatalf("api error should pass through untouched, got %v", got)
+	}
+	if got := xiangjiaoRequestError(nil); got != nil {
+		t.Fatalf("nil should stay nil, got %v", got)
 	}
 }
