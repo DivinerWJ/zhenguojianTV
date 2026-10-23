@@ -29,6 +29,14 @@ val allSources = dartDefines["ALL_SOURCES"] == "true"
 val universalAbiFilters = providers.gradleProperty("universalAbiFilters").orNull
     ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.takeIf { it.isNotEmpty() }
 
+// 0.8.10 第三批：通用（all）包的 versionCode 抬高。
+//
+// Flutter 的 `--split-per-abi` 会给分包加 1000/2000/3000 的 versionCode 偏移
+// （arm64-v8a 是 2085、armeabi-v7a 是 1085，通用包却还是 85）。用户先装过
+// 分包、再装 all 包时，安装器看到的是**版本降级**，很多 ROM 直接弹
+// "解析软件包失败"。这里给通用包加一个偏移，让它永远比分包高。
+val universalVersionCodeOffset = providers.gradleProperty("universalVersionCodeOffset").orNull?.toIntOrNull()
+
 val releaseKey = rootProject.file("key.properties")
 val releaseProperties = Properties()
 if (releaseKey.exists()) {
@@ -58,7 +66,7 @@ android {
         // 5.x / 6.x 机器（API 21-23）仍不支持，需要换 FFmpeg 依赖才能再降。
         minSdk = 24
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
+        versionCode = flutter.versionCode + (universalVersionCodeOffset ?: 0)
         versionName = flutter.versionName
         manifestPlaceholders["appLabel"] = if (allSources) "真果鉴TV" else "红果鉴"
         manifestPlaceholders["appBanner"] = if (allSources) "@drawable/tv_banner_all_sources" else "@drawable/tv_banner"

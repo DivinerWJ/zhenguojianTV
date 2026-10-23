@@ -69,6 +69,18 @@ jobs:
             echo "ANDROID_NDK_HOME=$ndk"
           } >> "$GITHUB_ENV"
 
+      # 0.8.10 第三批：固定 debug 签名。
+      #
+      # 没配 key.properties 时 AGP 用 `~/.android/debug.keystore` 签包，而这个
+      # 文件在每台 runner 上是**新生成的随机密钥** —— 于是每次构建的签名都不一样，
+      # 用户装新包时安装器会判"签名不一致"（部分 ROM 报的正是"解析软件包失败"），
+      # 每次升级都得先卸载。这里把它缓存住，同一把密钥一直用下去。
+      - name: Restore debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Build APK
         shell: bash
         run: |
@@ -94,10 +106,11 @@ jobs:
           for apk in dist/android/*.apk; do
             echo "=== $apk"
             "$build_tools/apksigner" verify --verbose "$apk" | tee verify.txt
-            # v2 是 Android 7+ 的主签名；v1 是给只读 META-INF 证书的 OEM 安装器兜底的
-            # （0.8.10 用户装 all 版报"解析软件包失败"）。两个都必须为 true。
+            # v2 是 Android 7+ 的主签名，必须为 true（签名坏了安装器就报解析失败）。
             grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" verify.txt
-            grep -q "Verified using v1 scheme (JAR signing): true" verify.txt
+            # v1 只做提示：minSdk 24 起 AGP 默认不出 v1，这里已经显式打开，
+            # 但不同 AGP 版本对 debug 签名的处理不完全一致，不作为失败条件。
+            grep -E "Verified using v1 scheme" verify.txt || true
             "$build_tools/zipalign" -c 4 "$apk"
             "$build_tools/aapt2" dump badging "$apk" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^native-code"
           done

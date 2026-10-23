@@ -58,6 +58,9 @@ with china_mirror_environment(environment, options.cn_mirrors) as env, mirrored_
         universal_env = dict(env)
         universal_env['ORG_GRADLE_PROJECT_universalAbiFilters'] = ','.join(
             options.abi or ['arm64-v8a', 'armeabi-v7a'])
+        # 通用包 versionCode 抬高 4000：Flutter 给分包加的是 1000/2000/3000，
+        # 通用包不加偏移时（85）会被当成"版本降级"，装过再装就报解析失败。
+        universal_env['ORG_GRADLE_PROJECT_universalVersionCodeOffset'] = '4000'
         universal_args = [flutter, 'build', 'apk', '--release', '--no-pub',
                           *variant.flutter_arguments, *target_platform]
         subprocess.run(universal_args, cwd=root, env=universal_env, check=True)

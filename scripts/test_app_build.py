@@ -117,10 +117,16 @@ class AppBuildTests(unittest.TestCase):
         self.assertEqual(
             universal_env.get('ORG_GRADLE_PROJECT_universalAbiFilters'),
             'arm64-v8a,armeabi-v7a')
+        # 通用包 versionCode 要抬高：Flutter 给分包加了 1000/2000/3000 偏移，
+        # 通用包不加就会比分包低，装过再装被判版本降级。
+        self.assertEqual(
+            universal_env.get('ORG_GRADLE_PROJECT_universalVersionCodeOffset'),
+            '4000')
         split_env = next(
             call.kwargs['env'] for call in run.call_args_list
             if call.args[0] == split)
         self.assertNotIn('ORG_GRADLE_PROJECT_universalAbiFilters', split_env)
+        self.assertNotIn('ORG_GRADLE_PROJECT_universalVersionCodeOffset', split_env)
 
         package = next(call for call in calls if any(str(arg).endswith('package_release.py') for arg in call))
         self.assertIn('--universal', package)
