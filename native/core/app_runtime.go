@@ -257,6 +257,9 @@ func newNativeEngine(directory string) (*nativeEngine, error) {
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	transport.MaxIdleConnsPerHost = 8
 	transport.ResponseHeaderTimeout = 20 * time.Second
+	// 0.8.10：显式给 DialContext，才能在"这条链路 IPv6 被 RST"时按请求退回 IPv4
+	// （香蕉站源的典型症状）。不设置时上下文拿不到，没法按请求区分。
+	transport.DialContext = newForceableDialer()
 	transport.Proxy = router.proxy
 	cdn := newCDNTransport(transport, newDNSResolver(transport))
 	d.client = &http.Client{Transport: newHuangguoBrowserTransport(cdn, d), Timeout: 45 * time.Second,

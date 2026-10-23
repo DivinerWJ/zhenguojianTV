@@ -151,12 +151,22 @@ func (d *Downloader) xiangjiaoJSON(ctx context.Context, method, path string, pay
 		address := strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
 		// 站点的 IPv6 出口时不时被重置（read: connection reset by peer），
 		// 单次失败就放弃会让首页偶发空白，所以网络级错误重试一次。
+		//
+		// 0.8.10 第二批：用户反馈香蕉报 "443，connection reset by peer"、
+		// 列表直接进不去。站点本身是好的（Cloudflare 后面，A 记录都在），
+		// 是这条链路的 IPv6 被 RST —— 而 Go 默认 Happy Eyeballs **优先 IPv6**，
+		// 不强制的话 IPv4 明明可用也轮不到。所以第一次就强制 IPv4，
+		// 第二次回到默认，兜住"IPv4 不通、只有 IPv6 通"的反向情况。
 		for attempt := 1; attempt <= 2; attempt++ {
 			var body io.Reader
 			if encodedPayload != nil {
 				body = bytes.NewReader(encodedPayload)
 			}
-			req, err := http.NewRequestWithContext(ctx, method, address, body)
+			requestCtx := ctx
+			if attempt == 1 {
+				requestCtx = withForceIPv4(ctx)
+			}
+			req, err := http.NewRequestWithContext(requestCtx, method, address, body)
 			if err != nil {
 				return nil, err
 			}
