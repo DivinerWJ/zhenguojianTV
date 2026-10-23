@@ -45,14 +45,29 @@ with china_mirror_environment(environment, options.cn_mirrors) as env, mirrored_
     if options.abi:
         target_platform = ['--target-platform', ','.join(targets[abi] for abi in options.abi)]
 
+    # 0.8.10 第三批：通用（all）包改成**先**构建，并且只打 ARM 两套 ABI。
+    #
+    # 两个原因：
+    # 1) 依赖的 AAR 会带上 x86_64 的 .so，而 app 自身的 libapp.so / libflutter.so /
+    #    libduanju_core.so 只有 ARM 两份 —— 通用包里于是留着一个半套的
+    #    lib/x86_64/，既白占体积，也可能让安装器按错误 ABI 校验后判"解析失败"。
+    #    这里用 Gradle 项目属性注入白名单（见 android/app/build.gradle.kts）。
+    # 2) 先通用后分包：`--split-per-abi` 的构建只写 app-<abi>-release.apk，
+    #    通用包单独拷到 build/universal-release.apk，打包阶段不会拿错文件。
+    universal_path = root / 'build' / 'universal-release.apk'
+    if options.universal:
+        universal_env = dict(env)
+        universal_env['ORG_GRADLE_PROJECT_universalAbiFilters'] = ','.join(
+            options.abi or ['arm64-v8a', 'armeabi-v7a'])
+        universal_args = [flutter, 'build', 'apk', '--release', '--no-pub',
+                          *variant.flutter_arguments, *target_platform]
+        subprocess.run(universal_args, cwd=root, env=universal_env, check=True)
+        shutil.copy2(root / 'build' / 'app' / 'outputs' / 'flutter-apk' / 'app-release.apk',
+                     universal_path)
+
     build_args = [flutter, 'build', 'apk', '--release', '--split-per-abi', '--no-pub',
                   *variant.flutter_arguments, *target_platform]
     subprocess.run(build_args, cwd=root, env=env, check=True)
-
-    if options.universal:
-        universal_args = [flutter, 'build', 'apk', '--release', '--no-pub',
-                          *variant.flutter_arguments, *target_platform]
-        subprocess.run(universal_args, cwd=root, env=env, check=True)
 
     package_args = [sys.executable, str(root / 'scripts' / 'package_release.py'),
                     '--platform', 'android', *abi_args, *variant.arguments]

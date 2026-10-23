@@ -175,13 +175,14 @@ class _SplashSurface extends StatelessWidget {
                 const ColoredBox(color: Color(0xFFFFF6F4)),
           ),
           Align(
-            // 竖版开屏图从 0.71 高度往下是红色胶片带，进度线要落在浅色区域里，
-            // 否则品牌橙压在红底上几乎看不见。
-            alignment: Alignment(0, television ? .84 : .66),
-            child: const SizedBox(
+            // 手机竖版新图（0.8.10 第三批）从高度约 0.50 往下就是红色胶片带，
+            // 品牌橙压在红底上几乎看不见，所以手机改用**白色**细线，位置下移到
+            // 0.90 的深红区域；电视横版底部是浅色，继续用品牌橙放在 0.84。
+            alignment: Alignment(0, television ? .84 : .90),
+            child: SizedBox(
               width: 132,
               height: 3,
-              child: _SplashBar(color: _accent),
+              child: _SplashBar(color: television ? _accent : Colors.white),
             ),
           ),
         ],

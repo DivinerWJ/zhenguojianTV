@@ -30,19 +30,53 @@ class SourceSite {
   };
 
   static const hongguo = SourceSite('hongguo', '红果', '短剧 · 漫剧 · AI 剧');
+  static const huangdou = SourceSite('huangdou', '黄豆', '精选短剧');
+  static const huangju = SourceSite('huangju', '黄剧', '热门 · 最新 · 分类短剧');
+  static const duanju51 = SourceSite('51duanju', '51', '短剧 · 首页 · 榜单');
+  static const yeguo = SourceSite('yeguo', '野果', '热播 · 全集正片校验');
+  static const xiangjiao = SourceSite('xiangjiao', '香蕉', '热播 · 分集权限识别');
+  static const ezdmw = SourceSite('ezdmw', 'E站', '动漫 · 新番 · 完结');
+  static const huangguoVideo = SourceSite('huangguo-video', '剧场', '视频剧集');
+  static const huangguoAI = SourceSite('huangguoai', 'AI', 'AI 短剧');
+  static const cloudfront = SourceSite('cloudfront', '旧版', '旧 API 剧库');
+
+  /// 全部**已知**站源，含已下线但存档里可能出现的。
+  ///
+  /// 用途是"认名字"而不是"给用户选"：局域网同步、旧存档、下载记录里
+  /// 出现 `xiangjiao:xxx` 时，[byId] 仍然能解析出「香蕉」而不是掉回红果。
   static const knownValues = [
     hongguo,
-    SourceSite('huangdou', '黄豆', '精选短剧'),
-    SourceSite('huangju', '黄剧', '热门 · 最新 · 分类短剧'),
-    SourceSite('51duanju', '51', '短剧 · 首页 · 榜单'),
-    SourceSite('yeguo', '野果', '热播 · 全集正片校验'),
-    SourceSite('xiangjiao', '香蕉', '热播 · 分集权限识别'),
-    SourceSite('ezdmw', 'E站', '动漫 · 新番 · 完结'),
-    SourceSite('huangguo-video', '剧场', '视频剧集'),
-    SourceSite('huangguoai', 'AI', 'AI 短剧'),
-    SourceSite('cloudfront', '旧版', '旧 API 剧库'),
+    huangdou,
+    huangju,
+    duanju51,
+    yeguo,
+    xiangjiao,
+    ezdmw,
+    huangguoVideo,
+    huangguoAI,
+    cloudfront,
   ];
-  static const values = allSourcesEnabled ? knownValues : [hongguo];
+
+  /// 当前**可用 / 可展示**的站源。
+  ///
+  /// 0.8.10 第三批：香蕉（[xiangjiao]）暂时下线。
+  /// 用户反馈它的目录 / 搜索 / 详情整条链路都拿不到数据（客户端能做的
+  /// 鉴权与 IPv4 兜底都试过了），留着入口只会让人以为"这个源坏了"，
+  /// 所以先从可展示列表里摘掉 —— 不删代码、不动 native 侧，
+  /// 等站点恢复把这一项加回下面的列表即可。
+  static const values = allSourcesEnabled
+      ? [
+          hongguo,
+          huangdou,
+          huangju,
+          duanju51,
+          yeguo,
+          ezdmw,
+          huangguoVideo,
+          huangguoAI,
+          cloudfront,
+        ]
+      : [hongguo];
   static bool isAvailable(String id) => values.any((site) => site.id == id);
   static SourceSite byId(String id) =>
       knownValues.firstWhere((site) => site.id == id, orElse: () => hongguo);

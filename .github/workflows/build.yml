@@ -79,6 +79,25 @@ jobs:
           if [ '${{ inputs.universal }}' = 'true' ]; then args+=(--universal); fi
           python3 scripts/build_android.py "${args[@]}"
 
+      # 0.8.10 第三批：出包后必须用**官方工具**验一遍，不能只看"文件生成了"。
+      # 用户反馈 all 包装到手机上提示"解析软件包失败"，而打包脚本原来只检查
+      # zip 里有没有那几个 .so —— 签名坏了、对齐坏了都发现不了。这里补上：
+      #   apksigner verify  验签名（含 v2/v3，签名坏了就是这个报错）
+      #   zipalign -c 4     验对齐（未对齐的包部分安装器也会拒绝）
+      #   aapt2 dump badging 打印 minSdk / ABI，便于事后对照用户设备
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          build_tools="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n1)"
+          echo "build-tools: $build_tools"
+          for apk in dist/android/*.apk; do
+            echo "=== $apk"
+            "$build_tools/apksigner" verify --verbose "$apk"
+            "$build_tools/zipalign" -c 4 "$apk"
+            "$build_tools/aapt2" dump badging "$apk" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^native-code"
+          done
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

@@ -46,8 +46,21 @@ if options.platform == 'android':
         artifacts.append(target)
 
     if options.universal:
-        source = root / 'build' / 'app' / 'outputs' / 'flutter-apk' / 'app-release.apk'
+        # 0.8.10 第三批：通用包由 build_android.py 先构建并单独拷到
+        # build/universal-release.apk（避免被随后的 --split-per-abi 覆盖）。
+        # 老路径保留为兜底，方便单独跑打包脚本的场景。
+        source = root / 'build' / 'universal-release.apk'
+        if not source.is_file():
+            source = root / 'build' / 'app' / 'outputs' / 'flutter-apk' / 'app-release.apk'
         verify_android_apk(source, abis)
+        # 通用包里不允许出现"没编译过的 ABI"：那种目录只有依赖库的 .so、
+        # 缺 libapp.so / libflutter.so / libduanju_core.so，安装器按它校验
+        # 会判"解析软件包失败"（0.8.10 用户反馈）。这里直接拦死。
+        with zipfile.ZipFile(source) as archive:
+            present = {name.split('/')[1] for name in archive.namelist() if name.startswith('lib/')}
+        extra = present - set(abis)
+        if extra:
+            raise SystemExit('通用 APK 含未编译的 ABI：' + ', '.join(sorted(extra)))
         target = output / f'{variant.slug}-{version}-all.apk'
         shutil.copy2(source, target)
         artifacts.append(target)

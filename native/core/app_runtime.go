@@ -216,8 +216,10 @@ func nativeNormalize(drama Drama) nativeDrama {
 		}
 	}
 	episodes := 0
-	for _, value := range []any{drama.TotalEpisode, drama.TotalEpisodeSnake, drama.EpisodeCount, drama.EpisodeCountSnake, drama.ChapterCount, drama.ChapterCountSnake, drama.Total, drama.Episodes} {
-		if count, _ := strconv.Atoi(nativeText(value)); count > episodes {
+	for _, value := range []any{drama.TotalEpisode, drama.TotalEpisodeSnake, drama.EpisodeCount, drama.EpisodeCountSnake,
+		drama.ChapterCount, drama.ChapterCountSnake, drama.Total, drama.Episodes,
+		drama.EpisodeNum, drama.EpisodeNumSnake, drama.TotalEpisodes, drama.TotalEpisodesSnake} {
+		if count := nativeEpisodeCount(value); count > episodes {
 			episodes = count
 		}
 	}
@@ -227,6 +229,47 @@ func nativeNormalize(drama Drama) nativeDrama {
 		Category: nativeDramaCategory(drama), VIP: drama.VIP,
 		Heat: drama.Heat, Views: drama.Views, OnlineDate: providerReleaseDate(drama.OnlineDate),
 		Tags: append([]string(nil), drama.Tags...), ReleaseStatus: drama.ReleaseStatus}
+}
+
+// nativeEpisodeCount 从"集数"候选字段里取集数（0.8.10 第三批）。
+//
+// 用户反馈"有几个源不支持共 X 集展示"。排查下来这些源并不是没给集数，
+// 而是给的不是纯数字：`更新至80集`、`共 80 集`、`全80话`、`80集全`、
+// `80`（字符串）、`80.0`（浮点）都有。原来一律 `strconv.Atoi`，
+// 只要带一个汉字就归零，卡片上于是没有"共 X 集"。
+//
+// 这里先按纯数字解析，失败再取**第一段连续数字**；完全没有数字时返回 0。
+// 只对集数候选字段调用，不会把标题里的年份误当集数。
+func nativeEpisodeCount(value any) int {
+	text := strings.TrimSpace(nativeText(value))
+	if text == "" {
+		return 0
+	}
+	if count, err := strconv.Atoi(text); err == nil {
+		return max(count, 0)
+	}
+	start := -1
+	for index := 0; index < len(text); index++ {
+		digit := text[index] >= '0' && text[index] <= '9'
+		if digit {
+			if start < 0 {
+				start = index
+			}
+			continue
+		}
+		if start >= 0 {
+			if count, err := strconv.Atoi(text[start:index]); err == nil && count > 0 {
+				return count
+			}
+			start = -1
+		}
+	}
+	if start >= 0 {
+		if count, err := strconv.Atoi(text[start:]); err == nil && count > 0 {
+			return count
+		}
+	}
+	return 0
 }
 
 func nativeDramaCategory(drama Drama) string {

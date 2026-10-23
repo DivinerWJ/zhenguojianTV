@@ -14,6 +14,21 @@ val dartDefines = providers.gradleProperty("dart-defines").orNull.orEmpty()
     }
 val allSources = dartDefines["ALL_SOURCES"] == "true"
 
+// 0.8.10 第三批：通用（all）APK 的 ABI 白名单。
+//
+// 用户反馈 all 版装到手机上提示"解析软件包失败"，而按 ABI 分包的两个包正常。
+// 排查 all 包发现里面留着一个**半套**的 `lib/x86_64/`：ffmpeg / media-kit 这些
+// 依赖的 AAR 自带 x86_64 的 .so，但 app 自身的 libapp.so / libflutter.so /
+// libduanju_core.so 只按 ARM 两套编译，于是 x86_64 目录里缺了最关键的那几个。
+// 这种"声明了某 ABI 却给不全"的包既白占十几 MB，也会让部分安装器按错误的
+// ABI 去校验原生库，直接判解析失败。
+//
+// 构建通用包时由 scripts/build_android.py 通过
+// `ORG_GRADLE_PROJECT_universalAbiFilters=arm64-v8a,armeabi-v7a` 注入白名单，
+// 只打 ARM 两套；按 ABI 分包的构建不设这个属性，行为与原来完全一致。
+val universalAbiFilters = providers.gradleProperty("universalAbiFilters").orNull
+    ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.takeIf { it.isNotEmpty() }
+
 val releaseKey = rootProject.file("key.properties")
 val releaseProperties = Properties()
 if (releaseKey.exists()) {
@@ -47,6 +62,13 @@ android {
         versionName = flutter.versionName
         manifestPlaceholders["appLabel"] = if (allSources) "真果鉴TV" else "红果鉴"
         manifestPlaceholders["appBanner"] = if (allSources) "@drawable/tv_banner_all_sources" else "@drawable/tv_banner"
+        // 通用包只保留 ARM 两套 ABI，见文件上方 universalAbiFilters 的说明。
+        universalAbiFilters?.let { filters ->
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(filters)
+            }
+        }
     }
 
     signingConfigs {

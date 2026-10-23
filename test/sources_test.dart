@@ -63,6 +63,19 @@ class SourceFixtureRepository extends FixtureRepository {
 }
 
 void main() {
+  // 0.8.10 第三批：香蕉（xiangjiao）暂时下线。
+  //
+  // 用户口径是"整个香蕉源暂时屏蔽掉不展示"：入口不能再出现，但旧存档、
+  // 局域网同步、下载记录里已经存在的 `xiangjiao:xxx` 仍然要能解析出名字，
+  // 否则会掉回红果、变成"未知站源"。恢复时把 xiangjiao 加回
+  // SourceSite.values 即可，这条断言就是那时要改的地方。
+  test('retired source stays resolvable but is not selectable', () {
+    expect(SourceSite.knownValues.map((source) => source.id), contains('xiangjiao'));
+    expect(SourceSite.values.map((source) => source.id), isNot(contains('xiangjiao')));
+    expect(SourceSite.isAvailable('xiangjiao'), isFalse);
+    expect(SourceSite.byId('xiangjiao').name, '香蕉');
+  });
+
   test('source picker labels include anime and short-drama sources', () {
     final sources = {
       for (final source in SourceSite.knownValues) source.id: source,
