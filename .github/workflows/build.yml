@@ -148,7 +148,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            README.md
+            CHANGELOG.md
             pubspec.yaml
           sparse-checkout-cone-mode: false
 
@@ -166,9 +166,10 @@ jobs:
           test -n "$(find artifacts -name '*.apk' -type f)"
 
       # 发布说明原来是在下面硬编码的 0.8.7 文案，之后每版都忘了改，
-      # 于是每个 Release 都写着 0.8.7。现在从 README 的「更新」章节里
+      # 于是每个 Release 都写着 0.8.7。现在从 CHANGELOG.md 里
       # 抓出当前版本的所有 `### <版本> · <主题>` 小节，生成主题清单。
       # 版本号取自 pubspec.yaml，改版本时两处自动对齐。
+      # （0.8.10：更新说明从 README 抽到 CHANGELOG.md，README 只留产品介绍。）
       - name: Compose release notes
         shell: bash
         run: |
@@ -184,21 +185,21 @@ jobs:
                 print "- " substr($0, length("### " v " · ") + 1)
               }
             }
-          ' README.md)
+          ' CHANGELOG.md)
           {
             echo "## $version"
             echo
             if [ -n "$titles" ]; then
               printf '%s\n' "$titles"
             else
-              echo "本版构建产物见下方附件，详细说明见 README 的更新章节。"
+              echo "本版构建产物见下方附件，详细说明见 CHANGELOG.md。"
             fi
             echo
             echo "**产物**：\`all\` / \`arm64-v8a\` / \`armeabi-v7a\`"
             echo
             echo "**构建环境**：Flutter 3.47.4 / Go 1.24.1 / NDK 28.2.13676358"
             echo
-            echo "详细说明见 [README 的更新章节](https://github.com/ai0by/zhenguojianTV/blob/main/README.md#二更新)。"
+            echo "详细说明见 [CHANGELOG](https://github.com/ai0by/zhenguojianTV/blob/main/CHANGELOG.md)。"
           } > release_body.md
           echo "--- release_body.md ---"
           cat release_body.md

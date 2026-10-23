@@ -11,12 +11,12 @@ from pathlib import Path
 
 
 SOURCE_DIRECTORIES = {
-    '.github', 'lib', 'native', 'android', 'windows', 'ios', 'macos', 'linux',
+    '.github', 'docs', 'lib', 'native', 'android', 'windows', 'ios', 'macos', 'linux',
     'web', 'assets', 'packages', 'scripts', 'test', 'test_driver', 'integration_test',
 }
 SOURCE_FILES = {
     '.gitattributes', '.gitignore', '.metadata', '.editorconfig',
-    'AGENTS.md', 'README.md', 'pubspec.yaml', 'pubspec.lock',
+    'AGENTS.md', 'README.md', 'CHANGELOG.md', 'pubspec.yaml', 'pubspec.lock',
     'analysis_options.yaml', 'l10n.yaml', 'flutter_launcher_icons.yaml',
 }
 EXCLUDED_DIRECTORIES = {

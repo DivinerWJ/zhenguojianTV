@@ -20,10 +20,12 @@ class SourceSyncTests(unittest.TestCase):
         path.write_text(content, encoding='utf-8')
 
     def test_only_source_is_copied_and_git_is_preserved(self):
-        for name in [
+        included = [
             'lib/pages/首页.dart', 'assets/icon.svg', 'test/fixtures/synthetic.json',
             'native/core/provider.go', 'windows/runner/main.cpp', 'scripts/build_android.py',
-        ]:
+            'docs/USAGE.md', 'docs/BUILD.md', 'docs/logo.jpg', 'CHANGELOG.md',
+        ]
+        for name in included:
             self.write(self.source / name, 'source')
         excluded = [
             'build/app.apk', 'dist/app.zip', '.dart_tool/package_config.json',
@@ -35,7 +37,7 @@ class SourceSyncTests(unittest.TestCase):
             'windows/flutter/ephemeral/config.cmake',
             'windows/flutter/generated_plugins.cmake',
             'scripts/__pycache__/script.pyc', 'scripts/.env.local', '.DS_Store',
-            '.git/config', 'sdk/flutter/lib/framework.dart', 'docs/old-note.md',
+            '.git/config', 'sdk/flutter/lib/framework.dart', 'notes/old-note.md',
         ]
         for name in excluded:
             self.write(self.source / name, 'must not be copied')
@@ -46,7 +48,8 @@ class SourceSyncTests(unittest.TestCase):
         self.write(self.destination / 'lib/removed.dart', 'old source')
         result = synchronize(self.source, self.destination)
         self.assertTrue(result.changed)
-        self.assertEqual((self.destination / 'lib/pages/首页.dart').read_text(), 'source')
+        for name in included:
+            self.assertEqual((self.destination / name).read_text(), 'source', name)
         for name in excluded:
             if not name.startswith('.git/'):
                 self.assertFalse((self.destination / name).exists(), name)
