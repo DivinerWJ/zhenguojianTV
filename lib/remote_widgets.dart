@@ -112,26 +112,9 @@ class SourceSwitchPill extends StatelessWidget {
               ),
             ),
           ),
-          // 多站源时给出数量，避免「黄果」被误认为只有一个入口。
-          // 电视上文案已经收敛成「站源」，数量徽标也一并去掉（同样会撑宽胶囊）。
-          if (!tv && count > 1) ...[
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(
-                color: colors.primary.withValues(alpha: .16),
-                borderRadius: BorderRadius.circular(7),
-              ),
-              child: Text(
-                '$count 源',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: colors.primary,
-                ),
-              ),
-            ),
-          ],
+          // 数量徽标已去掉（0.8.10）：多站源时它会把胶囊撑出可用宽度
+          // （手机窄屏实测溢出 1px），电视上又已经固定显示「站源」，
+          // 这个数字既放不下也不再必要。
           if (enabled) ...[
             const SizedBox(width: 2),
             Icon(
