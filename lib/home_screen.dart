@@ -104,10 +104,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Timer? _cacheRefreshTimer;
   bool _refreshingUpdatedCache = false;
   bool _updateNotice = false;
-
-  /// 剧库更新任务是否曾经处于"在跑"状态（0.8.10）。
-  /// 用来识别 `busy → 空闲` 的收尾瞬间，好在任务结束时刷新列表。
-  bool _updateWasBusy = false;
   bool _selectionMode = false;
   bool _showRecommendations = false;
 
@@ -293,9 +289,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (_group.sources.any((source) => _updater.busy(source.id))) {
         // 0.8.10：原来这里是静默 return —— 用户下拉后看不到任何反应，
         // 只看到顶部横幅一直停在"查找新剧"，就是"下拉刷新一直不成功"。
-        // 现在至少明确告诉他任务还在跑，并把列表按现有缓存重刷一次。
-        _notifyAlreadyUpdating();
-        unawaited(_load(useCache: true));
+        // 现在至少把横幅亮出来，让他看到"确实有一个任务在跑"。
+        //
+        // 这里刻意**不**顺手 `_load()`：任务结束时 `onCatalogChanged` 会触发
+        // 缓存重载，这里再发一次会多打一轮目录请求（回归测试抓到的）。
+        if (!_updateNotice) setState(() => _updateNotice = true);
         return;
       }
       _pauseCatalog();
@@ -307,40 +305,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (mounted) await _load(force: true);
   }
 
-  void _notifyAlreadyUpdating() {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          content: Text('正在更新剧库，稍候会自动刷新', style: TextStyle(fontSize: 15)),
-          duration: Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.fromLTRB(24, 0, 24, 28),
-        ),
-      );
-  }
-
   void _updateChanged() {
-    if (!mounted) return;
-    setState(() {});
-    _settleUpdate();
-  }
-
-  /// 更新任务从"在跑"变成"跑完"时收尾（0.8.10）。
-  ///
-  /// 原来只有成功路径会经 `onCatalogChanged` 触发列表刷新；失败时
-  /// 什么都不发生，列表继续停在旧数据上，用户看到的就是"失败后一直卡着"。
-  /// 这里改成无论成败都按最新缓存重刷一次，失败信息仍留在顶部横幅里。
-  void _settleUpdate() {
-    final busy = _group.sources.any((source) => _updater.busy(source.id));
-    if (busy) {
-      _updateWasBusy = true;
-      return;
-    }
-    if (!_updateWasBusy) return;
-    _updateWasBusy = false;
-    if (_updateNotice) unawaited(_load(useCache: true));
+    if (mounted) setState(() {});
   }
 
   void _autoUpdateChanged() {
