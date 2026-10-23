@@ -80,6 +80,18 @@ android {
                 keyPassword = requireNotNull(releaseProperties.getProperty("keyPassword"))
             }
         }
+        // 0.8.10 第三批：强制 v1(JAR) + v2 双签。
+        //
+        // minSdk = 24 时 AGP 默认**只**出 v2 签名（`apksigner verify` 里
+        // "Verified using v1 scheme: false"）。Android 7.0+ 本身认 v2，
+        // 但不少 OEM 安装器 / 电视盒子自带的安装程序、以及第三方文件管理器
+        // 仍然只读 v1 的 META-INF 证书，遇到 v2-only 的包直接报
+        // "解析软件包失败" —— 这正是用户装 all 版时遇到的提示。
+        // 双签只多一个 META-INF 签名文件，体积可忽略，兼容面最大。
+        all {
+            enableV1Signing = true
+            enableV2Signing = true
+        }
     }
 
     buildTypes {

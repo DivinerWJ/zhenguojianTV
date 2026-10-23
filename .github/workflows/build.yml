@@ -93,7 +93,11 @@ jobs:
           echo "build-tools: $build_tools"
           for apk in dist/android/*.apk; do
             echo "=== $apk"
-            "$build_tools/apksigner" verify --verbose "$apk"
+            "$build_tools/apksigner" verify --verbose "$apk" | tee verify.txt
+            # v2 是 Android 7+ 的主签名；v1 是给只读 META-INF 证书的 OEM 安装器兜底的
+            # （0.8.10 用户装 all 版报"解析软件包失败"）。两个都必须为 true。
+            grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" verify.txt
+            grep -q "Verified using v1 scheme (JAR signing): true" verify.txt
             "$build_tools/zipalign" -c 4 "$apk"
             "$build_tools/aapt2" dump badging "$apk" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^native-code"
           done
