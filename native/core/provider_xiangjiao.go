@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -224,6 +225,34 @@ func (d *Downloader) xiangjiaoJSON(ctx context.Context, method, path string, pay
 	return nil, lastErr
 }
 
+// xiangjiaoCatalogJSON 取目录 / 搜索 / 详情接口，必要时自动补游客会话（0.8.10）。
+//
+// 用户反馈"香蕉现在列表都加载不出来"。目录这条路径原来一律匿名请求
+// （bearer 传空），一旦站点给列表接口加上游客鉴权，就只剩 401/403，
+// 整个站源表现为"列表空白、加载失败"，而播放反而还是好的 —— 因为播放
+// 自己会去换 guest-sessions。这里让目录也具备同样的自愈能力：
+// 匿名请求 401 时补一次游客 token 再重试。
+func (d *Downloader) xiangjiaoCatalogJSON(ctx context.Context, path string) (any, error) {
+	decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, path, nil, "")
+	if err == nil {
+		return decoded, nil
+	}
+	var apiErr *xiangjiaoHTTPError
+	if !errors.As(err, &apiErr) {
+		return nil, err
+	}
+	// 只对 401 补会话：403 会同时给 host 挂上退避（见 requestLimiter.observe），
+	// 立刻重试也只会被限流器挡回来，还可能把 Cloudflare 拦得更久。
+	if apiErr.Status != http.StatusUnauthorized {
+		return nil, err
+	}
+	token, tokenErr := d.xiangjiaoGuestToken(ctx, true)
+	if tokenErr != nil || strings.TrimSpace(token) == "" {
+		return nil, err
+	}
+	return d.xiangjiaoJSON(ctx, http.MethodGet, path, nil, token)
+}
+
 func xiangjiaoPayloadData(value any) any {
 	if root, ok := value.(map[string]any); ok {
 		if data, exists := root["data"]; exists {
@@ -413,7 +442,7 @@ func (d *Downloader) xiangjiaoTheaterPage(ctx context.Context, page int) ([]Dram
 			cursor = next
 			continue
 		}
-		decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, xiangjiaoTheaterPath(cursor), nil, "")
+		decoded, err := d.xiangjiaoCatalogJSON(ctx, xiangjiaoTheaterPath(cursor))
 		if err != nil {
 			return nil, false, err
 		}
@@ -424,7 +453,7 @@ func (d *Downloader) xiangjiaoTheaterPage(ctx context.Context, page int) ([]Dram
 		}
 		cursor = next
 	}
-	decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, xiangjiaoTheaterPath(cursor), nil, "")
+	decoded, err := d.xiangjiaoCatalogJSON(ctx, xiangjiaoTheaterPath(cursor))
 	if err != nil {
 		return nil, false, err
 	}
@@ -451,7 +480,7 @@ func (d *Downloader) fetchXiangjiaoCatalogPage(ctx context.Context, page int, qu
 		if page > 1 {
 			return nil, false, nil
 		}
-		decoded, err := d.xiangjiaoJSON(ctx, http.MethodGet, xiangjiaoSearchPath(query), nil, "")
+		decoded, err := d.xiangjiaoCatalogJSON(ctx, xiangjiaoSearchPath(query))
 		if err != nil {
 			return nil, false, err
 		}
@@ -519,11 +548,11 @@ func (d *Downloader) fetchXiangjiaoDetail(ctx context.Context, sourceID string) 
 	if sourceID == "" {
 		return Drama{}, nil, fmt.Errorf("香蕉剧集 ID 为空")
 	}
-	detailRaw, err := d.xiangjiaoJSON(ctx, http.MethodGet, "/api/dramas/"+url.PathEscape(sourceID), nil, "")
+	detailRaw, err := d.xiangjiaoCatalogJSON(ctx, "/api/dramas/"+url.PathEscape(sourceID))
 	if err != nil {
 		return Drama{}, nil, err
 	}
-	episodesRaw, err := d.xiangjiaoJSON(ctx, http.MethodGet, "/api/dramas/"+url.PathEscape(sourceID)+"/episodes", nil, "")
+	episodesRaw, err := d.xiangjiaoCatalogJSON(ctx, "/api/dramas/"+url.PathEscape(sourceID)+"/episodes")
 	if err != nil {
 		return Drama{}, nil, err
 	}

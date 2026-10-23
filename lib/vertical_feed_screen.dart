@@ -1730,10 +1730,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
 
   /// 本次换集是否"静默"（0.8.10）。
   ///
-  /// 与 [_autoAdvancing] 的区别：那个表示"自动连播"，只影响全屏层的控件；
-  /// 本标记表示"这次换集不要主动把控件弹出来"，手动换集（下一集按钮、
-  /// 上滑切集、选集）同样生效。`_prepare` 成功时读它决定 `_controlsVisible`，
-  /// 读完即复位。错误态一律弹控件，否则用户看不到重试按钮。
+  /// 只对**自动连播**生效（用户口径：手动切集可以弹控件）。
+  /// `_prepare` 成功时读它决定 `_controlsVisible`，读完即复位；
+  /// 错误态一律弹控件，否则用户看不到重试按钮。
   bool _silentSwitch = false;
 
   int _generation = 0;
@@ -3433,11 +3432,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (_closed || detail == null) return;
     if (index < 0 || index >= detail.episodes.length) return;
     // 0.7.2（XQ-0104）：auto = 自动连播切来的，本次换集不弹整套控件。
-    // 0.8.10：**手动换集也不再弹控件**（用户反馈"切下一集时现在会弹出播放器"）。
-    // 换集本来就是"接着看下一集"，控件跳出来挡画面反而是噪音；用户要看控件
-    // 按一下画面/确定键即可。这里记下"本次是静默换集"，由 `_prepare` 读取。
+    // 0.8.10 第一版把手动换集也做成了静默，用户复核后明确"只要求自动切集无感"，
+    // 手动点"下一集"本来就是用户主动操作，控件留在屏幕上反而是反馈，故收窄回 auto。
     _autoAdvancing = auto;
-    _silentSwitch = _ready;
+    _silentSwitch = auto;
     // 换集前先把当前集的进度存下来，否则切走就丢。
     await _saveProgress();
     // 0.3.5：等待落盘期间页面可能已被滑走（播放器已释放）。

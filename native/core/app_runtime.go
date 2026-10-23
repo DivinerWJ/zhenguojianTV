@@ -482,9 +482,15 @@ func nativeDispatch(input nativeInput) (any, error) {
 // 客户端看到的只有一个不会结束的转圈。「检查链接」能救回来，是因为它带
 // Force 并重新竞速镜像，天然绕开了被退避的 host。
 //
-// 现在两件事保证这种状态不会长期存在：
+// 现在三件事保证这种状态不会长期存在：
 //  1. Force（下拉刷新 / 重试 / 检查链接）先清退避，等价于"重新试一次"；
-//  2. 普通请求如果**因为退避**失败，自动清退避再重试一次。
+//  2. 普通请求失败后**自动清退避并重试一次**，不必等用户去设置里点检查；
+//  3. 重试只做一次，站源真挂了也不会把请求量翻倍。
+//
+// 第 2 条是 0.8.10 第二批反馈补的：用户澄清"红果不是永远失败，只是有时候
+// 会失败，失败后一直卡着"。只对退避类失败重试覆盖不到真正偶发的超时 /
+// 连接重置，而那正是"有时候"的主要来源 —— 「检查链接」之所以能救，
+// 本质上就是"清退避 + 重新走一遍"，这里把同样的动作补到普通目录加载上。
 func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput) (nativeCatalogResult, error) {
 	limiter := engine.downloader.limiter
 	if input.Force && limiter != nil {
@@ -494,15 +500,11 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 	if err == nil {
 		return result, nil
 	}
-	var backoff *requestBackoff
-	if !errors.As(err, &backoff) || limiter == nil {
+	// 用户已经离开 / 上下文到期时不再重试，避免白白多打一轮请求。
+	if limiter == nil || ctx.Err() != nil {
 		return result, err
 	}
-	// 只有"被退避挡住"才重试；真正的解析失败重试没有意义。
 	limiter.clearBackoffs()
-	if ctx.Err() != nil {
-		return result, err
-	}
 	return engine.nativeCatalogOnce(ctx, input)
 }
 

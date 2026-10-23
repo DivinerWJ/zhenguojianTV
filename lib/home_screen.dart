@@ -104,6 +104,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Timer? _cacheRefreshTimer;
   bool _refreshingUpdatedCache = false;
   bool _updateNotice = false;
+
+  /// 剧库更新任务是否曾经处于"在跑"状态（0.8.10）。
+  /// 用来识别 `busy → 空闲` 的收尾瞬间，好在任务结束时刷新列表。
+  bool _updateWasBusy = false;
   bool _selectionMode = false;
   bool _showRecommendations = false;
 
@@ -286,7 +290,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _refreshCatalog() async {
     if (widget.repository.supportsSourceManagement) {
-      if (_group.sources.any((source) => _updater.busy(source.id))) return;
+      if (_group.sources.any((source) => _updater.busy(source.id))) {
+        // 0.8.10：原来这里是静默 return —— 用户下拉后看不到任何反应，
+        // 只看到顶部横幅一直停在"查找新剧"，就是"下拉刷新一直不成功"。
+        // 现在至少明确告诉他任务还在跑，并把列表按现有缓存重刷一次。
+        _notifyAlreadyUpdating();
+        unawaited(_load(useCache: true));
+        return;
+      }
       _pauseCatalog();
       setState(() => _updateNotice = true);
       await _updater.update(_group.sources);
@@ -296,8 +307,40 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (mounted) await _load(force: true);
   }
 
+  void _notifyAlreadyUpdating() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('正在更新剧库，稍候会自动刷新', style: TextStyle(fontSize: 15)),
+          duration: Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.fromLTRB(24, 0, 24, 28),
+        ),
+      );
+  }
+
   void _updateChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _settleUpdate();
+  }
+
+  /// 更新任务从"在跑"变成"跑完"时收尾（0.8.10）。
+  ///
+  /// 原来只有成功路径会经 `onCatalogChanged` 触发列表刷新；失败时
+  /// 什么都不发生，列表继续停在旧数据上，用户看到的就是"失败后一直卡着"。
+  /// 这里改成无论成败都按最新缓存重刷一次，失败信息仍留在顶部横幅里。
+  void _settleUpdate() {
+    final busy = _group.sources.any((source) => _updater.busy(source.id));
+    if (busy) {
+      _updateWasBusy = true;
+      return;
+    }
+    if (!_updateWasBusy) return;
+    _updateWasBusy = false;
+    if (_updateNotice) unawaited(_load(useCache: true));
   }
 
   void _autoUpdateChanged() {
@@ -483,18 +526,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     if (available.length == 1) {
+      final leavingMulti = _multiSources.isNotEmpty;
       setState(() {
         _multiSources = const [];
         _allSources = false;
       });
       await widget.store.setMultiSources(const []);
       if (!mounted) return;
-      _changeSource(SourceSite.byId(available.first));
+      // 0.8.10：从多选退到单选必须强制重载，否则"目标源恰好就是原来的单选源"时
+      // `_changeSource` 会直接返回，列表还停在上一次的多源聚合结果。
+      _changeSource(SourceSite.byId(available.first), force: leavingMulti);
       return;
     }
     setState(() {
       _multiSources = available;
       _allSources = false;
+      // 多选分组不是「红果」，推荐流对它是无意义的；留着 `_showRecommendations`
+      // 还会让紧接着的 `_load` 在开头直接 return，页面一样不刷新。
+      _showRecommendations = false;
       _selectionMode = false;
       _selectedDramas.clear();
     });
@@ -903,8 +952,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _changeSource(SourceSite source, {bool allSources = false}) {
-    if (_source.id == source.id &&
+  void _changeSource(
+    SourceSite source, {
+    bool allSources = false,
+    bool force = false,
+  }) {
+    // 0.8.10：`force` 用于「从多选退到单选」——
+    // 那条路径会先把 `_multiSources` 清空再调进来，于是"目标源 == 原来的单选源"
+    // 会命中这里的提前返回，页面就继续停在多源聚合结果上不刷新
+    // （用户反馈"去掉一个站源后页面不刷新为最新配置"）。
+    if (!force &&
+        _source.id == source.id &&
         _allSources == allSources &&
         _multiSources.isEmpty) {
       return;
@@ -2211,6 +2269,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               TextButton(
                 onPressed: () => _updater.stop(sources),
                 child: const Text('停止'),
+              ),
+            // 0.8.10：失败后直接给一个重试入口。
+            // 原来只能去设置里点「检查链接」才能重来，用户感受就是"卡死了"。
+            if (failed && !busy)
+              TextButton(
+                onPressed: () => _updater.update(sources),
+                child: const Text('重试'),
               ),
             IconButton(
               tooltip: '查看更新详情',

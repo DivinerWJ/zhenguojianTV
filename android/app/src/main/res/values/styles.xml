@@ -7,6 +7,12 @@
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
     </style>
-    <style name="LaunchTheme" parent="AppSystemBarTheme" />
+    <!-- 0.8.10：开屏是浅色画面，冷启动这一屏必须跟着改浅色底 + 深色状态栏图标，
+         否则深色底上白字一闪、再切到浅色开屏，观感很跳。 -->
+    <style name="LaunchTheme" parent="AppSystemBarTheme">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
     <style name="NormalTheme" parent="AppSystemBarTheme" />
 </resources>

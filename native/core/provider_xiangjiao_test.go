@@ -296,3 +296,69 @@ func TestXiangjiaoPlaybackFallsBackToTrialPreview(t *testing.T) {
 		t.Fatalf("manifest = %q, want the trial playlist", manifest)
 	}
 }
+
+// 0.8.10：目录接口匿名 401 时，补一次游客会话再重试。
+//
+// 用户反馈"香蕉现在列表都加载不出来"：目录这条路径一直匿名请求，
+// 站点给列表接口加上游客鉴权后整条链路就只剩 401。
+func TestXiangjiaoCatalogRetriesWithGuestTokenOnUnauthorized(t *testing.T) {
+	resetProviderMirrorCaches()
+	var theaterCalls, sessionCalls atomic.Int32
+	downloader := sourceFixtureDownloader(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		switch request.URL.Path {
+		case "/api/theater":
+			if theaterCalls.Add(1) == 1 {
+				return sourceFixtureResponse(request, http.StatusUnauthorized, `{"code":"unauthorized","message":"guest session required"}`), nil
+			}
+			if got := request.Header.Get("Authorization"); got != "Bearer fixture-guest" {
+				t.Errorf("Authorization = %q, want the guest token", got)
+			}
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"total":1,"next_cursor":"","items":[{"id":"guest-only","title":"游客可见"}]}}`), nil
+		case "/api/guest-sessions":
+			sessionCalls.Add(1)
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"access_token":"fixture-guest"}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	})
+
+	items, _, err := downloader.fetchXiangjiaoCatalogPage(context.Background(), 1, "")
+	if err != nil {
+		t.Fatalf("fetchXiangjiaoCatalogPage: %v", err)
+	}
+	if len(items) != 1 || items[0].Title != "游客可见" {
+		t.Fatalf("catalog did not recover after the guest session: %#v", items)
+	}
+	if sessionCalls.Load() != 1 || theaterCalls.Load() != 2 {
+		t.Fatalf("expected one guest session and one retry; sessions=%d theater=%d", sessionCalls.Load(), theaterCalls.Load())
+	}
+}
+
+// 0.8.10：目录拉取失败后自动重试一次，不再等用户去设置里点「检查链接」。
+func TestXiangjiaoCatalogRecoversFromTransientServerError(t *testing.T) {
+	resetProviderMirrorCaches()
+	var theaterCalls atomic.Int32
+	engine := sourceFixtureEngine(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == providerMirrorConfigURL {
+			return sourceFixtureResponse(request, http.StatusOK, `{"version":1,"ttl_seconds":3600,"sources":{}}`), nil
+		}
+		if request.Method == http.MethodGet && request.URL.Path == "/api/theater" {
+			if theaterCalls.Add(1) == 1 {
+				return sourceFixtureResponse(request, http.StatusInternalServerError, `{"code":"internal","message":"boom"}`), nil
+			}
+			return sourceFixtureResponse(request, http.StatusOK, `{"data":{"total":1,"next_cursor":"","items":[{"id":"recovered","title":"重试后可见"}]}}`), nil
+		}
+		return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+	})
+
+	result, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceXiangjiao, Page: 1})
+	if err != nil {
+		t.Fatalf("nativeCatalog: %v", err)
+	}
+	if len(result.Items) != 1 || theaterCalls.Load() < 2 {
+		t.Fatalf("catalog did not retry after a transient failure: items=%d calls=%d", len(result.Items), theaterCalls.Load())
+	}
+}

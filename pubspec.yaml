@@ -38,3 +38,7 @@ flutter:
   config:
     enable-swift-package-manager: false
   uses-material-design: true
+  # 0.8.10：开屏图。手机竖版 1080x1920、电视横版 1920x1080，
+  # 由 lib/app_splash.dart 按当前布局二选一。
+  assets:
+    - assets/splash/

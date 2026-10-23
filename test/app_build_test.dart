@@ -20,7 +20,7 @@ void main() {
     () async {
       SharedPreferences.setMockInitialValues({'source': 'huangdou'});
       final store = LocalStore(await SharedPreferences.getInstance());
-      expect(appName, allSourcesEnabled ? '真果鉴' : '红果鉴');
+      expect(appName, allSourcesEnabled ? '真果鉴TV' : '红果鉴');
       expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
       expect(store.sources.length, SourceSite.values.length);
       expect(store.source, allSourcesEnabled ? 'huangdou' : 'hongguo');

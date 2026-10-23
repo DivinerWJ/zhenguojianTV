@@ -1,4 +1,11 @@
 <resources>
-    <style name="LaunchTheme" parent="AppSystemBarTheme" />
+    <!-- 0.8.10：夜间模式也走同一套浅色开屏 —— 开屏图本身是浅色的，
+         这里如果不覆盖，values-night 会整份替换掉 LaunchTheme，
+         夜间模式下又会退回 AppSystemBarTheme 的深色底。 -->
+    <style name="LaunchTheme" parent="AppSystemBarTheme">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
     <style name="NormalTheme" parent="AppSystemBarTheme" />
 </resources>

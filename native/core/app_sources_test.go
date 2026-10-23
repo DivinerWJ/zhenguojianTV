@@ -215,3 +215,26 @@ func TestSourceBackoffUsesRelativeTimeAndRetainsTypedError(t *testing.T) {
 		t.Fatal("redaction discarded structured retry time")
 	}
 }
+
+// 0.8.10：退避期只该挡住后台资料补齐，用户主动点的任务要放行。
+//
+// 用户反馈"红果失败后一直卡着，去设置里点一次检查链接才好"：上一次失败挂上
+// host 退避后，连「更新剧库 / 检查链接」都被挡回去，只能干等。
+func TestSourceTaskBackoffOnlyHoldsBackgroundOperations(t *testing.T) {
+	engine := sourceFixtureEngine(t, func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	engine.changeSourceRecord(sourceHongguo, func(record *nativeSourceRecord) {
+		record.RetryAt = time.Now().Add(10 * time.Minute)
+	})
+	_, err := engine.startSourceTask(sourceHongguo, "metadata", nativeDrama{})
+	if err == nil || !strings.Contains(err.Error(), "暂停请求") {
+		t.Fatalf("background metadata task ignored the host backoff: %v", err)
+	}
+	if _, err := engine.startSourceTask(sourceHongguo, "update", nativeDrama{}); err != nil {
+		t.Fatalf("user-initiated update was blocked by the host backoff: %v", err)
+	}
+	engine.cancelSourceTask(sourceHongguo)
+	awaitSourceTask(t, engine, sourceHongguo)
+}

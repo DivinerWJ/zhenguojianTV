@@ -164,6 +164,20 @@ func (engine *nativeEngine) changeSourceRecord(source string, change func(*nativ
 	engine.saveSourceRecordsLocked()
 }
 
+// sourceTaskHonorsBackoff 判断某个站源任务是否要守 host 退避（0.8.10）。
+//
+// 后台资料补齐类任务没有人盯着，站源被 Cloudflare 拦住时应该老实等；
+// 而"更新剧库 / 检查链接 / 继续加载分页"都是用户点了才发生的，退避期里
+// 直接拒绝只会让用户以为软件卡死，所以放行并顺手清掉退避。
+func sourceTaskHonorsBackoff(operation string) bool {
+	switch operation {
+	case "metadata", "vipMetadata", "retrySave":
+		return true
+	default:
+		return false
+	}
+}
+
 func (engine *nativeEngine) startSourceTask(source, operation string, drama nativeDrama) (nativeSourceStatus, error) {
 	source = canonicalProviderSource(source)
 	if !nativeSourceAvailable(source) {
@@ -196,7 +210,16 @@ func (engine *nativeEngine) startSourceTask(source, operation string, drama nati
 		engine.sourceRecords = map[string]nativeSourceRecord{}
 	}
 	previous := engine.sourceRecords[source]
-	if time.Now().Before(previous.RetryAt) {
+	// 0.8.10：退避期内的**用户主动任务**不再直接拒绝。
+	//
+	// 用户反馈"失败后一直卡着，去设置里点一次检查链接才好"。原因是上一次
+	// 失败挂上了最长 30 分钟的 host 退避，此后连"更新剧库 / 检查链接"这类
+	// 明确由用户点出来的任务也会被这一行挡回去，只能干等。
+	// 检查链接之所以能救回来，是因为它带 Force 走 `nativeCatalog` 清退避 ——
+	// 那就把这个动作提前到任务入口：主动任务直接放行并清退避，等价于"重来一次"。
+	// 只有后台资料补齐类任务（metadata / vipMetadata / retrySave）继续守退避，
+	// 它们没有用户在场，不该在站源被拦的时候反复打。
+	if time.Now().Before(previous.RetryAt) && sourceTaskHonorsBackoff(operation) {
 		engine.mu.Unlock()
 		return nativeSourceStatus{}, fmt.Errorf("站源暂时暂停请求，请在 %d 秒后重试", max(1, int(time.Until(previous.RetryAt).Seconds()+.999)))
 	}
