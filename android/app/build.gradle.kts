@@ -38,6 +38,8 @@ val universalAbiFilters = providers.gradleProperty("universalAbiFilters").orNull
 val universalVersionCodeOffset = providers.gradleProperty("universalVersionCodeOffset").orNull?.toIntOrNull()
 
 val releaseKey = rootProject.file("key.properties")
+// CI 生成并缓存的固定调试签名（见 .github/workflows/build.yml）。
+val ciDebugKey = rootProject.file("app/ci-debug.keystore")
 val releaseProperties = Properties()
 if (releaseKey.exists()) {
     releaseKey.inputStream().use { releaseProperties.load(it) }
@@ -88,14 +90,23 @@ android {
                 keyPassword = requireNotNull(releaseProperties.getProperty("keyPassword"))
             }
         }
-        // 0.8.10 第三批：强制 v1(JAR) + v2 双签。
+        // 0.8.10 第三批：CI 用**固定**的调试签名。
         //
-        // minSdk = 24 时 AGP 默认**只**出 v2 签名（`apksigner verify` 里
-        // "Verified using v1 scheme: false"）。Android 7.0+ 本身认 v2，
-        // 但不少 OEM 安装器 / 电视盒子自带的安装程序、以及第三方文件管理器
-        // 仍然只读 v1 的 META-INF 证书，遇到 v2-only 的包直接报
-        // "解析软件包失败" —— 这正是用户装 all 版时遇到的提示。
-        // 双签只多一个 META-INF 签名文件，体积可忽略，兼容面最大。
+        // 没有 key.properties 时 AGP 用 `~/.android/debug.keystore`，而这个文件在
+        // 每台 runner 上都是新生成的随机密钥 —— 于是每次构建签名都不一样，
+        // 用户装新包时安装器判签名冲突（部分 ROM 报的就是"解析软件包失败"），
+        // 每次升级都得先卸载。工作流会在构建前准备好 ci-debug.keystore 并缓存，
+        // 这里优先用它；本地开发没有这个文件时仍然回落到默认 debug 签名。
+        if (!releaseKey.exists() && ciDebugKey.exists()) {
+            create("ciDebug") {
+                storeFile = ciDebugKey
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+        // 0.8.10 第三批：显式打开 v1(JAR) 兼容签名。
+        // minSdk = 24 时 AGP 默认只出 v2；只读 META-INF 证书的老安装器会判解析失败。
         all {
             enableV1Signing = true
             enableV2Signing = true
@@ -107,7 +118,12 @@ android {
             applicationIdSuffix = ".debug"
         }
         release {
-            signingConfig = signingConfigs.getByName(if (releaseKey.exists()) "release" else "debug")
+            signingConfig = signingConfigs.getByName(
+                when {
+                    releaseKey.exists() -> "release"
+                    ciDebugKey.exists() -> "ciDebug"
+                    else -> "debug"
+                })
         }
     }
 

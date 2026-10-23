@@ -69,17 +69,30 @@ jobs:
             echo "ANDROID_NDK_HOME=$ndk"
           } >> "$GITHUB_ENV"
 
-      # 0.8.10 第三批：固定 debug 签名。
+      # 0.8.10 第三批：固定 CI 签名。
       #
-      # 没配 key.properties 时 AGP 用 `~/.android/debug.keystore` 签包，而这个
-      # 文件在每台 runner 上是**新生成的随机密钥** —— 于是每次构建的签名都不一样，
-      # 用户装新包时安装器会判"签名不一致"（部分 ROM 报的正是"解析软件包失败"），
-      # 每次升级都得先卸载。这里把它缓存住，同一把密钥一直用下去。
-      - name: Restore debug keystore
+      # 没配 key.properties 时 AGP 用 `~/.android/debug.keystore`，而它在每台
+      # runner 上都是新生成的随机密钥 —— 每次构建签名都不同，用户装新包时
+      # 安装器判签名冲突（部分 ROM 报的正是"解析软件包失败"），升级必须先卸载。
+      # 这里自己生成一把固定密钥并缓存：第一次构建生成，之后每次复用。
+      - name: Restore CI debug keystore
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
+          path: android/app/ci-debug.keystore
+          key: android-ci-debug-keystore-v1
+
+      - name: Create CI debug keystore
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ ! -f android/app/ci-debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore android/app/ci-debug.keystore \
+              -storetype PKCS12 -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10950 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          keytool -list -keystore android/app/ci-debug.keystore -storepass android | grep -i "androiddebugkey"
 
       - name: Build APK
         shell: bash
