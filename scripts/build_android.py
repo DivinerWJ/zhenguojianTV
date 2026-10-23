@@ -52,9 +52,8 @@ with china_mirror_environment(environment, options.cn_mirrors) as env, mirrored_
     #    libduanju_core.so 只有 ARM 两份 —— 通用包里于是留着一个半套的
     #    lib/x86_64/，既白占体积，也可能让安装器按错误 ABI 校验后判"解析失败"。
     #    这里用 Gradle 项目属性注入白名单（见 android/app/build.gradle.kts）。
-    # 2) 先通用后分包：`--split-per-abi` 的构建只写 app-<abi>-release.apk，
-    #    通用包单独拷到 build/universal-release.apk，打包阶段不会拿错文件。
-    universal_path = root / 'build' / 'universal-release.apk'
+    # 2) 先通用后分包：`--split-per-abi` 只写 app-<abi>-release.apk，不会覆盖
+    #    app-release.apk；顺序固定下来，打包阶段拿到的就一定是这次刚出的通用包。
     if options.universal:
         universal_env = dict(env)
         universal_env['ORG_GRADLE_PROJECT_universalAbiFilters'] = ','.join(
@@ -62,8 +61,6 @@ with china_mirror_environment(environment, options.cn_mirrors) as env, mirrored_
         universal_args = [flutter, 'build', 'apk', '--release', '--no-pub',
                           *variant.flutter_arguments, *target_platform]
         subprocess.run(universal_args, cwd=root, env=universal_env, check=True)
-        shutil.copy2(root / 'build' / 'app' / 'outputs' / 'flutter-apk' / 'app-release.apk',
-                     universal_path)
 
     build_args = [flutter, 'build', 'apk', '--release', '--split-per-abi', '--no-pub',
                   *variant.flutter_arguments, *target_platform]

@@ -106,6 +106,21 @@ class AppBuildTests(unittest.TestCase):
         for call in (split, universal):
             self.assertIn('--dart-define=ALL_SOURCES=true', call)
             self.assertIn('android-arm64,android-arm', call)
+        # 0.8.10：通用包必须**先**出，且只打 ARM 两套 ABI。
+        # 先出是为了让 app-release.apk 一定是这次的产物（随后的分包构建
+        # 只写 app-<abi>-release.apk）；ABI 白名单是为了不把依赖 AAR 带来的
+        # 半套 lib/x86_64 打进通用包 —— 那会让安装器判"解析软件包失败"。
+        self.assertIs(flutter_builds[0], universal)
+        universal_env = next(
+            call.kwargs['env'] for call in run.call_args_list
+            if call.args[0] == universal)
+        self.assertEqual(
+            universal_env.get('ORG_GRADLE_PROJECT_universalAbiFilters'),
+            'arm64-v8a,armeabi-v7a')
+        split_env = next(
+            call.kwargs['env'] for call in run.call_args_list
+            if call.args[0] == split)
+        self.assertNotIn('ORG_GRADLE_PROJECT_universalAbiFilters', split_env)
 
         package = next(call for call in calls if any(str(arg).endswith('package_release.py') for arg in call))
         self.assertIn('--universal', package)

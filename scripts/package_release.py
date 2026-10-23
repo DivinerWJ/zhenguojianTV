@@ -46,12 +46,9 @@ if options.platform == 'android':
         artifacts.append(target)
 
     if options.universal:
-        # 0.8.10 第三批：通用包由 build_android.py 先构建并单独拷到
-        # build/universal-release.apk（避免被随后的 --split-per-abi 覆盖）。
-        # 老路径保留为兜底，方便单独跑打包脚本的场景。
-        source = root / 'build' / 'universal-release.apk'
-        if not source.is_file():
-            source = root / 'build' / 'app' / 'outputs' / 'flutter-apk' / 'app-release.apk'
+        # 通用包由 build_android.py **先**构建（随后 --split-per-abi 只写
+        # app-<abi>-release.apk，不会覆盖这个文件），所以这里读到的就是刚出的包。
+        source = root / 'build' / 'app' / 'outputs' / 'flutter-apk' / 'app-release.apk'
         verify_android_apk(source, abis)
         # 通用包里不允许出现"没编译过的 ABI"：那种目录只有依赖库的 .so、
         # 缺 libapp.so / libflutter.so / libduanju_core.so，安装器按它校验
