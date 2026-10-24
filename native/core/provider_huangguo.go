@@ -268,20 +268,7 @@ func (d *Downloader) fetchHuangguoAIDetail(ctx context.Context, sourceID string)
 		return Drama{}, nil, err
 	}
 	drama := huangguoDetailMetadata(body, detailURL, sourceHuangguoAI, sourceID)
-	title := drama.DisplayTitle()
-	// 优先用页面里的权威分集数据（videoInitialData.epPlaySrcs）。
-	// 刷页面上链接会把热搜榜、猜你喜欢里**别的剧**误当分集，
-	// 这正是"不同剧名播出同样内容"的根因。
-	episodes := parseAIVideoInitialEpisodes(body, detailURL)
-	if len(episodes) == 0 {
-		// 退路：从 HTML 扫分集链接（已排除推荐位区块）。
-		episodes = parseHuangguoAIEpisodes(body, detailURL, sourceID)
-	}
-	if len(episodes) == 0 {
-		if media := parseAIVideoURL(body, detailURL); media != "" {
-			episodes = []providerEpisode{{Key: "1", Title: title, URL: detailURL, Index: 1, HLS: media}}
-		}
-	}
+	episodes := buildAIEpisodes(body, detailURL, sourceID)
 	if len(episodes) == 0 {
 		return drama, nil, nil
 	}
@@ -1000,14 +987,25 @@ func parseAIVideoURL(rawHTML, pageURL string) string {
 	return ""
 }
 
-func parseAIVideoInitialData(rawHTML, pageURL string) string {
-	re := regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
-	m := re.FindStringSubmatch(rawHTML)
+var reVideoInitialData = regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
+var reAIPageEpisode = regexp.MustCompile(`/ep-(\d+)(?:/|$)`)
+var reDigits = regexp.MustCompile(`(\d+)`)
+
+func aiInitialData(rawHTML string) map[string]any {
+	m := reVideoInitialData.FindStringSubmatch(rawHTML)
 	if len(m) < 2 {
-		return ""
+		return nil
 	}
 	var data map[string]any
 	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &data); err != nil {
+		return nil
+	}
+	return data
+}
+
+func parseAIVideoInitialData(rawHTML, pageURL string) string {
+	data := aiInitialData(rawHTML)
+	if data == nil {
 		return ""
 	}
 	if media := normalizeProviderMediaURL(pageURL, mapString(data, "videoSrc", "videoUrl", "playUrl")); media != "" {
@@ -1018,7 +1016,7 @@ func parseAIVideoInitialData(rawHTML, pageURL string) string {
 		return ""
 	}
 	preferred := firstNonEmpty(mapString(data, "ep", "episode"))
-	if m := regexp.MustCompile(`/ep-(\d+)(?:/|$)`).FindStringSubmatch(pageURL); len(m) > 1 {
+	if m := reAIPageEpisode.FindStringSubmatch(pageURL); len(m) > 1 {
 		preferred = m[1]
 	}
 	if preferred != "" {
@@ -1085,16 +1083,11 @@ func huangguoInNonEpisodeBlock(rawHTML string, position int) bool {
 
 // 从 videoInitialData 解析**全部分集**。
 //
-// 这是站点的权威分集数据：epPlaySrcs 是 "集数 -> 播放地址" 的映射，
-// 比在 HTML 里扫链接可靠得多（HTML 里混有热搜榜、猜你喜欢等推荐位）。
+// 站点 2026-10 改版后 epPlaySrcs 只带「当前集 + 下一集」等少量限时地址，
+// 这里退化为兜底：集数全集以集数网格（parseAIEpisodeGrid）为准。
 func parseAIVideoInitialEpisodes(rawHTML, pageURL string) []providerEpisode {
-	re := regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
-	m := re.FindStringSubmatch(rawHTML)
-	if len(m) < 2 {
-		return nil
-	}
-	var data map[string]any
-	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &data); err != nil {
+	data := aiInitialData(rawHTML)
+	if data == nil {
 		return nil
 	}
 	episodes := make([]providerEpisode, 0, 8)
@@ -1153,6 +1146,155 @@ func parseAIVideoInitialEpisodes(rawHTML, pageURL string) []providerEpisode {
 		episodes[i].Title = fmt.Sprintf("第%d集", episodes[i].Index)
 	}
 	sortProviderEpisodes(episodes)
+	return episodes
+}
+
+// aiEpisodeIndex 从集数键（"1"、"02"、"ep-3"、data-ep-id）里取集号。
+func aiEpisodeIndex(value any) int {
+	switch x := value.(type) {
+	case float64:
+		if x > 0 {
+			return int(x)
+		}
+	case json.Number:
+		if n, err := x.Int64(); err == nil && n > 0 {
+			return int(n)
+		}
+	case string:
+		text := strings.TrimSpace(x)
+		if n, err := strconv.Atoi(text); err == nil && n > 0 {
+			return n
+		}
+		if m := reDigits.FindStringSubmatch(text); len(m) > 1 {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// aiEpisodeSources 取内嵌 JSON 已覆盖集的播放地址。
+// 站点改版后 epPlaySrcs 只带「当前集 + 下一集」，只能当地址缓存用。
+func aiEpisodeSources(data map[string]any) map[int]string {
+	sources := map[int]string{}
+	if rows, ok := data["epPlaySrcs"].(map[string]any); ok {
+		for key, value := range rows {
+			if index := aiEpisodeIndex(key); index > 0 {
+				sources[index] = fmt.Sprint(value)
+			}
+		}
+	}
+	return sources
+}
+
+func aiCurrentEpisode(data map[string]any, pageURL string) int {
+	if m := reAIPageEpisode.FindStringSubmatch(pageURL); len(m) > 1 {
+		if index := aiEpisodeIndex(m[1]); index > 0 {
+			return index
+		}
+	}
+	return aiEpisodeIndex(mapString(data, "ep", "episode"))
+}
+
+// parseAIEpisodeGrid 解析详情页集数网格（hg-web-play__ep-grid）里的全集。
+// 每集的标题用网格里的原始文本；当前集的 href 是剧集首页（/video/{id}/），
+// 播放时 parseAIVideoURL 会按内嵌 JSON 的 ep 字段取到正确地址。
+func parseAIEpisodeGrid(rawHTML, pageURL, sourceID string) []providerEpisode {
+	grid := huangguoClassBlock(rawHTML, "hg-web-play__ep-grid")
+	if grid == "" {
+		return nil
+	}
+	episodes := map[int]providerEpisode{}
+	for _, m := range reAIEpisodeLink.FindAllStringSubmatchIndex(grid, -1) {
+		if len(m) < 4 || m[2] < 0 || m[3] < 0 {
+			continue
+		}
+		href := grid[m[2]:m[3]]
+		index := aiEpisodeIndex(extractAttr(grid[m[0]:m[1]], "data-ep-id"))
+		if index <= 0 {
+			index = aiEpisodeIndex(aiEpisodeKey(href, sourceID))
+		}
+		if index <= 0 {
+			continue
+		}
+		episodes[index] = providerEpisode{
+			Key:   firstNonEmpty(aiEpisodeKey(href, sourceID), strconv.Itoa(index)),
+			Title: firstNonEmpty(cleanText(grid[m[0]:m[1]]), fmt.Sprintf("第%d集", index)),
+			URL:   resolveProviderURL(pageURL, href),
+			Index: index,
+		}
+	}
+	if len(episodes) == 0 {
+		return nil
+	}
+	out := make([]providerEpisode, 0, len(episodes))
+	for _, episode := range episodes {
+		out = append(out, episode)
+	}
+	sortProviderEpisodes(out)
+	return out
+}
+
+// buildAIEpisodes 汇总黄果 AI 分集：集数网格是权威全集，
+// 内嵌 JSON（epPlaySrcs / videoSrc）只负责给已覆盖的集补播放地址；
+// 没覆盖的集 VideoURL 留空，播放时按 PageURL 现取。
+func buildAIEpisodes(body, detailURL, sourceID string) []providerEpisode {
+	initial := aiInitialData(body)
+	sources := aiEpisodeSources(initial)
+	current := aiCurrentEpisode(initial, detailURL)
+	if current > 0 && sources[current] == "" {
+		if media := normalizeProviderMediaURL(detailURL, mapString(initial, "videoSrc", "videoUrl", "playUrl")); media != "" {
+			sources[current] = media
+		}
+	}
+	episodes := parseAIEpisodeGrid(body, detailURL, sourceID)
+	if len(episodes) == 0 {
+		episodes = parseAIVideoInitialEpisodes(body, detailURL)
+	}
+	if len(episodes) == 0 {
+		episodes = parseHuangguoAIEpisodes(body, detailURL, sourceID)
+	}
+	if len(episodes) == 0 {
+		if media := sources[current]; media != "" {
+			return []providerEpisode{{Key: strconv.Itoa(current), URL: detailURL, Index: current, HLS: media}}
+		}
+		if media := parseAIVideoURL(body, detailURL); media != "" {
+			return []providerEpisode{{Key: "1", URL: detailURL, Index: 1, HLS: media}}
+		}
+		return nil
+	}
+	known := map[int]bool{}
+	for _, episode := range episodes {
+		known[episode.Index] = true
+	}
+	appendMissing := func(index int) {
+		if index <= 0 || known[index] {
+			return
+		}
+		known[index] = true
+		episodes = append(episodes, providerEpisode{
+			Key:   strconv.Itoa(index),
+			Title: fmt.Sprintf("第%d集", index),
+			URL:   resolveProviderURL(detailURL, fmt.Sprintf("/video/%s/ep-%d/", sourceID, index)),
+			Index: index,
+		})
+	}
+	appendMissing(current)
+	indexes := make([]int, 0, len(sources))
+	for index := range sources {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	for _, index := range indexes {
+		appendMissing(index)
+	}
+	sortProviderEpisodes(episodes)
+	for i := range episodes {
+		if episodes[i].HLS == "" {
+			episodes[i].HLS = sources[episodes[i].Index]
+		}
+	}
 	return episodes
 }
 

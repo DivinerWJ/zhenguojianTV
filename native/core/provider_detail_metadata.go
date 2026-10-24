@@ -94,6 +94,19 @@ func parseHuangguoSortDetail(body, pageURL string, patch Drama) (Drama, error) {
 func huangguoDetailMetadata(body, pageURL, source, sourceID string) Drama {
 	drama := Drama{ID: providerDramaID(source, sourceID), Source: source, SourceID: sourceID,
 		Title: firstNonEmpty(extractPageTitle(body), "短剧"), Desc: extractDescription(body), Tags: extractTags(body)}
+	// 内嵌 JSON 是站点的权威元数据：og:description 是截断版简介，
+	// 页面标签区还混着推荐位里别的剧的 tag，都不能作数。
+	if initial := aiInitialData(body); initial != nil {
+		if title := firstHuangguoTitle(sourceID, mapString(initial, "title", "name")); title != "" {
+			drama.Title = title
+		}
+		if desc := cleanText(mapString(initial, "description", "intro")); desc != "" {
+			drama.Desc = desc
+		}
+		if tags := aiInitialTags(initial); len(tags) > 0 {
+			drama.Tags = tags
+		}
+	}
 	if patch, err := parseHuangguoSortDetail(body, pageURL, drama); err == nil {
 		drama = patch
 	}
@@ -101,4 +114,30 @@ func huangguoDetailMetadata(body, pageURL, source, sourceID string) Drama {
 	meta := cleanText(huangguoClassBlock(huangguoNonContent.ReplaceAllString(body, ""), "hg-web-detail__meta"))
 	drama.ReleaseStatus = releaseStatusFromRemark(meta)
 	return drama
+}
+
+func aiInitialTags(data map[string]any) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(value string) {
+		value = cleanText(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	if rows, ok := data["tags"].([]any); ok {
+		for _, row := range rows {
+			add(fmt.Sprint(row))
+		}
+	}
+	if rows, ok := data["tagLinks"].([]any); ok {
+		for _, row := range rows {
+			if m, ok := row.(map[string]any); ok {
+				add(mapString(m, "name", "title"))
+			}
+		}
+	}
+	return out
 }
