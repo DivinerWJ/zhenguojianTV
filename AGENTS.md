@@ -30,6 +30,17 @@
 
 如果正在 `guoapp` 本身工作，不向自身同步；脚本会跳过此情况。不要为了同步另建临时源码副本。
 
+## Android 构建约定（Windows 本机）
+
+1. 正式出包一律走脚本完整流水线：`python scripts/build_android.py --abi arm64-v8a --all-sources [--application-id-suffix .dev]`（内部依次完成 Go so 编译、pub get、split-per-abi 构建、收包到 `dist/android/` 并生成 SHA256SUMS）。临时验证可直跑 `flutter build apk`，产物留在 `build/app/outputs/flutter-apk/`，不进 dist。
+2. 带 `--application-id-suffix` 的共存构建 versionCode 自动 +2000（如 0.8.11+86 → 2086），保证永远高于正式版；与直跑 `flutter build apk`（无偏移）的产物混装会出现 `INSTALL_FAILED_VERSION_DOWNGRADE`，此时用 `adb install -r -d` 降级安装。同一项目禁止并发跑两个构建。
+3. 构建环境必须设置 `FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn`；置空会导致 Gradle 连 Google 拉引擎产物并永久挂起（本机不通 Google）。后缀注入经 `ORG_GRADLE_PROJECT_applicationIdSuffix` / `ORG_GRADLE_PROJECT_appLabelSuffix` 传入，`build.gradle.kts` 已做属性/环境变量三重兜底。
+4. 构建脚本会临时改写 `pubspec.lock` 切镜像、正常退出时还原；后台构建被强杀会残留镜像地址导致 `--enforce-lockfile` 报错，先 `git checkout -- pubspec.lock` 再重试。
+5. `flutter clean` 会连带删除 `build/media_kit_libs_android_video/` 里的预下载 jar，导致 Gradle 卡 GitHub 下载；clean 前先备份该目录，误删后用 gh-proxy.com 按插件 `build.gradle` 内置 MD5 重下 4 个 jar 恢复。
+6. 改过依赖版本（pubspec.yaml / pubspec.lock）后必须清 Dart 编译缓存再构建，否则 AOT 产物与原生插件 AAR 版本错配，启动即抛 `ClassNotFoundException`（实际案例：shared_preferences_android 2.4.28 与 2.5.3 混用）。仅改 Dart 源码无需清缓存。
+7. 新增本地偏好键必须同步登记 `local_snapshot.dart` 的 `globalKeys` 白名单，否则保存时抛「无效的本地配置字段」并被通用错误提示掩盖。
+8. 站源镜像配置支持三模式：远程 jsDelivr 热更新（默认）/ APK 内置资产 / 自定义（本地文件路径或 JSON 链接），入口在设置页「站源镜像配置」；「下载」按钮经 MainActivity `saveToDownloads`（MediaStore）存到公共 Download 目录。镜像列表是故障转移候选池，仅首位（或上次成功主机）被主动使用，新增域名放首位才能验证。
+
 ## 代码与资料
 
 README.md 只做**产品介绍**（品牌、特性、站源、安装、平台与声明），不写构建细节与版本流水；版本更新说明放 `CHANGELOG.md`（`Build APK` 的 Release 说明从那里抓 `### <版本> · <主题>` 小节），使用说明与构建说明放 `docs/USAGE.md`、`docs/BUILD.md`。AGENTS.md 仅记录开发约定。
