@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -36,5 +37,39 @@ func TestInvalidProviderMirrorDocumentFallsBack(t *testing.T) {
 	sources, _ := parseProviderMirrorDocument([]byte(`{"version":9,"sources":{"huangdou":["https://a.example"]}}`))
 	if sources != nil {
 		t.Fatalf("unexpected sources: %#v", sources)
+	}
+}
+
+func TestApplyLocalProviderMirrors(t *testing.T) {
+	resetProviderMirrorCaches()
+	t.Cleanup(resetProviderMirrorCaches)
+
+	body := []byte(`{"version":1,"ttlSeconds":3600,"sources":{"huangguo-video":["https://huangguo.video","https://huangguoai.fit"]}}`)
+	count, err := applyLocalProviderMirrors(body)
+	if err != nil {
+		t.Fatalf("apply local mirrors: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 source, got %d", count)
+	}
+	d := &Downloader{}
+	if got := cachedProviderMirrorOrigin("huangguo-video"); got != "https://huangguo.video" {
+		t.Fatalf("unexpected cached origin: %q", got)
+	}
+	// 本地注入后，远程拉取不应覆盖本地内容（不发起请求且返回本地列表）。
+	if got := d.remoteProviderMirrors(context.Background()); len(got["huangguo-video"]) != 2 {
+		t.Fatalf("local override lost after remote call: %#v", got)
+	}
+	// 域名登记生效：providerSourceForURL 能认出新镜像归属。
+	if source := providerSourceForURL("https://huangguoai.fit/video/x/"); source != sourceHuangguoVideo {
+		t.Fatalf("unexpected source for mirror host: %q", source)
+	}
+
+	// 无效内容应报错且不清空已有缓存。
+	if _, err := applyLocalProviderMirrors([]byte(`{"version":9}`)); err == nil {
+		t.Fatal("expected error for invalid document")
+	}
+	if got := cachedProviderMirrorOrigin("huangguo-video"); got != "https://huangguo.video" {
+		t.Fatalf("cache clobbered by invalid apply: %q", got)
 	}
 }

@@ -34,6 +34,8 @@ class LocalSnapshot {
     'exportPosters',
     'autoUpdateCatalog',
     'autoPlayOnMobile',
+    'mirrorConfigMode',
+    'mirrorConfigSource',
   };
   final SharedPreferences preferences;
   Map<String, Object> _values = {};

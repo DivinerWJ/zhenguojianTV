@@ -200,6 +200,27 @@ class LocalStore extends ChangeNotifier {
     return {'light', 'dark', 'system'}.contains(value) ? value! : 'system';
   }
 
+  /// 站源镜像配置模式：`remote`=远程热更新（默认）、`builtin`=APK 内置、
+  /// `custom`=自定义（本地文件路径或 JSON 链接）。
+  String get mirrorConfigMode {
+    final value = _configurationError == null
+        ? _string('mirrorConfigMode')
+        : null;
+    return {'remote', 'builtin', 'custom'}.contains(value) ? value! : 'remote';
+  }
+
+  /// 自定义镜像配置的数据源：本地文件绝对路径或 `http(s)://` 链接。
+  String get mirrorConfigSource =>
+      _configurationError == null ? (_string('mirrorConfigSource') ?? '') : '';
+
+  Future<void> setMirrorConfigMode(String value) =>
+      {'remote', 'builtin', 'custom'}.contains(value)
+      ? _setting('mirrorConfigMode', value)
+      : Future.value();
+
+  Future<void> setMirrorConfigSource(String value) =>
+      _setting('mirrorConfigSource', value.trim());
+
   bool get autoExport => !locked && (_bool('autoExport') ?? false);
   bool get exportPosters => !locked && (_bool('exportPosters') ?? false);
 

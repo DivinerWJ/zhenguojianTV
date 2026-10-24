@@ -35,6 +35,20 @@ val universalAbiFilters = providers.gradleProperty("universalAbiFilters").orNull
 // （arm64-v8a 是 2085、armeabi-v7a 是 1085，通用包却还是 85）。用户先装过
 // 分包、再装 all 包时，安装器看到的是**版本降级**，很多 ROM 直接弹
 // "解析软件包失败"。这里给通用包加一个偏移，让它永远比分包高。
+// 共存构建：本地出的正式包与设备上已装的正式版同名，安装时会互相覆盖。
+// 需要共存时通过 ORG_GRADLE_PROJECT_applicationIdSuffix 注入包名后缀（如 .dev），
+// Gradle 会把 ORG_GRADLE_PROJECT_* 环境变量当作项目属性；桌面名称用
+// ORG_GRADLE_PROJECT_appLabelSuffix 一起改掉便于区分。两个都不注入时，
+// 行为与原来完全一致（正式出包不受影响）。debug 构建类型本就追加 .debug。
+val coexistSuffix = (providers.gradleProperty("applicationIdSuffix").orNull
+    ?: providers.environmentVariable("ORG_GRADLE_PROJECT_applicationIdSuffix").orNull
+    ?: providers.gradleProperty("APPLICATIONIDSUFFIX").orNull)
+    ?.trim()?.takeIf { it.isNotEmpty() }
+val coexistLabelSuffix = (providers.gradleProperty("appLabelSuffix").orNull
+    ?: providers.environmentVariable("ORG_GRADLE_PROJECT_appLabelSuffix").orNull
+    ?: providers.gradleProperty("APPLABELSUFFIX").orNull)
+    ?.trim()?.takeIf { it.isNotEmpty() }
+
 val universalVersionCodeOffset = providers.gradleProperty("universalVersionCodeOffset").orNull?.toIntOrNull()
 
 val releaseKey = rootProject.file("key.properties")
@@ -57,6 +71,7 @@ android {
 
     defaultConfig {
         applicationId = "com.duanju.duanju_app"
+        coexistSuffix?.let { applicationId += it }
         // 0.8.3：26 → 24。
         //
         // 电视盒子换代很慢，Android 7.0 / 7.1（API 24 / 25）的机器
@@ -70,7 +85,8 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode + (universalVersionCodeOffset ?: 0)
         versionName = flutter.versionName
-        manifestPlaceholders["appLabel"] = if (allSources) "真果鉴TV" else "红果鉴"
+        manifestPlaceholders["appLabel"] =
+            (if (allSources) "真果鉴TV" else "红果鉴") + (coexistLabelSuffix ?: "")
         manifestPlaceholders["appBanner"] = if (allSources) "@drawable/tv_banner_all_sources" else "@drawable/tv_banner"
         // 通用包只保留 ARM 两套 ABI，见文件上方 universalAbiFilters 的说明。
         universalAbiFilters?.let { filters ->

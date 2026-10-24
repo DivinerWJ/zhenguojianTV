@@ -17,6 +17,9 @@ parser.add_argument('--tv', action='store_true',
 parser.add_argument('--universal', action='store_true',
                     help='额外产出一个包含所选 ABI 的 all/universal APK')
 parser.add_argument('--cn-mirrors', action='store_true', help='使用 Flutter 中国镜像和阿里云 Maven 镜像')
+parser.add_argument('--application-id-suffix',
+                    help='包名后缀（如 .dev），产物与已安装的正式版共存；不传则与正式包同名')
+parser.add_argument('--app-label-suffix', help='桌面名称后缀（默认 ·调试），与 --application-id-suffix 搭配使用')
 add_variant_argument(parser)
 options = parser.parse_args()
 if options.tv:
@@ -25,6 +28,9 @@ if options.tv:
             options.abi = [*(options.abi or []), abi]
 variant = BuildVariant(options.all_sources)
 environment = os.environ.copy()
+if options.application_id_suffix:
+    environment['ORG_GRADLE_PROJECT_applicationIdSuffix'] = options.application_id_suffix
+    environment['ORG_GRADLE_PROJECT_appLabelSuffix'] = options.app_label_suffix or ''
 if platform.system() == 'Darwin':
     environment['LANG'] = 'en_US.UTF-8'
     environment['LC_ALL'] = 'en_US.UTF-8'

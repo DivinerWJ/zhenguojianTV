@@ -18,6 +18,7 @@ import 'sources_screen.dart';
 import 'widgets.dart';
 import 'resource_settings_screen.dart';
 import 'lan_screen.dart';
+import 'mirror_config_screen.dart';
 
 String storageSize(int bytes) {
   if (bytes < 0) return '暂不可用';
@@ -164,6 +165,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     context,
                     MaterialPageRoute<void>(
                       builder: (_) => SourcesScreen(
+                        repository: widget.repository,
+                        store: widget.store,
+                      ),
+                    ),
+                  ),
+                ),
+              if (widget.repository.supportsSourceManagement)
+                ListTile(
+                  leading: const Icon(Icons.import_contacts_outlined),
+                  title: const Text('站源镜像配置'),
+                  subtitle: Text(
+                    MirrorConfigScreenModeLabel(widget.store.mirrorConfigMode),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => MirrorConfigScreen(
                         repository: widget.repository,
                         store: widget.store,
                       ),

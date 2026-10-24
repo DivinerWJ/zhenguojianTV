@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,6 +29,27 @@ var providerMirrorCache struct {
 	sync.Mutex
 	expires time.Time
 	sources map[string][]string
+	// local 表示当前缓存来自**本地配置文件**（APK 资产或设备文件）而非
+	// 远程 jsDelivr。本地配置在每次启动时由 Dart 侧注入，会话内视为长期
+	// 有效：remoteProviderMirrors 直接返回它，不再发起网络请求覆盖。
+	local bool
+}
+
+// applyLocalProviderMirrors 把本地 source_mirrors.json 的内容注入为当前
+// 生效的镜像配置，优先级高于远程拉取。内容格式与远程文档完全一致
+// （version/ttlSeconds/sources）。解析失败返回错误，调用方自行决定回退。
+func applyLocalProviderMirrors(body []byte) (int, error) {
+	sources, _ := parseProviderMirrorDocument(body)
+	if len(sources) == 0 {
+		return 0, errors.New("本地镜像配置格式无效或为空")
+	}
+	rememberProviderOrigins(sources)
+	providerMirrorCache.Lock()
+	providerMirrorCache.sources = sources
+	providerMirrorCache.expires = time.Now().Add(24 * time.Hour)
+	providerMirrorCache.local = true
+	providerMirrorCache.Unlock()
+	return len(sources), nil
 }
 
 // providerSourceOrigins 记录"镜像域名 → 站源"的映射。
@@ -74,10 +96,21 @@ func resetProviderMirrorCaches() {
 	providerMirrorCache.Lock()
 	providerMirrorCache.expires = time.Time{}
 	providerMirrorCache.sources = nil
+	providerMirrorCache.local = false
 	providerMirrorCache.Unlock()
 	providerSourceOrigins.Lock()
 	providerSourceOrigins.hosts = nil
 	providerSourceOrigins.Unlock()
+}
+
+// clearLocalProviderMirrors 撤销本地注入（applyLocalProviderMirrors），
+// 恢复远程 jsDelivr 热更新：清空缓存后下次取镜像会重新发起远程请求。
+func clearLocalProviderMirrors() {
+	providerMirrorCache.Lock()
+	providerMirrorCache.sources = nil
+	providerMirrorCache.expires = time.Time{}
+	providerMirrorCache.local = false
+	providerMirrorCache.Unlock()
 }
 
 func validProviderMirrorOrigin(raw string) string {
@@ -129,6 +162,12 @@ func (d *Downloader) remoteProviderMirrors(ctx context.Context) map[string][]str
 	now := time.Now()
 	providerMirrorCache.Lock()
 	if now.Before(providerMirrorCache.expires) {
+		cached := providerMirrorCache.sources
+		providerMirrorCache.Unlock()
+		return cached
+	}
+	// 本地配置在会话内长期有效：不发起远程请求，也绝不覆盖本地内容。
+	if providerMirrorCache.local {
 		cached := providerMirrorCache.sources
 		providerMirrorCache.Unlock()
 		return cached

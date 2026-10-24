@@ -113,6 +113,7 @@ type nativeInput struct {
 	Session          string                  `json:"session"`
 	Sequence         int64                   `json:"sequence"`
 	Force            bool                    `json:"force"`
+	Mirrors          string                  `json:"mirrors"`
 }
 
 type nativeCatalogResult struct {
@@ -393,6 +394,21 @@ func nativeDispatch(input nativeInput) (any, error) {
 		}
 		nativeState.Unlock()
 		return map[string]any{"version": "0.2.16", "standalone": true, "allSources": buildAllSources == "true"}, nil
+	}
+	// 本地镜像配置注入（不依赖 engine，引擎未建好也允许先应用）。
+	if input.Action == "applyMirrorConfig" {
+		nativeState.Unlock()
+		count, err := applyLocalProviderMirrors([]byte(input.Mirrors))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"sources": count, "local": true}, nil
+	}
+	// 切回远程热更新模式：撤销本地注入。
+	if input.Action == "clearMirrorConfig" {
+		nativeState.Unlock()
+		clearLocalProviderMirrors()
+		return true, nil
 	}
 	engine := nativeState.engine
 	nativeState.Unlock()

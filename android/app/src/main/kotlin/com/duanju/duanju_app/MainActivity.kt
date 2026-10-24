@@ -4,6 +4,7 @@ import io.flutter.embedding.android.FlutterActivity
 import android.app.UiModeManager
 import android.media.AudioManager
 import android.os.Build
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.WindowManager
 import android.os.Bundle
@@ -59,11 +60,75 @@ class MainActivity : FlutterActivity() {
                     result.success(setScreenBrightness(value))
                 } else if (call.method == "resetScreenBrightness") {
                     result.success(resetScreenBrightness())
+                } else if (call.method == "saveToDownloads") {
+                    val fileName = call.argument<String>("fileName") ?: ""
+                    val content = call.argument<String>("content") ?: ""
+                    if (fileName.isEmpty()) {
+                        result.error("invalid", "文件名不能为空", null)
+                    } else {
+                        val path = saveToDownloads(fileName, content)
+                        if (path == null) result.error("io", "写入下载目录失败", null)
+                        else result.success(path)
+                    }
                 } else {
                     result.notImplemented()
                 }
             }
 
+    }
+
+    /**
+     * 把文本内容保存到**公共下载目录**（0.8.11）。
+     *
+     * Android 10+（Q）走 MediaStore.Downloads——Scoped Storage 下普通应用
+     * 对公共 Download 目录只有 MediaStore 这一条合法写路，无需任何权限；
+     * Android 9 及以下走传统公共目录直写（需 WRITE_EXTERNAL_STORAGE，
+     * Manifest 已声明），失败时返回 null 由 Dart 侧回退应用目录。
+     * 同名文件先删后插，保证重复下载总是拿到最新内容。
+     */
+    private fun saveToDownloads(fileName: String, content: String): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = contentResolver
+                val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                // 同名覆盖：先移除旧文件，避免每次下载都堆一份 (1) 副本。
+                resolver.query(
+                    collection,
+                    arrayOf(MediaStore.MediaColumns._ID),
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                    arrayOf(fileName),
+                    null,
+                )?.use { cursor ->
+                    val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                    while (cursor.moveToNext()) {
+                        resolver.delete(
+                            android.content.ContentUris.withAppendedId(collection, cursor.getLong(idColumn)),
+                            null, null,
+                        )
+                    }
+                }
+                val values = android.content.ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                }
+                val uri = resolver.insert(collection, values) ?: return null
+                resolver.openOutputStream(uri)?.use { output ->
+                    output.write(content.toByteArray(Charsets.UTF_8))
+                    output.flush()
+                } ?: return null
+                "/storage/emulated/0/Download/$fileName"
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = android.os.Environment
+                    .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                dir?.mkdirs()
+                val file = java.io.File(dir, fileName)
+                file.writeText(content, Charsets.UTF_8)
+                file.absolutePath
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**

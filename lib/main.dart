@@ -115,6 +115,16 @@ class _AppBootstrapState extends State<AppBootstrap>
           store = LocalStore(preferences);
           repository.access = store;
           MediaLibrary.attach(repository, store!);
+          // 按用户选择应用站源镜像配置（remote/builtin/custom）。
+          // 失败只影响镜像来源，不阻断启动。
+          unawaited(
+            repository
+                .applyMirrorConfig(
+                  store!.mirrorConfigMode,
+                  store!.mirrorConfigSource,
+                )
+                .catchError((Object _) {}),
+          );
           LanController.current?.dispose();
           final link = LanController(
             repository,

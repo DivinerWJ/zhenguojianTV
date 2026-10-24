@@ -1,7 +1,7 @@
 name: duanju_app
 description: 独立运行的多端短剧应用
 publish_to: none
-version: 0.8.10+85
+version: 0.8.12+87
 
 environment:
   sdk: '>=3.12.0 <4.0.0'
@@ -42,3 +42,6 @@ flutter:
   # 由 lib/app_splash.dart 按当前布局二选一。
   assets:
     - assets/splash/
+    # 站源镜像配置随包内置：运行时若存在设备本地文件则优先于它，
+    # 两者都影响本地注入；远程 jsDelivr 仅在无本地配置时生效。
+    - config/source_mirrors.json

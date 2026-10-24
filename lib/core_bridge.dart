@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart' show MethodChannel, rootBundle;
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
@@ -23,6 +24,34 @@ typedef _NativeRequest = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _DartRequest = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _NativeFree = Void Function(Pointer<Utf8>);
 typedef _DartFree = void Function(Pointer<Utf8>);
+
+/// 读取**本地**站源镜像配置（config/source_mirrors.json 的运行时版本）。
+///
+/// 优先级：
+/// 1. 设备文件 `<外部存储目录>/source_mirrors.json`——用文件管理器即可
+///    修改，改完重启应用生效，不必重新出包；
+/// 2. APK 内置资产 `config/source_mirrors.json`——构建时随包固化；
+/// 3. 都不存在时返回 null，核心回落到远程 jsDelivr 热更新。
+Future<String?> loadLocalMirrorConfig() async {
+  // 1) 设备上的用户自改文件（Android: /sdcard/Android/data/<包名>/files/）。
+  try {
+    final external = await getExternalStorageDirectory();
+    if (external != null) {
+      final file = File(path.join(external.path, 'source_mirrors.json'));
+      if (file.existsSync()) {
+        return file.readAsStringSync();
+      }
+    }
+  } catch (_) {
+    // 外部存储不可用时继续尝试内置资产。
+  }
+  // 2) APK 内置资产。
+  try {
+    return await rootBundle.loadString('config/source_mirrors.json');
+  } catch (_) {
+    return null;
+  }
+}
 
 String _nativeRequest(String body) {
   final DynamicLibrary library;
@@ -195,6 +224,12 @@ abstract class AppRepository {
     int quality = 0,
   }) => resolve(drama, episode, quality: quality);
   Future<void> initialize();
+  /// 应用站源镜像配置（0.8.11）。
+  ///
+  /// `mode`：`remote` 远程热更新 / `builtin` APK 内置 / `custom` 自定义；
+  /// `source` 仅 custom 模式使用：本地文件绝对路径或 JSON 链接。
+  /// 基类默认空实现（LAN 等环境无本地核心，无镜像配置可注入）。
+  Future<void> applyMirrorConfig(String mode, String source) async {}
   Future<CatalogPage> catalog(
     String source, {
     int page = 1,
@@ -671,12 +706,97 @@ class NativeRepository extends AppRepository {
     if (build['allSources'] != allSourcesEnabled) {
       throw AppFailure('应用与原生核心的站源版本不一致，请使用完整安装包重新安装');
     }
+    // 镜像配置按用户选择的三模式在 main.dart 里通过 applyMirrorConfig 应用
+    //（此时 LocalStore 尚未创建，读不到用户偏好）。
     if (!background) await BackgroundDownloads.prepare();
     if (!background) {
       SystemProxyMonitor.start((value) async {
         await _call({'action': 'updateSystemProxy', 'systemProxy': value});
       });
     }
+  }
+
+  /// 远程镜像配置地址（与 Go 侧 providerMirrorConfigURL 保持一致）。
+  static const remoteMirrorConfigUrl =
+      'https://cdn.jsdelivr.net/gh/ai0by/zhenguojianTV@main/config/source_mirrors.json';
+
+  @override
+  Future<void> applyMirrorConfig(String mode, String source) async {
+    switch (mode) {
+      case 'builtin':
+        final content = await rootBundle.loadString(
+          'config/source_mirrors.json',
+        );
+        await _call({'action': 'applyMirrorConfig', 'mirrors': content});
+      case 'custom':
+        final content = await _readMirrorSource(source);
+        await _call({'action': 'applyMirrorConfig', 'mirrors': content});
+      default:
+        // 远程热更新：撤销本地注入，让核心重新走 jsDelivr。
+        await _call({'action': 'clearMirrorConfig'});
+    }
+  }
+
+  /// 读取自定义镜像配置：`source` 为 http(s) 链接时在线拉取，
+  /// 否则视为本地文件路径。返回原始 JSON 文本。
+  Future<String> _readMirrorSource(String source) async {
+    final trimmed = source.trim();
+    if (trimmed.isEmpty) {
+      throw AppFailure('请先填写自定义配置的本地文件路径或 JSON 链接');
+    }
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      final client = HttpClient();
+      try {
+        final request = await client
+            .getUrl(Uri.parse(trimmed))
+            .timeout(const Duration(seconds: 10));
+        final response = await request.close().timeout(
+          const Duration(seconds: 10),
+        );
+        if (response.statusCode != 200) {
+          throw AppFailure('下载配置失败：HTTP ${response.statusCode}');
+        }
+        final body = await response.transform(utf8.decoder).join();
+        if (body.trim().isEmpty) throw AppFailure('下载的配置内容为空');
+        return body;
+      } on AppFailure {
+        rethrow;
+      } catch (_) {
+        throw AppFailure('下载配置失败，请检查链接与网络');
+      } finally {
+        client.close();
+      }
+    }
+    final file = File(trimmed);
+    if (!file.existsSync()) {
+      throw AppFailure('文件不存在：$trimmed');
+    }
+    return file.readAsStringSync();
+  }
+
+  /// 把远程镜像配置下载到**公共下载目录**（0.8.11）。
+  ///
+  /// 走 `MainActivity` 的 `duanju/device#saveToDownloads`（MediaStore，
+  /// Android 10+ 无需权限）；原生写失败时回退应用外部目录。
+  /// 返回保存路径，供用户用文件管理器修改后填入自定义模式。
+  Future<String> downloadRemoteMirrorConfig() async {
+    final content = await _readMirrorSource(remoteMirrorConfigUrl);
+    const channel = MethodChannel('duanju/device');
+    try {
+      final saved = await channel.invokeMethod<String>('saveToDownloads', {
+        'fileName': 'source_mirrors.json',
+        'content': content,
+      });
+      if (saved != null && saved.isNotEmpty) return saved;
+    } catch (_) {
+      // 原生通道不可用 / 旧系统缺权限：回退应用外部目录。
+    }
+    final directory =
+        await getExternalStorageDirectory() ??
+        await getApplicationSupportDirectory();
+    final file = File(path.join(directory.path, 'source_mirrors.json'));
+    await file.writeAsString(content, flush: true);
+    return file.path;
   }
 
   @override
