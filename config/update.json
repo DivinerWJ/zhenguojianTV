@@ -2,28 +2,28 @@
   "version": 1,
   "ttlSeconds": 21600,
   "latest": {
-    "version": "0.8.24",
+    "version": "0.8.24-dw",
     "build": 105,
-    "tag": "v0.8.24",
+    "tag": "v0.8.24-dw",
     "notes": "0.8.24 · 红果取流不再「卡 20 秒」：换维度优先，等待兜底",
     "assets": [
       {
         "abi": "all",
         "name": "zhenguojianTV-0.8.24+105-all.apk",
-        "size": 72913774,
-        "sha256": "1cb14eb57738071896e2aa37c885a89b333e12902c5c1079140e98f1d23df2b6"
+        "size": 72943636,
+        "sha256": "1c1702ca77d68aa135fca655598d66bb6c5b07c24ce356eef20536c55fead59c"
       },
       {
         "abi": "arm64-v8a",
         "name": "zhenguojianTV-0.8.24+105-arm64-v8a.apk",
-        "size": 33073978,
-        "sha256": "258b79662e2bf96907dbdc3100830694dd776e98fefa620c9145acd45770c17e"
+        "size": 33089227,
+        "sha256": "34c51966c3d72233a8997b7ca131953fdaf14be4d2d8c987a1f51ac35ccf8379"
       },
       {
         "abi": "armeabi-v7a",
         "name": "zhenguojianTV-0.8.24+105-armeabi-v7a.apk",
-        "size": 41620300,
-        "sha256": "55fa4232a947ef56456bb25298c4beb80a458a7a84827b6ee789b500b2dd3a2c"
+        "size": 41636646,
+        "sha256": "4ed63fb5155297e0fc7760c2699cc41ee5332b7441903f2682d2ada4fe69e96b"
       }
     ]
   },
