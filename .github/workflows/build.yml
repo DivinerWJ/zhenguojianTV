@@ -144,7 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           build_tools="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n1)"
-          expected="4c467845d641eca462515baccce10c55b4b624c50e8c55d15f9f225107065231"
+          expected="48fcef1144abb3acbcbb4cfe9572c54998438a5dcc84f92a782f73bbf10af88d"
           for apk in dist/android/*.apk; do
             actual=$("$build_tools/apksigner" verify --print-certs "$apk" \
               | sed -n 's/.*certificate SHA-256 digest: //p' | head -n1 | tr -d ' :' | tr 'A-Z' 'a-z')
