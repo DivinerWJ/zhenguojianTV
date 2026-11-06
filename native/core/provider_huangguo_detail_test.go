@@ -20,8 +20,11 @@ const huangguoAIDetailFixture = `<!doctype html>
 <div class="hg-web-recommend"><div class="hg-drama-card" data-track-id="99"><span class="hg-tag">别剧标签</span></div></div>
 </body></html>`
 
-func TestBuildAIEpisodesPrefersGridOverShortEpPlaySrcs(t *testing.T) {
-	episodes := buildAIEpisodes(huangguoAIDetailFixture, "https://huangguoai.com/detail/12/", "12")
+func TestMergedAIEpisodesPrefersGridOverShortEpPlaySrcs(t *testing.T) {
+	episodes := mergeHuangguoAIEpisodes(
+		parseHuangguoAIEpisodes(huangguoAIDetailFixture, "https://huangguoai.com/detail/12/", "12"),
+		parseAIVideoInitialEpisodes(huangguoAIDetailFixture, "https://huangguoai.com/detail/12/"),
+	)
 	if len(episodes) != 4 {
 		t.Fatalf("episode count = %d, want 4 (epPlaySrcs only has 2)", len(episodes))
 	}
@@ -47,11 +50,14 @@ func TestBuildAIEpisodesPrefersGridOverShortEpPlaySrcs(t *testing.T) {
 	}
 }
 
-func TestBuildAIEpisodesStillWorksWithoutGrid(t *testing.T) {
+func TestMergedAIEpisodesStillWorksWithoutGrid(t *testing.T) {
 	body := `<html><head><title>旧剧</title></head><body>
 	<script id="videoInitialData">{"id":"7","ep":1,"videoSrc":"https://cdn.example/ep1.m3u8","epPlaySrcs":{"1":"https://cdn.example/ep1.m3u8","2":"https://cdn.example/ep2.m3u8"}}</script>
 	</body></html>`
-	episodes := buildAIEpisodes(body, "https://huangguoai.com/detail/7/", "7")
+	episodes := mergeHuangguoAIEpisodes(
+		parseHuangguoAIEpisodes(body, "https://huangguoai.com/detail/7/", "7"),
+		parseAIVideoInitialEpisodes(body, "https://huangguoai.com/detail/7/"),
+	)
 	if len(episodes) != 2 {
 		t.Fatalf("fallback episode count = %d, want 2", len(episodes))
 	}

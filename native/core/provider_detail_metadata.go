@@ -4,9 +4,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/url"
+	"regexp"
 	"strings"
 )
+
+var reVideoInitialData = regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
+
+func aiInitialData(rawHTML string) map[string]any {
+	m := reVideoInitialData.FindStringSubmatch(rawHTML)
+	if len(m) < 2 {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &data); err != nil {
+		return nil
+	}
+	return data
+}
 
 func parseHongguoSortDetail(body, id string) (Drama, error) {
 	row := nestedMap(routerLoaderMap(parseRouterData(body), "detail_page", "detail_"), "seriesDetail")
