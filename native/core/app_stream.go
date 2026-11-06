@@ -37,6 +37,28 @@ type nativeStreamSession struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	lastUsed    time.Time
+	// 播放器真正来拉过分片的次数（0.8.13）。
+	//
+	// 只用来区分"会话建好了但没人用"与"正在播"：`lastUsed` 在创建时就等于
+	// `now`，光看它没法判断一个刚建的会话是不是马上要播；
+	// 而 `serves == 0` 说明播放器一次都没来取过，可以放心回收。
+	serves int64
+}
+
+// nativeHot 判断某个 stream 会话是不是"正在被播放器使用"。
+//
+// 判定条件：播放器至少来拉过一次分片，且最近 [window] 内还有请求。
+// 这类会话**不能**被上限回收 —— `cancel()` 会当场掐断它的上游请求，
+// 播放器随后请求分片会拿到 410「播放已结束」，表现就是"看着看着卡住，
+// 退出再进才好"。
+func (stream *nativeStreamServer) nativeHot(token string, window time.Duration) bool {
+	if stream == nil || token == "" {
+		return false
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	session := stream.sessions[token]
+	return session != nil && session.serves > 0 && time.Since(session.lastUsed) < window
 }
 
 type nativeStreamServer struct {
@@ -45,6 +67,8 @@ type nativeStreamServer struct {
 	address    string
 	sessions   map[string]*nativeStreamSession
 	server     *http.Server
+	// 分片级磁盘缓存（0.8.12），跨播放会话共享，见 `app_media_cache.go`。
+	media *nativeMediaCache
 }
 
 func (stream *nativeStreamServer) nativeRequest(request *http.Request) (*http.Response, error) {
@@ -55,12 +79,24 @@ func (stream *nativeStreamServer) nativeRequest(request *http.Request) (*http.Re
 
 var nativePlaylistURI = regexp.MustCompile(`URI="([^"]+)"`)
 
-func newNativeStreamServer(d *Downloader) (*nativeStreamServer, error) {
+// newNativeStreamServer 起一个本机流代理。
+//
+// `caches` 可选：传引擎级的分片缓存（0.8.12），让预缓存与播放共用同一份
+// 磁盘索引。不传时按 `d.cfg.dataDir` 自建一份（单测路径）。
+func newNativeStreamServer(d *Downloader, caches ...*nativeMediaCache) (*nativeStreamServer, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, errors.New("无法初始化本机播放器")
 	}
 	stream := &nativeStreamServer{downloader: d, address: "http://" + listener.Addr().String(), sessions: map[string]*nativeStreamSession{}}
+	for _, cache := range caches {
+		if cache != nil {
+			stream.media = cache
+		}
+	}
+	if stream.media == nil && d != nil {
+		stream.media = newNativeMediaCache(d.cfg.dataDir)
+	}
 	server := &http.Server{Handler: http.HandlerFunc(stream.nativeServe), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	stream.server = server
 	go func() { _ = server.Serve(listener) }()
@@ -82,15 +118,29 @@ func (stream *nativeStreamServer) nativeOpen(media providerMedia) (string, strin
 			delete(stream.sessions, id)
 		}
 	}
-	if len(stream.sessions) >= 8 {
-		oldest := ""
+	// 会话上限只是"防止无限增长"的兜底，**不能淘汰正在播的那一路**。
+	//
+	// 0.8.12 首版按 `lastUsed` 挑最老的淘汰，但没排除"仍在使用"的会话：
+	// 预缓存会额外开会话，很容易把数量顶到上限，一旦被淘汰的是用户正在看的
+	// 那一路，`session.cancel()` 会当场掐断它的上游请求，播放器随后请求分片
+	// 拿到 410「播放已结束」→ 卡住，退出再进才好。
+	//
+	// 现在只淘汰"播放器一次都没来拉过、或已闲置 2 分钟"的会话
+	// （判定口径见 `nativeHot`）；全都在用就允许临时超一点。
+	if len(stream.sessions) >= 12 {
+		victim := ""
 		for id, old := range stream.sessions {
-			if oldest == "" || old.lastUsed.Before(stream.sessions[oldest].lastUsed) {
-				oldest = id
+			if old.serves > 0 && time.Since(old.lastUsed) < 2*time.Minute {
+				continue
+			}
+			if victim == "" || old.lastUsed.Before(stream.sessions[victim].lastUsed) {
+				victim = id
 			}
 		}
-		stream.sessions[oldest].cancel()
-		delete(stream.sessions, oldest)
+		if victim != "" {
+			stream.sessions[victim].cancel()
+			delete(stream.sessions, victim)
+		}
 	}
 	stream.sessions[token] = session
 	stream.mu.Unlock()
@@ -220,6 +270,18 @@ func looksLikePlaylist(data []byte) bool {
 	return strings.HasPrefix(text, "#EXTM3U")
 }
 
+// nativeServeCached 直接把磁盘缓存的分片回给播放器。
+//
+// 用 `http.ServeContent` 是因为它已经处理好 Range / HEAD / Content-Length
+// —— 播放器切集时会先发 Range 探测，自己手写容易漏。
+func (stream *nativeStreamServer) nativeServeCached(writer http.ResponseWriter, request *http.Request, asset nativeStreamAsset) {
+	writer.Header().Set("Content-Type", asset.contentType)
+	if asset.etag != "" {
+		writer.Header().Set("ETag", asset.etag)
+	}
+	http.ServeContent(writer, request, "", time.Time{}, bytes.NewReader(asset.data))
+}
+
 func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		writer.WriteHeader(http.StatusMethodNotAllowed)
@@ -234,6 +296,7 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	session := stream.sessions[parts[0]]
 	if session != nil {
 		session.lastUsed = time.Now()
+		session.serves++
 	}
 	stream.mu.Unlock()
 	if session == nil {
@@ -252,6 +315,24 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	stop := context.AfterFunc(session.ctx, cancel)
 	defer stop()
 	writer.Header().Set("Cache-Control", "no-store")
+	// 0.8.12：预缓存过的分片直接走磁盘，不再等上游。
+	//
+	// 只在这一处读缓存、**不在播放路径上写缓存** —— 写缓存全部由
+	// `precache` / `prefetch` 后台完成，播放热路径保持原样，风险最小。
+	//
+	// 命中后**不回填 `session.assets`**：那样一整集的分片会常驻内存
+	// （30 段 × 2MB = 60MB/会话），电视盒子上很容易被系统回收。
+	//
+	// 0.8.13：条件从"内存里没有正文"放宽到"内存里没有**完整**正文"。
+	// `preload` 预热进来的是前 4MB 前缀（`total > len(data)`），
+	// 旧条件会把它当成"已有数据"、跳过磁盘缓存，于是开头几段明明已经
+	// 预缓存好了，播放时仍要走 `nativeServePrefix` 去上游续读。
+	if len(asset.data) == 0 || asset.total > int64(len(asset.data)) {
+		if cached, ok := stream.media.load(asset.address); ok {
+			stream.nativeServeCached(writer, request, cached)
+			return
+		}
+	}
 	if len(asset.data) > 0 && asset.total > int64(len(asset.data)) {
 		if stream.nativeServePrefix(ctx, writer, request, session, asset) {
 			return

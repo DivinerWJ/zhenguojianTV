@@ -43,6 +43,18 @@ func (d *Downloader) providerBaseURL(source string) string {
 		fallback = xiangjiaoBaseURL
 	case sourceEZDMW:
 		fallback = ezdmwBaseURL
+	case sourceSorani:
+		fallback = soraniSiteBaseURL
+	case sourceHema:
+		fallback = hemaSiteBaseURL
+	case sourceHuaguo:
+		fallback = huaguoBaseURL
+	case sourceWangguo:
+		fallback = wangguoBaseURL
+	case sourceFaguo:
+		fallback = faguoBaseURL
+	case sourceWuguo:
+		fallback = wuguoBaseURL
 	default:
 		fallback = "https://d2pypzndaqisk.cloudfront.net"
 	}
@@ -82,6 +94,14 @@ func providerSourceForURL(raw string) string {
 		return sourceXiangjiao
 	case ezdmwMirrorHost(host):
 		return sourceEZDMW
+	case host == "sorani.net" || host == "www.sorani.net" || host == "api.sorani.cc":
+		return sourceSorani
+	case host == "kuaikaw.cn" || host == "www.kuaikaw.cn":
+		return sourceHema
+	case maccmsMirrorHost(host):
+		// 苹果CMS 采集站（花果 / 网果 / 发果 / 伍果），域名都登记在
+		// maccmsProfiles 里，加站只需要改那一张表。
+		return maccmsSourceForHost(host)
 	default:
 		// 远程镜像配置里登记的备用域名（红果、黄剧等站源经常换域名）。
 		return providerSourceForHost(host)
@@ -202,6 +222,33 @@ func (d *Downloader) resolveProviderMedia(ctx context.Context, task Task) (provi
 		media, err = d.resolveEZDMWPlayback(ctx, task)
 		if err != nil {
 			return providerMedia{}, err
+		}
+	}
+	// 青空次元（0.8.15）：详情只给 episodeId，真实 m3u8 要再请求一次 play 接口。
+	if chapter.Source == sourceSorani && strings.HasPrefix(chapter.VideoURL, "sorani-play://") {
+		var err error
+		media, err = d.resolveSoraniMedia(ctx, task)
+		if err != nil {
+			return providerMedia{}, err
+		}
+	}
+	// 河马剧场（0.8.17）：网页只放出前 5 集，付费集要按 chapterId 走 App 门户接口。
+	if chapter.Source == sourceHema && strings.HasPrefix(chapter.VideoURL, "hema-play://") {
+		var err error
+		media, err = d.resolveHemaMedia(ctx, task)
+		if err != nil {
+			return providerMedia{}, err
+		}
+	}
+	// 苹果CMS 采集站：详情页只给出"播放页地址"，真正的 m3u8 要再抓一次播放页
+	// 才拿得到，所以分集里存的是 maccms-play:// 标记，这里按需解析。
+	if strings.HasPrefix(chapter.VideoURL, "maccms-play://") {
+		if _, found := maccmsProfileFor(chapter.Source); found {
+			var err error
+			media, err = d.resolveMaccmsPlayback(ctx, task)
+			if err != nil {
+				return providerMedia{}, err
+			}
 		}
 	}
 	if chapter.Source == sourceHuangdou {

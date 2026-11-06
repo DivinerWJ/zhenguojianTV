@@ -9,7 +9,10 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import 'core_bridge.dart';
+import 'danmaku_controller.dart';
+import 'danmaku_overlay.dart';
 import 'app_layout.dart';
+import 'app_theme.dart';
 import 'detail_screen.dart';
 import 'follow_state.dart';
 import 'lan_controller.dart';
@@ -23,8 +26,10 @@ import 'playback_preloader.dart';
 import 'playback_recovery.dart';
 import 'remote_widgets.dart';
 import 'player_interactions.dart';
+import 'player_status_hud.dart';
 import 'system_volume.dart';
 import 'screen_brightness.dart';
+import 'picture_in_picture.dart';
 import 'tv_dialogs.dart';
 import 'tv_player_panel.dart';
 import 'widgets.dart';
@@ -1030,19 +1035,29 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     );
     if (widget.embedded) return content;
     final tv = AppLayout.isTelevision(context);
-    final scaffold = tv
-        ? Scaffold(backgroundColor: Colors.black, body: content)
-        : Scaffold(
-            backgroundColor: Colors.black,
-            body: SafeArea(
-              child: Column(
-                children: [
-                  _header(),
-                  Expanded(child: content),
-                ],
-              ),
+    // 0.8.15 第二批（用户要求，红果那种效果）：
+    // **独立播放页不再有顶部黑边**。
+    //
+    // 原先这里是 `SafeArea(Column[_header(), Expanded(content)])`：
+    // `_header()` 是纯黑 `Container`，加上 `SafeArea` 让出的状态栏高度，
+    // 于是顶部有一条黑带——状态栏图标还沿用上一页（浅色主题 → 深色图标）
+    // 的样式，落在纯黑底上完全看不见，用户看到的就是"电量时间被黑边挡住"。
+    //
+    // 现在：画面直接铺到屏幕最上沿（含状态栏区域），返回按钮改由
+    // `_FeedPage` 以浮层形式画在画面左上角，跟随控件一起显隐。
+    // 系统栏由 `_FeedPage` 的 `_syncSystemUi` 按"播放中 / 控件可见"切换。
+    final scaffold = Scaffold(
+      backgroundColor: Colors.black,
+      body: tv
+          ? content
+          // 播放页始终是深色底 → 状态栏图标必须用浅色，
+          // 用 `AnnotatedRegion` 声明式给出：离开本页时由 Flutter 自动恢复
+          // 上一层的样式（首页 AppBar 的浅色底深色图标），不需要手动还原。
+          : AnnotatedRegion<SystemUiOverlayStyle>(
+              value: AppTheme.systemBars(Brightness.dark),
+              child: content,
             ),
-          );
+    );
     if (!tv) return scaffold;
     return PopScope(
       canPop: false,
@@ -1082,46 +1097,11 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
     }
   }
 
-  Widget _header() => Container(
-    color: Colors.black,
-    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-    child: Row(
-      children: [
-        IconButton(
-          onPressed: () => Navigator.of(context).maybePop(),
-          icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-          tooltip: '返回',
-        ),
-        // 单剧模式（0.6.2）：不再显示站源文字。
-        //
-        // 原先无条件显示 `_sourceLabel()`，而它读的是**首页当前勾选的站源集合**
-        // （见 `_sources`），与"正在播哪部剧"无关：
-        // 首页勾了多个源时，从详情页/下载页/本地媒体进入的单剧播放器
-        // 会错误地显示「全部站源」。单剧模式本就不涉及选源，
-        // 且本地媒体那条剧没有真实站源，故整行去掉，只保留返回按钮。
-        if (widget.singleDrama == null) Expanded(child: _sourceLabel()),
-      ],
-    ),
-  );
-
-  Widget _sourceLabel() => Align(
-    alignment: Alignment.centerLeft,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Text(
-        _sources.isEmpty
-            ? '暂无可用站源'
-            : _sources.length > 1
-            ? '全部站源'
-            : _sources.first.name,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 16,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    ),
-  );
+  // 0.8.15 第二批：`_header()` / `_sourceLabel()` 已删除。
+  //
+  // 顶部那条纯黑标题栏正是"黑边挡住电量时间"的来源；现在画面铺到最上沿，
+  // 返回按钮改由 `_FeedPage` 画在画面左上角（见 `_topLeftOverlay`）。
+  // 站源文字本来在单剧模式下就不显示，一并去掉不影响任何入口。
 
   Widget _body() {
     if (_sources.isEmpty) {
@@ -1236,6 +1216,12 @@ class _VerticalFeedScreenState extends State<VerticalFeedScreen>
               ? _items[index + 1]
               : null,
           autoNextDramaEnabled: widget.singleDrama == null && !_autoNextEpisode,
+          // 0.8.15 第二批：独立播放页（不是首页竖滑流）把返回按钮画进画面，
+          // 并接管状态栏显隐。电视有自己的遥控返回，不需要。
+          onBack: widget.embedded || AppLayout.isTelevision(context)
+              ? null
+              : () => Navigator.of(context).maybePop(),
+          immersive: !widget.embedded && !AppLayout.isTelevision(context),
           // 局域网推送接收（0.6.4）：只交给**单剧模式的第一页**
           // （推送必然是一台设备推一部剧过来，不存在"下一部"），
           // 且只给当前页，避免多页同时回报握手。
@@ -1528,6 +1514,19 @@ class _FeedRemoteActions {
   final void Function(bool paused) setPaused;
 }
 
+/// 一份留在本页缓存里的播放计划（0.8.16 第二批）。
+///
+/// 只记"计划 + 它什么时候失效"，用来支撑来回切集零网络。
+/// 超出缓存上限或凭证将过期时由 [_FeedPageState._rememberPlan] 释放会话。
+class _CachedPlaybackPlan {
+  const _CachedPlaybackPlan(this.plan, this.expires);
+
+  final PlaybackPlan plan;
+
+  /// 这一份计划还能用到什么时候。
+  final DateTime expires;
+}
+
 /// 单页：一个视频 + 播放控件 + 信息栏。
 class _FeedPage extends StatefulWidget {
   const _FeedPage({
@@ -1558,6 +1557,8 @@ class _FeedPage extends StatefulWidget {
     this.nextDrama,
     this.autoNextDramaEnabled = false,
     this.handoff,
+    this.onBack,
+    this.immersive = false,
   });
 
   final Drama drama;
@@ -1649,6 +1650,21 @@ class _FeedPage extends StatefulWidget {
   /// 只有单剧模式的当前页会拿到它（见 `_body()` 的传参）。
   final LanIncomingPlayback? handoff;
 
+  /// 画面左上角的返回按钮（0.8.15 第二批）。
+  ///
+  /// 非空表示本页是**独立播放路由**（从详情页 / 下载页 / 本地媒体 / 投屏
+  /// 进入），顶部不再有黑色标题栏，返回按钮以浮层形式画在画面左上角，
+  /// 跟随控件一起显隐（红果那种"点一下才出现返回"的观感）。
+  /// 首页竖滑流为 null（它由底部导航承载）。
+  final VoidCallback? onBack;
+
+  /// 是否接管系统栏显隐（0.8.15 第二批）。
+  ///
+  /// 只在独立播放页为 true：播放中且控件收起 → 隐藏状态栏（画面真正铺满，
+  /// 顶部没有黑边）；点击暂停 / 唤起控件 / 下拉通知栏 → 状态栏回来。
+  /// 首页竖滑流外面还有 AppBar，切系统栏会让整页跳一下，故不接管。
+  final bool immersive;
+
   @override
   State<_FeedPage> createState() => _FeedPageState();
 }
@@ -1660,8 +1676,72 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   final _subscriptions = <StreamSubscription<dynamic>>[];
   DramaDetail? _detail;
   PlaybackPlan? _plan;
+
+  /// [_plan] 对应的是第几集（0.8.16 第二批）。
+  ///
+  /// 换集时要把**上一集**的计划存进 [_planCache]，而 `_episodeIndex` 那时
+  /// 已经被改成目标集了，必须单独记一份旧值，否则会拿错集号去缓存。
+  int _planEpisode = -1;
+
+  /// 最近几集的播放计划（0.8.16 第二批）。
+  ///
+  /// 抖音 / 红果的切集是"零等待"的，靠的是**播过的内容立刻能回到**。
+  /// 以前这里换集就把旧计划的播放会话 `release` 掉，于是 6 → 5 → 6
+  /// 往回切时第 6 集要重新走一遍完整解析链路（详情 → 取流 → 拉 m3u8），
+  /// 用户看到的就是"停在本集转圈，等它好了才切"。
+  ///
+  /// 现在换集时先把旧计划**留下来**，回切直接复用；只有超出上限或凭证
+  /// 快过期时才真正释放。键见 [_planKey]，容量见 [_planCacheLimit]。
+  final Map<String, _CachedPlaybackPlan> _planCache = {};
+
+  /// 缓存上限（含当前正在播的那一集）。
+  ///
+  /// 原生侧播放会话上限只有 12 个，预载器还占着 4 个左右，
+  /// 这里留 3 个：够覆盖"往回切两集"，又不会把会话池吃满。
+  static const int _planCacheLimit = 3;
+
+  /// 弹幕（0.8.11）：只有红果的剧集有弹幕，控制器自己判断支持与否。
+  late final DanmakuController _danmaku;
+  bool _danmakuEnabled = true;
   String? _error;
   bool _loading = true;
+
+  /// 「正在加载」遮罩是否真的画出来（0.8.16 第二批）。
+  ///
+  /// `_loading` 是**状态**，切集瞬间就会置位；但抖音 / 红果式的切集
+  /// 根本看不到转圈 —— 命中缓存时 `open()` 往往一二百毫秒就换好画面，
+  /// 遮罩还没画出来就该撤了。所以遮罩单独延迟 [_loadingOverlayDelay]
+  /// 才真正显示，短时加载等于完全无感。
+  bool _loadingOverlay = false;
+  Timer? _loadingOverlayTimer;
+
+  /// 遮罩延迟。
+  ///
+  /// 0.8.19：220ms → 320ms。用户仍反馈"切集不流畅"，而命中缓存 / 预载的
+  /// 换集（open + 首帧）经常落在 220~300ms 之间 —— 220ms 会**刚好**把动效
+  /// 闪出来一下又撤掉，比不显示更难受。320ms 让这段"其实很快"的切集
+  /// 彻底无闪动，真卡住时也还在一眨眼之内给到反馈。
+  static const Duration _loadingOverlayDelay = Duration(milliseconds: 320);
+
+  /// 缓冲卡顿是否已经明显到该亮动效（0.8.16 第三批）。
+  ///
+  /// 抖音 / 红果的规则：**缓冲超过半秒才把加载动效亮出来**。短抖动不该
+  /// 闪一下，但真的卡住了必须有反馈 —— 否则画面就那么僵在最后一帧，
+  /// 用户会以为播放器死了。
+  bool _bufferingHint = false;
+  Timer? _bufferingTimer;
+
+  /// "这一集这次没取到片源"的自动重试（0.8.22）。
+  ///
+  /// 这类失败基本都是瞬时的（用户反馈"点重试立刻就好"），所以由页面自己
+  /// 静默重来一次，不把错误亮给用户。每集只重试一次，真正的硬失败照常报错。
+  Timer? _mediaRetryTimer;
+  bool _autoMediaRetried = false;
+
+  /// 缓冲多久算"卡住了"。500ms 是抖音的量级：低于它多半是切片间隙，
+  /// 高于它用户已经能感觉到停顿。
+  static const Duration _bufferingHintDelay = Duration(milliseconds: 500);
+
   bool _ready = false;
   bool _panelOpen = false;
   DateTime _lastPanelClosedAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -1679,6 +1759,19 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// （连续两轮拿不到画面帧 → 判定硬解有问题 → 切软解重来一次）。
   /// 一旦置位，本页后续所有重试都用 `hwdec=no`。
   bool _softwareDecode = false;
+
+  /// 当前播放器实例是否已经下发过静态属性（0.8.19）。
+  ///
+  /// `demuxer-lavf-o` / `network-timeout` / `hwdec` / `cache-on-disk` /
+  /// `stream-buffer-size` 这些值在同一个 `Player` 实例上**不会随集数变化**，
+  /// 但以前每集都要串行 `await` 5~7 次平台调用再 `open()` —— 等于每次切集
+  /// 先白等几个通道往返（真机上是几十毫秒，正好压在"点下去到出画面"之间）。
+  /// 现在只在新实例、或解码模式被自动降级时重下发。
+  bool _playerConfigured = false;
+  bool _configuredSoftwareDecode = false;
+
+  /// 上一次下发的逐集属性签名（`local|decryptionKey`，0.8.19）。
+  String _configuredPlanSignature = '';
 
   /// 已经自动降级过几次（0.8.3）。
   ///
@@ -1742,6 +1835,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   double? _seekValue;
   Timer? _hideTimer;
   bool _closed = false;
+
+  /// 画中画（0.8.17，手机端）。
+  ///
+  /// `_pipAvailable` 由 `PictureInPicture.initialize()` 探测；
+  /// `_pipActive` 跟随原生的进出小窗回调 —— 进小窗要立刻收起控件，
+  /// 否则小窗里会糊着一层按钮和进度条。
+  bool _pipAvailable = false;
+  bool _pipActive = false;
+  bool _pipArmed = false;
+  bool _pipInitialized = false;
+
+  /// 小窗上那个按钮当前该显示"暂停"还是"播放"（0.8.18）。
+  ///
+  /// 与播放器真实播放态保持同步，只在**变化时**推给原生 —— 位置流每秒会来
+  /// 好几次，无条件过通道纯属浪费。原生默认按"播放中"渲染，所以初值取 true。
+  bool _pipPlaying = true;
 
   /// 当前剧是否已追剧（0.2.26 新增）。
   ///
@@ -1945,6 +2054,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     _quality = preferences.quality;
     // 电视兼容模式（0.8.3）：用户手动强制软解时，从第一次 open 就生效。
     _softwareDecode = widget.store.tvCompatMode;
+    // 网络类型预热（0.8.19）：换集时要判"是不是移动网络"，先把结果取回来，
+    // 免得每次切集都在 `open()` 之前白等一次平台通道往返。
+    NetworkState.warmUp();
+    // 弹幕（0.8.11）：控制器自己判断"本集有没有弹幕"，这里只负责开关偏好。
+    _danmakuEnabled = widget.store.danmakuEnabled;
+    _danmaku = DanmakuController(widget.repository)
+      ..setEnabled(_danmakuEnabled);
     // 单剧模式（0.2.29）：从指定集开始播放（详情页/下载页点的是第几集）。
     _episodeIndex = widget.initialEpisodeIndex;
     _pendingStart = widget.initialPosition;
@@ -1998,6 +2114,225 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _television = AppLayout.isTelevision(context);
+    // 0.8.17：画中画。**必须放在这里**而不是 initState ——
+    // `_television` 在 didChangeDependencies 才拿到值，initState 里恒为 false，
+    // 电视上会白跑一次通道探测。`_pipInitialized` 保证只跑一次。
+    if (!_pipInitialized) {
+      _pipInitialized = true;
+      _initPictureInPicture();
+    }
+  }
+
+  // —— 播放计划缓存（0.8.16 第二批）——
+  //
+  // 目标：来回切集**零网络、零停顿**。
+  //
+  // 抖音 / 红果切上一集是瞬间的，因为它们把"刚播过的内容"留在内存里。
+  // 这里以前换集就把旧会话 `release` 掉，于是 6 → 5 命中预载、5 → 6
+  // 却要重新解析（第 6 集早已被预载器的"只留邻居"清掉了）。用户看到
+  // 的就是"停在本集转圈，等它好了才切过去"。
+
+  /// 某一集在缓存里的键。画质参与键：切画质等于换一路流，不能混用。
+  String _planKey(int index) => '$index|$_quality';
+
+  /// 取出一份仍然有效的缓存计划（**取走**，同时从缓存里删掉）。
+  ///
+  /// 取走而不是共享：`PlaybackPlan` 带着一个播放会话，同一份计划被两处
+  /// 同时当作"正在播"会让会话的释放时机说不清。命中后这份计划归播放器，
+  /// 下次换集时再按新集号存回来。
+  PlaybackPlan? _takeCachedPlan(int index) {
+    final entry = _planCache.remove(_planKey(index));
+    if (entry == null) return null;
+    if (entry.expires.isAfter(DateTime.now()) && entry.plan.url.isNotEmpty) {
+      return entry.plan;
+    }
+    unawaited(
+      widget.repository.release(entry.plan.session).catchError((Object _) {}),
+    );
+    return null;
+  }
+
+  /// 缓存里有没有这一集（**只看不取**，用来决定要不要闪加载遮罩）。
+  bool _hasCachedPlan(int index) {
+    final entry = _planCache[_planKey(index)];
+    return entry != null && entry.expires.isAfter(DateTime.now());
+  }
+
+  /// 把一份刚用完的计划留在缓存里，供往回切时直接复用。
+  ///
+  /// 留不住（凭证将过期 / 本地播放 / 页面已销毁）时立刻释放会话，
+  /// 不能让会话池被死数据占着。
+  void _rememberPlan(PlaybackPlan plan, int index) {
+    void drop() => unawaited(
+      widget.repository.release(plan.session).catchError((Object _) {}),
+    );
+
+    if (_closed || widget.localOnly || index < 0 || plan.url.isEmpty) {
+      drop();
+      return;
+    }
+    final expires = _planExpiry(plan);
+    if (!expires.isAfter(DateTime.now())) {
+      drop();
+      return;
+    }
+    // 先删再插：Dart 的 Map 对已存在的键赋值不会移动位置，
+    // 不先删就成不了"最近使用排在后面"的 LRU 语义。
+    _planCache.remove(_planKey(index));
+    _planCache[_planKey(index)] = _CachedPlaybackPlan(plan, expires);
+    while (_planCache.length > _planCacheLimit) {
+      final dropped = _planCache.remove(_planCache.keys.first);
+      if (dropped != null) {
+        unawaited(
+          widget.repository
+              .release(dropped.plan.session)
+              .catchError((Object _) {}),
+        );
+      }
+    }
+  }
+
+  /// 计划的可用截止时间：取「凭证过期时间」和「5 分钟」里更早的那个。
+  ///
+  /// 5 分钟是经验值：短剧一集 40~90 秒，往回翻三集也在这个窗口内，
+  /// 再久就该重新解析了（地址可能已经换签名）。
+  DateTime _planExpiry(PlaybackPlan plan) {
+    var expires = DateTime.now().add(const Duration(minutes: 5));
+    if (plan.expiresAt > 0) {
+      final authorizationExpiry = DateTime.fromMillisecondsSinceEpoch(
+        plan.expiresAt,
+      ).subtract(const Duration(seconds: 5));
+      if (authorizationExpiry.isBefore(expires)) expires = authorizationExpiry;
+    }
+    return expires;
+  }
+
+  /// 释放整份缓存（离开页面 / 换剧时）。
+  void _clearPlanCache() {
+    for (final entry in _planCache.values) {
+      unawaited(
+        widget.repository.release(entry.plan.session).catchError((Object _) {}),
+      );
+    }
+    _planCache.clear();
+  }
+
+  /// 清掉已经过期的缓存计划（0.8.16 第三批）。
+  ///
+  /// 缓存不是"存进去就不管"：每条都带凭证过期时间（最长 5 分钟）。
+  /// 只在取用时检查的话，用户停在一集不动时那些过期条目会一直占着
+  /// 原生侧的播放会话（一共只有 12 个，预载器还占着几个），
+  /// 所以健康检查每秒顺手扫一遍。
+  void _sweepPlanCache() {
+    if (_planCache.isEmpty) return;
+    final now = DateTime.now();
+    final expired = [
+      for (final entry in _planCache.entries)
+        if (!entry.value.expires.isAfter(now)) entry.key,
+    ];
+    if (expired.isEmpty) return;
+    for (final key in expired) {
+      final dropped = _planCache.remove(key);
+      if (dropped == null) continue;
+      unawaited(
+        widget.repository
+            .release(dropped.plan.session)
+            .catchError((Object _) {}),
+      );
+    }
+  }
+
+  /// 缓冲状态变化时更新「卡顿动效」（0.8.16 第三批）。
+  ///
+  /// 500ms 内恢复的抖动不亮动效（切片间隙很常见，闪一下反而更烦）；
+  /// 超过就亮，让用户知道"还在，只是在等数据"。
+  void _refreshBufferingHint(bool buffering) {
+    if (_closed) return;
+    if (!buffering) {
+      _bufferingTimer?.cancel();
+      _bufferingTimer = null;
+      if (_bufferingHint) {
+        _bufferingHint = false;
+        if (mounted) setState(() {});
+        // 全屏层是独立路由，只跟随 revision 重建；卡顿期间位置流是停的，
+        // 不在这里主动刷一次，全屏就看不到动效（也撤不掉）。
+        _refreshFullscreen(immediate: true);
+      }
+      return;
+    }
+    if (_bufferingHint || _bufferingTimer != null) return;
+    _bufferingTimer = Timer(_bufferingHintDelay, () {
+      _bufferingTimer = null;
+      if (_closed || !mounted) return;
+      if (!(_player?.state.buffering ?? false)) return;
+      // 切集取流本来就有延迟遮罩，不叠第二个。
+      //
+      // 这里**只看 `_loading`**，不要再看 `_awaitingFirstFrame`：后者在
+      // `open()` 之后才置位，而 `open()` 已经把 playing 报上来了，两者
+      // 交叠时会残留成 true（同 `_refreshLoadingOverlay` 踩过的坑）。
+      // 拿它当门禁，弱网卡顿就永远亮不出动效。
+      if (_loading) return;
+      setState(() => _bufferingHint = true);
+      _refreshFullscreen(immediate: true);
+    });
+  }
+
+  /// 播放页要不要显示加载动效（0.8.16 第三批）。
+  ///
+  /// 四条来源统一成一个出口，竖屏 / 全屏 / 电视三处渲染共用，避免各写
+  /// 一套条件后慢慢长歪：
+  /// 1. 切集取流（延迟 [_loadingOverlayDelay]）；
+  /// 2. 已交给播放器但还没起播；
+  /// 3. 已就绪却始终没画面（真故障）；
+  /// 4. 播放中缓冲卡顿超过 [_bufferingHintDelay]。
+  bool get _showPlaybackLoading {
+    if (_closed || _error != null) return false;
+    if (_loadingOverlay && _loading) return true;
+    final playing = _player?.state.playing ?? false;
+    if (_awaitingFirstFrame && !playing) return true;
+    if (!_userPaused && _ready && !_hasVideoFrame) return true;
+    // 卡顿动效要再确认一次播放器现在**确实**还在缓冲。
+    //
+    // 只信 `_bufferingHint` 会有一个漏洞：暂停 / 出错时播放器可能不再发
+    // buffering 流，那面"还在转"的圈就永远撤不掉（电视上尤其明显 ——
+    // 遥控器一按暂停，屏幕正中还在转圈）。所以这里跟播放器状态对一次。
+    return _bufferingHint &&
+        !_userPaused &&
+        (_player?.state.buffering ?? false);
+  }
+
+  // —— 延迟加载遮罩（0.8.16 第二批）——
+
+  /// 按当前状态决定遮罩要不要真的显示。
+  ///
+  /// `_loading` / `_awaitingFirstFrame` 一变就调一次：需要遮罩时先起一个
+  /// [_loadingOverlayDelay] 的定时器，期间状态恢复就取消，用户根本看不到
+  /// 转圈；真的卡住了定时器到点才画出来。
+  void _refreshLoadingOverlay() {
+    if (_closed) return;
+    // 只跟 `_loading` 走：那是"正在换集取流"的明确信号。
+    //
+    // `_awaitingFirstFrame` 刻意不参与 —— 它的置位时机在 `open()` 之后，
+    // 而 `open()` 可能已经把 playing 报上来了，两者交叠时很容易算错，
+    // 结果就是"正常播放却一直转圈"。等首帧仍由渲染条件里原有那条兜底。
+    final wanted = _loading;
+    if (!wanted) {
+      _loadingOverlayTimer?.cancel();
+      _loadingOverlayTimer = null;
+      if (_loadingOverlay) {
+        _loadingOverlay = false;
+        if (mounted) setState(() {});
+      }
+      return;
+    }
+    if (_loadingOverlay || _loadingOverlayTimer != null) return;
+    _loadingOverlayTimer = Timer(_loadingOverlayDelay, () {
+      _loadingOverlayTimer = null;
+      if (_closed || !mounted) return;
+      // 到点就显示：中途状态若恢复，`_refreshLoadingOverlay` 会先把
+      // 这个定时器取消掉，能走到这里就说明仍然需要遮罩。
+      if (!_loadingOverlay) setState(() => _loadingOverlay = true);
+    });
   }
 
   /// 播放器操作串行队列（0.3.1）。
@@ -2113,6 +2448,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _error = current.local ? '本地视频播放中断，请返回重试。' : '播放已中断，请点击重试。';
       });
       _refreshFullscreen(immediate: true);
+      _refreshLoadingOverlay();
       return;
     }
     // 记录续播点，`_prepare` 会通过 `_takeStartPosition` 取用。
@@ -2216,6 +2552,45 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// - 「连播下一部」→ 下一部剧的第 1 集（需父级传入 `nextDrama`）。
   ///
   /// 不预载的情况：本地文件模式、单剧模式、加载中/出错、当前不在播放。
+  /// 弹幕（0.8.11）：把播放状态喂给弹幕控制器。
+  ///
+  /// 只在位置/缓冲/播放状态变化时调用（挂在既有 tick 上），不额外起定时器。
+  /// `available` 用"已经出过画面"来判断 —— 首帧之前不拉弹幕，
+  /// 否则换集瞬间会把上一集的弹幕闪出来。
+  void _syncDanmaku() {
+    final state = _player?.state;
+    if (state == null) return;
+    _danmaku.update(
+      position: state.position,
+      duration: state.duration,
+      speed: state.rate,
+      playing: state.playing,
+      buffering: state.buffering,
+      foreground: _foreground && !_closed,
+      available: _hasVideoFrame || state.playing,
+    );
+  }
+
+  /// 立刻预热当前集两侧的邻居（0.8.16 第二批）。
+  ///
+  /// 与 [_syncPreload] 的区别：这里**不看播放位置**，切集一完成就跑。
+  /// 正常播放时 `_syncPreload` 要等 1.2 秒才启动预载，快速连滑
+  /// （6 → 5 → 4 → 3）时根本来不及；而切集刚完成正是最该准备的时刻。
+  ///
+  /// `prepareAround` 自身幂等（已有计划 / 在途 / 刚失败退避中的槽都会跳过），
+  /// 所以和 `_syncPreload` 重复调用没有副作用。
+  void _primeNeighbours() {
+    if (_closed || widget.localOnly || _autoPlayBlocked) return;
+    final detail = _detail;
+    if (detail == null || detail.episodes.isEmpty) return;
+    _preloader.prepareAround(
+      detail.drama,
+      detail.episodes,
+      _episodeIndex,
+      quality: _quality,
+    );
+  }
+
   void _syncPreload() {
     if (_closed) return;
     // 0.7.3（XQ-0107）：移动网络下不自动播放时也不预加载，避免后台跑流量。
@@ -2251,6 +2626,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final state = player.state;
     if (!state.playing || state.buffering) {
       _preloader.pause();
+      // 0.8.13：缓冲见底/正在缓冲时**预缓存也要让路**。
+      // 否则整集下载会和正在播的那一路抢同一条出口，越卡越久。
+      _preloader.pausePrecache();
       return;
     }
     final duration = state.duration.inMilliseconds;
@@ -2282,18 +2660,29 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final buffered = state.buffer.inMilliseconds;
     if (buffered > 0 && buffered < 8000) {
       _preloader.pause();
+      // 0.8.13：缓冲不足 8 秒时同样让路（预缓存不抢带宽）。
+      _preloader.pausePrecache();
       return;
     }
-    // 「连播本剧」优先：还有下一集就预载下一集。
-    if (widget.autoNextEpisode || !widget.autoNextDramaEnabled) {
-      if (_episodeIndex + 1 < detail.episodes.length) {
-        _preloader.prepare(
-          detail.drama,
-          detail.episodes[_episodeIndex + 1],
-          quality: _quality,
-        );
-        return;
-      }
+    // 0.8.15：**上一集也要预载**。
+    //
+    // 用户反馈"切上一集明显比切下一集卡"。以前预载只有"下一集"一个槽，
+    // 回看上一集时整条解析链路（详情 → 取流 → 拉 m3u8 → 校验时长）全部
+    // 暴露在切集那一刻；现在两侧都提前准备好。
+    //
+    // 必须放在「连播」判断**之前**：上一集与连播设置无关，而下面两个分支
+    // 都会提前 return，写在后面的话"连播下一部"模式下上一集永远轮不到。
+    _preloader.prepareAround(
+      detail.drama,
+      detail.episodes,
+      _episodeIndex,
+      quality: _quality,
+    );
+    // 「连播本剧」优先：还有下一集就预缓存后面几集。
+    if ((widget.autoNextEpisode || !widget.autoNextDramaEnabled) &&
+        _episodeIndex + 1 < detail.episodes.length) {
+      _schedulePrecache(detail);
+      return;
     }
     // 「连播下一部」：预载下一部剧的第 1 集。
     final next = widget.nextDrama;
@@ -2301,7 +2690,32 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       unawaited(_preloadNextDrama(next));
       return;
     }
-    _preloader.clear();
+    // 没有下一部了：清掉别的剧的预载，**但保留本剧的上一集**
+    // （原来这里是 `clear()`，会把刚备好的上一集一起丢掉）。
+    _preloader.retainDrama(detail.drama);
+  }
+
+  /// 预缓存后续 N 集（0.8.12）。
+  ///
+  /// 集数取设置里的「预缓存集数」，0 表示关闭。这里只负责"排哪些集"，
+  /// 串行下载与去重由 `PlaybackPreloader.schedulePrecache` 负责。
+  ///
+  /// 为什么不在这里判网络：`_syncPreload` 前面已经用 `_autoPlayBlocked`
+  /// 拦掉了"移动网络 + 没允许自动播放"的情况，本地文件也在更早处返回，
+  /// 走到这里就是"确实在联网播放"，预缓存与正在播的流是同一份带宽预算。
+  void _schedulePrecache(DramaDetail detail) {
+    final preferences = widget.store.playbackCachePreferences;
+    final start = _episodeIndex + 1;
+    final end = math.min(start + preferences.episodes, detail.episodes.length);
+    if (!preferences.enabled || start >= end) {
+      _preloader.schedulePrecache(detail.drama, const [], quality: _quality);
+      return;
+    }
+    _preloader.schedulePrecache(
+      detail.drama,
+      detail.episodes.sublist(start, end),
+      quality: _quality,
+    );
   }
 
   /// 预载下一部剧的第 1 集（需要先拿到其剧集列表）。
@@ -2314,6 +2728,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _preloader.prepare(
         detail.drama,
         detail.episodes.first,
+        quality: _quality,
+      );
+      // 0.8.12：下一部也顺手预缓存开头几集（同样受设置集数约束）。
+      final preferences = widget.store.playbackCachePreferences;
+      final end = math.min(preferences.episodes, detail.episodes.length);
+      _preloader.schedulePrecache(
+        detail.drama,
+        preferences.enabled && end > 0
+            ? detail.episodes.sublist(0, end)
+            : const [],
         quality: _quality,
       );
     } catch (_) {
@@ -2337,6 +2761,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           ),
         );
     _player = player;
+    // 画中画（0.8.18）：换了播放器实例，`_pipPlaying` 可能跟新实例的真实状态
+    // 对不上（比如上一集是暂停着退出的），这里强制推一次让图标归位。
+    _syncPictureInPicturePlayback(player.state.playing, force: true);
     // 测试环境注入视频层时不去创建 VideoController：
     // 它会调用原生 platform channel，在测试里必然失败并污染用例结果。
     _video = widget.videoBuilder == null ? VideoController(player) : null;
@@ -2378,7 +2805,12 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     // 已交给播放器超过 [_firstFrameTicksLimit] 秒仍未起播，则自动恢复一次。
     _healthTimer?.cancel();
     _healthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_closed || _playerReleased || !widget.active || _error != null) {
+      if (_closed || _playerReleased) return;
+      // 0.8.16 第三批：顺手把过期的播放计划清掉。
+      // 放在"是否可见 / 是否有错"判断**之前** —— 页面被滑走时更需要清，
+      // 否则那几份会话会一直挂到页面销毁。
+      _sweepPlanCache();
+      if (!widget.active || _error != null) {
         return;
       }
       // 0.7.4：移动网络下"按设计不自动播"不是故障，健康检查整体跳过，
@@ -2390,6 +2822,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       }
       final current = _player;
       if (current == null) return;
+      // 兜底（0.8.16 第三批）：`buffering` 流偶尔会漏一次 false
+      // （播放器卡死时干脆不再发任何事件），动效就永远撤不掉。
+      // 每秒跟播放器的真实状态对一次，错了立刻纠正。
+      _refreshBufferingHint(current.state.buffering);
       // 有画面且在播 → 解码是好的，清掉"解码异常"的累计次数（0.8.3）。
       if (_hasVideoFrame && current.state.playing) _decodeStalls = 0;
       // 兜底一：地址已交出但迟迟不起播（弱网 / 服务端迟迟不给数据）。
@@ -2430,6 +2866,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             _error = '网络较慢，加载超时，请点击重试';
           });
           _refreshFullscreen(immediate: true);
+          _refreshLoadingOverlay();
         }
         return;
       }
@@ -2538,6 +2975,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           // 选集网格等），是卡顿的直接来源之一。
           _refreshFullscreen();
           _tick.value++;
+          // 弹幕（0.8.11）：跟着播放位置推进时间窗。
+          _syncDanmaku();
+          // 0.8.16 第三批：缓冲卡顿超过半秒就亮加载动效。
+          // 抖音 / 红果都是这个量级 —— 低于它多半是切片间隙，闪一下反而更烦。
+          _refreshBufferingHint(player.state.buffering);
+          // 画中画（0.8.18）：小窗上的「播放 / 暂停」图标要跟着真实播放态走。
+          // 这里每秒会进来好几次，内部用 `_pipPlaying` 挡掉重复调用。
+          _syncPictureInPicturePlayback(player.state.playing);
           // 预载（0.2.31）：位置/缓冲变化时评估是否需要提前准备下一集/下一部。
           _syncPreload();
           // 局域网推送（0.6.4）：**位置推进后**才回报握手。
@@ -2567,12 +3012,19 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // `playing == true` 时安排自动隐藏，**不触发重建**，因此从其它途径
         // 改变播放状态（自动连播、播放结束、健康检查恢复等）时图标会滞后。
         if (!_closed) _tick.value++;
+        // 0.8.15 第二批：起播 / 暂停 / 自动切集都会走到这里，
+        // 状态栏显隐跟着刷新（不必等整页重建，暂停后电量时间要立刻回来）。
+        _queueSystemUiSync();
         // 0.6.9：真正起播 → 结束"等待第一帧"，撤掉加载提示。
         if (playing && _awaitingFirstFrame) {
           _awaitingFirstFrame = false;
           _firstFrameTicks = 0;
           if (!_closed) setState(() {});
+          _refreshLoadingOverlay();
         }
+        // 0.8.16 第二批：起播就把遮罩撤掉。`_awaitingFirstFrame` 有可能
+        // 已被别处清掉，这里只按"遮罩还挂着"补一刀。
+        if (playing && _loadingOverlay) _refreshLoadingOverlay();
         // 0.7.13：起播时若播放器已经报了宽高，直接认定"画面已出"，
         // 避免正常播放时「正在加载视频…」一直挂着。
         if (playing && !_hasVideoFrame && (_player?.state.width ?? 0) > 0) {
@@ -2716,6 +3168,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 而 media_kit 对已释放实例的操作在 release 包中静默失败。
   void _releasePlayer() {
     _playerReleased = true;
+    // 0.8.19：播放器实例没了，静态属性要重新下发。
+    _playerConfigured = false;
+    _configuredPlanSignature = '';
     // 丢弃旧队列：仍排队的操作会因 [_playerReleased] 已变而跳过。
     _operations = Future<void>.value();
     _saveTimer?.cancel();
@@ -2739,7 +3194,20 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     // 重置就绪/加载态：下次 `_prepare()` 会重新走一遍。
     _ready = false;
     _plan = null;
+    _planEpisode = -1;
     _loading = true;
+    // 0.8.16 第二批：页面被滑走时把本页的播放计划缓存一起放掉。
+    //
+    // 缓存只服务"同一页内来回切集"；页面已经不可见了，留着这些会话
+    // 只会占住原生侧那 12 个名额，滑回来重新解析即可。
+    _clearPlanCache();
+    // 遮罩状态一并归零，避免下次回来带着上一轮的"已显示"标记。
+    _loadingOverlayTimer?.cancel();
+    _loadingOverlayTimer = null;
+    _loadingOverlay = false;
+    _bufferingTimer?.cancel();
+    _bufferingTimer = null;
+    _bufferingHint = false;
     // 0.6.11 修复（用户反馈"偶发下一个视频黑屏不播放"）：
     //
     // `_releasePlayer()` 之前**没有清 `_awaitingFirstFrame` / `_firstFrameTicks`**。
@@ -2762,6 +3230,24 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _closed = true;
+    _danmaku.dispose();
+    // 0.8.17：退出播放页必须先解除"按 Home 自动进小窗"，
+    // 否则从首页退出应用也会弹出一个小窗（而且里面已经没有视频了）。
+    PictureInPicture.active.removeListener(_onPictureInPictureChanged);
+    // 0.8.18：小窗动作回调也要摘掉，否则本页销毁后回调还指着一个死 State。
+    PictureInPicture.onTogglePlayback = null;
+    if (_pipArmed) {
+      _pipArmed = false;
+      unawaited(PictureInPicture.arm(false));
+    }
+    // 0.8.16 第二批：缓存里的播放会话必须还回去，否则原生侧会话池会漏。
+    _loadingOverlayTimer?.cancel();
+    _loadingOverlayTimer = null;
+    _bufferingTimer?.cancel();
+    _bufferingTimer = null;
+    _mediaRetryTimer?.cancel();
+    _mediaRetryTimer = null;
+    _clearPlanCache();
     // 0.7.5：进度预览与亮度通知器释放（两者都由本页 State 持有）。
     _seekPreview.dispose();
     // 局域网推送（0.6.4）：注销本页的"正在播放"注册，并回报接收端已退出。
@@ -2811,6 +3297,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
       }
     }
+    // 0.8.15 第二批：本页若把状态栏藏起来了，离开时必须还回去，
+    // 否则整个应用（包括首页 AppBar）会一直处在沉浸态。
+    // 横屏分支上面已经恢复过一次，这里重复调用同一模式没有副作用。
+    if (_appliedUiMode == SystemUiMode.immersiveSticky) {
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    }
+    _appliedUiMode = null;
     _releasePlayer();
     // 预载器（0.2.31）由**父级**持有并释放（0.6.9 改为全流共享），
     // 本页只借用，不负责 dispose。
@@ -2952,6 +3445,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   void _retryPlayback() {
     if (_closed || _loading) return;
     _ready = false;
+    // 0.8.22：手动重试同样给"瞬时失败自动再试一次"一个全新的名额 ——
+    // 用户点是他的选择，但点多一次不该让本集彻底失去静默自愈的机会。
+    _autoMediaRetried = false;
     unawaited(_playerReleased ? _resumeAfterRelease() : _prepare(force: true));
   }
 
@@ -3192,6 +3688,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     // 现在切换后立即刷新一次，图标与画面同步。
     _tick.value++;
     _refreshFullscreen(immediate: true);
+    // 暂停会清掉"等待首帧"，遮罩要跟着撤（0.8.16 第二批）。
+    _refreshLoadingOverlay();
     // 0.8.9：电视上从控件按钮恢复播放后，把焦点还给页面，
     // 否则控件会因为有焦点而一直不自动隐藏。
     if (willPlay) _releaseControlsFocusForPlayback();
@@ -3431,13 +3929,23 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     final detail = _detail;
     if (_closed || detail == null) return;
     if (index < 0 || index >= detail.episodes.length) return;
+    // 0.8.22：换集（或同集手动重进）重置"自动重试片源"的次数，
+    // 每集各有一次机会。
+    _autoMediaRetried = false;
+    _mediaRetryTimer?.cancel();
+    _mediaRetryTimer = null;
     // 0.7.2（XQ-0104）：auto = 自动连播切来的，本次换集不弹整套控件。
     // 0.8.10 第一版把手动换集也做成了静默，用户复核后明确"只要求自动切集无感"，
     // 手动点"下一集"本来就是用户主动操作，控件留在屏幕上反而是反馈，故收窄回 auto。
     _autoAdvancing = auto;
     _silentSwitch = auto;
     // 换集前先把当前集的进度存下来，否则切走就丢。
-    await _saveProgress();
+    //
+    // 0.8.15：**不再等它落盘**。`_saveProgress` 在第一个 await 之前就把
+    // 位置/时长快照下来了（同步段一路取 `player.state`），所以 fire-and-forget
+    // 存进去的仍是**旧一集**的进度；await 它只是让每次切集凭空多等一次磁盘写，
+    // 用户感知就是"点下一集要顿一下"。
+    unawaited(_saveProgress());
     // 0.3.5：等待落盘期间页面可能已被滑走（播放器已释放）。
     // 此时若继续按老流程走，会在已释放的播放器上加载，最终黑屏；
     // 这里改为把状态复位，交给 `_resumeAfterRelease()`（滑回来时）重新加载。
@@ -3466,6 +3974,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
           _loading = false;
           _error = '播放器未能启动，请返回上一集重试';
         });
+        _refreshLoadingOverlay();
       }
       return;
     }
@@ -3473,17 +3982,55 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (player == null) return;
     if (_ready && !force) return;
     final generation = ++_generation;
+    // 0.8.15：预载命中时**不要**把"正在加载"盖上去。
+    //
+    // 切集本来就该是无感的。命中预载还要先闪一下遮罩、再把已经画出来的
+    // 画面判成"没有帧"，用户看到的就是"卡了一下"。这里先用只读的
+    // `hasPlan` 判断一次（真正的 `take` 要等下面索引算完才能做），
+    // 命中就保持当前画面，直接 open 新地址。
+    final cachedDetail = _detail;
+    // 0.8.16 第二批：**本页缓存也算命中**。
+    //
+    // 预载器只留"邻居"，播过的集早就被清掉了；而用户最常做的就是
+    // 6 → 5 → 6 来回切。缓存命中同样不该闪遮罩，所以两个来源一起判。
+    final cacheHit = !widget.localOnly && _hasCachedPlan(_episodeIndex);
+    final silent =
+        cacheHit ||
+        (cachedDetail != null &&
+            !widget.localOnly &&
+            cachedDetail.episodes.isNotEmpty &&
+            _preloader.hasPlan(
+              cachedDetail.drama,
+              cachedDetail.episodes[_episodeIndex.clamp(
+                0,
+                cachedDetail.episodes.length - 1,
+              )],
+              quality: _quality,
+            ));
+    // 0.8.16 第三批：换集时把上一集的"卡顿"状态清掉。
+    //
+    // 否则上一集卡住亮起的动效会跟着带进新一集 —— 新一集明明在正常
+    // 取流（有自己的加载动效），却又叠着一条"卡住了"的判断，
+    // 表现为动效撤不掉。
+    _bufferingTimer?.cancel();
+    _bufferingTimer = null;
+    _bufferingHint = false;
     setState(() {
-      _loading = true;
+      _loading = !silent;
       _error = null;
-      // 0.7.13：新一集重新判断"是否已出画面"。
-      _hasVideoFrame = false;
-      _frameTicks = 0;
+      // 0.7.13：新一集重新判断"是否已出画面"。命中预载时保持原状。
+      if (!silent) {
+        _hasVideoFrame = false;
+        _frameTicks = 0;
+      }
     });
-    // 0.7.7 修复（真机反馈"流量+全屏自动切下一集纯黑、等很久不播"）：
-    // 全屏层是独立路由，只跟随 `_fullscreenRevision` 重建。此前进入加载时
-    // 没有立即刷新它 → 全屏看不到「正在加载视频…」，弱网下 open 一卡就是**纯黑无文字**。
-    _refreshFullscreen(immediate: true);
+    _refreshLoadingOverlay();
+    if (!silent) {
+      // 0.7.7 修复（真机反馈"流量+全屏自动切下一集纯黑、等很久不播"）：
+      // 全屏层是独立路由，只跟随 `_fullscreenRevision` 重建。此前进入加载时
+      // 没有立即刷新它 → 全屏看不到「正在加载视频…」，弱网下 open 一卡就是**纯黑无文字**。
+      _refreshFullscreen(immediate: true);
+    }
     try {
       final detail = _detail ?? await widget.repository.detail(widget.drama);
       // 0.3.5：除代次外还要确认播放器实例没被替换/释放
@@ -3498,15 +4045,29 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _applyHistoryOnce(detail);
       final index = _episodeIndex.clamp(0, detail.episodes.length - 1);
       final previous = _plan;
-      // 预载命中（0.2.31）：若之前已提前解析好这一集，直接复用，省一次网络解析。
-      // 匹配失败时返回 null，走正常解析路径。
-      final prepared = widget.localOnly
+      // 上一集对应第几集：`_planEpisode` 是换集前记下的旧值
+      // （`_episodeIndex` 这时候已经指向目标集了）。
+      final previousIndex = _planEpisode;
+      // 三级复用，越靠前越省（0.8.16 第二批）：
+      //   1. 本页缓存 —— 来回切的主路径，**零网络**；
+      //   2. 预载器 —— 切到没播过的邻居集，地址早已解析好；
+      //   3. 现场解析 —— 真的没准备过。
+      //
+      // 两个来源都要探一遍：`_preloader.take` 顺带会重置预缓存队列，
+      // 命中缓存时也不能跳过它，否则下一批预缓存目标会停在旧位置。
+      final fromPreloader = widget.localOnly
           ? null
           : _preloader.take(
               detail.drama,
               detail.episodes[index],
               quality: _quality,
             );
+      final cachedPlan = widget.localOnly ? null : _takeCachedPlan(index);
+      if (cachedPlan != null && fromPreloader != null) {
+        // 缓存里的必定更近、更可信，预载那份还回去，别让两份会话并存。
+        unawaited(widget.repository.release(fromPreloader.session));
+      }
+      final prepared = cachedPlan ?? fromPreloader;
       // 单剧模式的本地文件模式（0.2.29，下载页）：
       // 用 `localPlayback` 取已下载的本地文件，而不是拉在线流。
       // 两者返回的都是 `PlaybackPlan`，后续处理完全一致
@@ -3530,66 +4091,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       }
       // 与现有播放器保持一致：设置协议白名单、解密密钥与重试参数。
       // 所有原生调用串行执行（0.3.1），避免并发打断导致卡顿。
-      await _serialize(() async {
-        final platform = player.platform;
-        if (platform is NativePlayer) {
-          await platform.setProperty(
-            'demuxer-lavf-o',
-            [
-              'seg_max_retry=3',
-              'strict=experimental',
-              'allowed_extensions=ALL',
-              plan.local
-                  ? 'protocol_whitelist=[file,crypto,data]'
-                  : 'protocol_whitelist=[http,https,tcp,tls,crypto,data,file]',
-              if (plan.decryptionKey.isNotEmpty)
-                'decryption_key=${plan.decryptionKey}',
-            ].join(','),
-          );
-          await platform.setProperty('network-timeout', '20');
-          // 解码方式（0.8.3）。
-          //
-          // 弱 GPU / 硬解不完整的电视盒子上，libmpv 用 `auto-safe` 选到
-          // 一个坏掉的 MediaCodec 时，表现是**有声音没画面 / 绿屏 / 纯黑**，
-          // 而应用侧一切正常（`playing == true`，只是永远拿不到帧尺寸）。
-          // 这里显式下发给 libmpv：
-          // - 正常：`auto-safe`（libmpv 只在"已知安全"的硬解上启用，
-          //   失败会自动回退软解，比 `auto` 稳）；
-          // - 兼容模式 / 自动降级后：`no`（纯软件解码，一定能出画面）。
-          //
-          // 必须在 `open()` 之前设置，播放中途改这个属性不会重建解码器。
-          try {
-            await platform.setProperty(
-              'hwdec',
-              _softwareDecode ? 'no' : 'auto-safe',
-            );
-          } catch (_) {
-            // 忽略：个别平台的 libmpv 版本不认这个属性，不影响播放。
-          }
-          // 弱网缓冲策略（0.5.0）。
-          //
-          // 背景：用户实测"开 VPN 就卡"，根因是视频请求全部绕道代理节点
-          // （Go 原生核心会读系统代理，见 `native/core/proxy_system.go`），
-          // 多一跳且节点质量不稳定 → 缓冲容易被抖动打空 → 表现为抽帧卡顿。
-          // 这里做两件事，都不改变解码/渲染方式、也不影响音调：
-          // 1. 关闭磁盘缓存，改用内存缓存：弱网下避免额外磁盘 IO 拖慢取流；
-          // 2. 加大流层缓冲：对代理带来的抖动更有容忍度。
-          // 属性不受支持时静默忽略，绝不影响播放。
-          for (final entry in const {
-            'cache-on-disk': 'no',
-            'stream-buffer-size': '524288',
-          }.entries) {
-            try {
-              await platform.setProperty(entry.key, entry.value);
-            } catch (_) {
-              // 忽略：仅属调优，失败不构成错误。
-            }
-          }
-        }
-      });
+      //
+      // 0.8.19：拆成"静态属性（每个播放器实例一次）"与"逐集属性（解密密钥）"，
+      // 见 [_configurePlayer]。
+      await _serialize(() => _configurePlayer(player, plan));
       if (!_attemptAlive(player)) return;
       _detail = detail;
       _plan = plan;
+      // 记住这一集现在用的是哪份计划（下次换集时按这个集号存进缓存）。
+      _planEpisode = index;
+      // 弹幕（0.8.11）：换集后重挂计划，控制器会清空上一集的缓存。
+      _danmaku.setPlan(plan);
       _episodeIndex = index;
       // 详情就绪后上报，让父级知道本页还能否切下一集（决定滑动语义）。
       _reportEpisodeState();
@@ -3614,7 +4126,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       await _interactions?.applySpeed();
       if (!_attemptAlive(player)) return;
       if (previous != null && previous.session != plan.session) {
-        unawaited(widget.repository.release(previous.session));
+        // 0.8.16 第二批：**不要立刻释放**，留在本页缓存里。
+        //
+        // 用户最常做的是 6 → 5 → 6 来回切。以前这里一换集就 release，
+        // 回切第 6 集只能重新解析 —— 表现就是"停在本集转圈，等它好了
+        // 才切过去"。留在缓存里，回切是零网络、零等待。
+        // 超出上限 / 凭证将过期时，`_rememberPlan` 会自己释放。
+        _rememberPlan(previous, previousIndex);
       }
       setState(() {
         _loading = false;
@@ -3654,6 +4172,13 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       _acknowledgeHandoff();
       // 就绪是重要状态切换，跳过节流立即刷新（0.3.1）。
       _refreshFullscreen(immediate: true);
+      // 0.8.16 第二批：遮罩按新状态重新评估（命中缓存时这里直接撤掉）。
+      _refreshLoadingOverlay();
+      // 0.8.16 第二批：**切完立刻预热邻居**，不再等 position ≥ 1.2 秒。
+      //
+      // 连续快滑（6 → 5 → 4 → 3）时，每秒一次的健康检查根本来不及，
+      // 下一集往往还没准备就被切到了 —— 这正是"快速回看会卡"的另一半原因。
+      _primeNeighbours();
       // 静默换集不弹控件，也就不需要排"自动隐藏"。
       _silentSwitch = false;
       if (_controlsVisible) _scheduleHide();
@@ -3665,6 +4190,34 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       // 用户连"重试"以外的操作都摸不到。
       _autoAdvancing = false;
       _silentSwitch = false;
+      // 0.8.22：**"这次没取到片源"先自己再试一次**，不把错误推给用户。
+      //
+      // 用户反馈"提示红果暂时取不到这一集的片源，点重试立刻就好" —— 这类
+      // 失败本来就是瞬时的（原生侧已经在内部原地重取过一次）。既然点一下
+      // 就好，那就别让用户点：这里静默等 0.7 秒再整轮重来一次，期间保持
+      // 加载态，用户看到的只是"这一集切得慢一点"。
+      //
+      // 每集只自动重试一次（`_autoMediaRetried`），真正的硬失败（剧集下架、
+      // 设备注册失败）第二次仍会正常亮错误，不会被无限重试拖住。
+      if (error is AppFailure &&
+          error.code == 'media_transient' &&
+          !_autoMediaRetried) {
+        _autoMediaRetried = true;
+        setState(() {
+          _loading = true;
+          _awaitingFirstFrame = false;
+          _firstFrameTicks = 0;
+          _error = null;
+        });
+        _refreshLoadingOverlay();
+        _mediaRetryTimer?.cancel();
+        _mediaRetryTimer = Timer(const Duration(milliseconds: 700), () {
+          _mediaRetryTimer = null;
+          if (_closed || generation != _generation) return;
+          unawaited(_prepare(force: true));
+        });
+        return;
+      }
       setState(() {
         _loading = false;
         // 0.6.9：进入错误态后不再"等待第一帧"，否则加载提示会盖住"点击重试"。
@@ -3675,6 +4228,9 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         _error = error is AppFailure ? error.message : error.toString();
       });
       _refreshFullscreen(immediate: true);
+      // 出错时 `_loading` / `_awaitingFirstFrame` 都已复位，遮罩必须立刻撤掉，
+      // 否则会盖住"点击重试"。
+      _refreshLoadingOverlay();
     }
   }
 
@@ -3719,6 +4275,81 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (widget.unlocked.value) return false;
     final kind = await NetworkState.current();
     return kind == NetworkKind.mobile;
+  }
+
+  /// 给播放器下发属性（0.8.19 拆成两组）。
+  ///
+  /// **为什么拆**：以前每集都要串行 `await` 5~7 次 `setProperty` 再 `open()`。
+  /// 但其中只有 `demuxer-lavf-o` 里的 `decryption_key` 真的随集数变
+  /// （红果 CENC 每集一把钥匙），其余 4 个属性在同一个 `Player` 实例上
+  /// 恒定不变。现在：
+  ///
+  /// - 逐集组（`demuxer-lavf-o`）：按 `local|decryptionKey` 去重，
+  ///   回切缓存命中同一集时不再重复下发；
+  /// - 静态组（`network-timeout` / `hwdec` / 缓存类）：每个实例只下发一次，
+  ///   解码模式被自动降级时才重下发（`hwdec` 必须在 `open()` 之前生效）。
+  Future<void> _configurePlayer(Player player, PlaybackPlan plan) async {
+    if (!_attemptAlive(player)) return;
+    final platform = player.platform;
+    if (platform is! NativePlayer) return;
+    final signature = '${plan.local}|${plan.decryptionKey}';
+    if (signature != _configuredPlanSignature) {
+      await platform.setProperty(
+        'demuxer-lavf-o',
+        [
+          'seg_max_retry=3',
+          'strict=experimental',
+          'allowed_extensions=ALL',
+          plan.local
+              ? 'protocol_whitelist=[file,crypto,data]'
+              : 'protocol_whitelist=[http,https,tcp,tls,crypto,data,file]',
+          if (plan.decryptionKey.isNotEmpty)
+            'decryption_key=${plan.decryptionKey}',
+        ].join(','),
+      );
+      _configuredPlanSignature = signature;
+    }
+    if (_playerConfigured && _configuredSoftwareDecode == _softwareDecode) {
+      return;
+    }
+    await platform.setProperty('network-timeout', '20');
+    // 解码方式（0.8.3）。
+    //
+    // 弱 GPU / 硬解不完整的电视盒子上，libmpv 用 `auto-safe` 选到
+    // 一个坏掉的 MediaCodec 时，表现是**有声音没画面 / 绿屏 / 纯黑**，
+    // 而应用侧一切正常（`playing == true`，只是永远拿不到帧尺寸）。
+    // 这里显式下发给 libmpv：
+    // - 正常：`auto-safe`（libmpv 只在"已知安全"的硬解上启用，
+    //   失败会自动回退软解，比 `auto` 稳）；
+    // - 兼容模式 / 自动降级后：`no`（纯软件解码，一定能出画面）。
+    //
+    // 必须在 `open()` 之前设置，播放中途改这个属性不会重建解码器。
+    try {
+      await platform.setProperty('hwdec', _softwareDecode ? 'no' : 'auto-safe');
+    } catch (_) {
+      // 忽略：个别平台的 libmpv 版本不认这个属性，不影响播放。
+    }
+    // 弱网缓冲策略（0.5.0）。
+    //
+    // 背景：用户实测"开 VPN 就卡"，根因是视频请求全部绕道代理节点
+    // （Go 原生核心会读系统代理，见 `native/core/proxy_system.go`），
+    // 多一跳且节点质量不稳定 → 缓冲容易被抖动打空 → 表现为抽帧卡顿。
+    // 这里做两件事，都不改变解码/渲染方式、也不影响音调：
+    // 1. 关闭磁盘缓存，改用内存缓存：弱网下避免额外磁盘 IO 拖慢取流；
+    // 2. 加大流层缓冲：对代理带来的抖动更有容忍度。
+    // 属性不受支持时静默忽略，绝不影响播放。
+    for (final entry in const {
+      'cache-on-disk': 'no',
+      'stream-buffer-size': '524288',
+    }.entries) {
+      try {
+        await platform.setProperty(entry.key, entry.value);
+      } catch (_) {
+        // 忽略：仅属调优，失败不构成错误。
+      }
+    }
+    _playerConfigured = true;
+    _configuredSoftwareDecode = _softwareDecode;
   }
 
   Future<void> _openMedia(
@@ -3779,15 +4410,55 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   ///
   /// 复用 `LanPushButton`（与老播放器同一个组件），
   /// 因此连接状态图标、推送中的转圈、tooltip 文案完全一致。
-  Widget _pushButton() => Align(
+  Widget _pushButton() => LanPushButton(
+    key: const ValueKey('feed-lan-push'),
+    onPressed: _pushToDevice,
+  );
+
+  /// 右上角浮层：画中画按钮 + 推送按钮（0.8.17）。
+  ///
+  /// 两个按钮原本各占一个 `Align`，加在一起会互相盖住，所以合成一行。
+  /// 画中画只给手机端：电视没有「小窗」概念，`_pipAvailable` 在 TV 上
+  /// 恒为 false（既没探测也没声明 supportsPictureInPicture 的语义）。
+  Widget _topRightOverlay() => Align(
     alignment: Alignment.topRight,
     child: SafeArea(
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(0, 6, 6, 0),
-        child: LanPushButton(
-          key: const ValueKey('feed-lan-push'),
-          onPressed: _pushToDevice,
+        // 0.8.19：让开顶部自绘状态条。
+        padding: const EdgeInsets.fromLTRB(0, 6 + _hudStrip, 6, 0),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_pipAvailable) ...[
+              _pipButton(),
+              if (_canPush) const SizedBox(width: 8),
+            ],
+            if (_canPush) _pushButton(),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  /// 画中画按钮（0.8.17）。
+  ///
+  /// 与推送按钮同尺寸同底色（`LanPushButton` 是 38×38 圆角方块），
+  /// 放在同一行才不会一大一小。
+  Widget _pipButton() => Material(
+    color: Colors.black38,
+    borderRadius: BorderRadius.circular(10),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      key: const ValueKey('feed-pip'),
+      onTap: _enterPictureInPicture,
+      child: const SizedBox(
+        width: 38,
+        height: 38,
+        child: Icon(
+          Icons.picture_in_picture_alt_rounded,
+          color: Colors.white,
+          size: 20,
         ),
       ),
     ),
@@ -3917,30 +4588,96 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 竖屏时放在控件层内，**跟随控件一起显隐**（用户要求）；
   /// 全屏时由调用方放在控件层之外，改为**常显**（0.7.2，`XQ-0103`）。
   /// [textKey] 用于区分两个位置（全屏与竖屏可能同时在树中）。
+  /// 顶部自绘状态条占用的高度（0.8.19）。
+  ///
+  /// 播放期间系统状态栏**恒定隐藏**（见 [_syncSystemUi]），时间和电量改由
+  /// [PlayerStatusHud] 画在控件层顶部。左上角的返回键 / 集数标签、
+  /// 右上角的画中画 / 推送按钮都要让开这一条，否则会叠在一起。
+  static const double _hudStrip = 28;
+
+  /// 顶部自绘状态条：左时间、右电量（0.8.19）。
+  ///
+  /// 竖屏、全屏共用同一个组件，保证"点一下屏幕"两种状态下看到的东西一致。
+  Widget _statusHud() => const Positioned(
+    top: 0,
+    left: 0,
+    right: 0,
+    child: IgnorePointer(child: PlayerStatusHud()),
+  );
+
   Widget _episodeBadge({Key? textKey}) => Align(
     alignment: Alignment.topLeft,
     child: SafeArea(
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 0, 0),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.black54,
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            child: Text(
-              '第${_episodeIndex + 1}集',
-              key: textKey ?? const ValueKey('feed-episode-badge'),
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
+        // 0.8.19：让开顶部自绘状态条。
+        padding: const EdgeInsets.fromLTRB(12, 10 + _hudStrip, 0, 0),
+        child: _episodeBadgeBox(textKey: textKey),
+      ),
+    ),
+  );
+
+  /// 集数标签本体（不含定位与安全区），供左上角一行布局复用。
+  Widget _episodeBadgeBox({Key? textKey}) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: Colors.black54,
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      child: Text(
+        '第${_episodeIndex + 1}集',
+        key: textKey ?? const ValueKey('feed-episode-badge'),
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
         ),
+      ),
+    ),
+  );
+
+  /// 左上角浮层：返回按钮（仅独立播放页）+ 集数标签（0.8.15 第二批）。
+  ///
+  /// 返回按钮原本在顶部那条纯黑标题栏里；那条黑带正是"电量时间被黑边
+  /// 挡住"的来源，已删除。现在它压在同一行的画面左上角，跟随控件显隐——
+  /// 点一下画面出现返回键，与红果一致。
+  ///
+  /// 用 `SafeArea` 让出状态栏高度：独立播放页的画面铺到最上沿，
+  /// 不垫安全区的话按钮会压到刘海 / 挖孔下面。
+  Widget _topLeftOverlay() => Align(
+    alignment: Alignment.topLeft,
+    child: SafeArea(
+      bottom: false,
+      child: Padding(
+        // 0.8.19：让开顶部自绘状态条。
+        padding: const EdgeInsets.fromLTRB(6, 8 + _hudStrip, 0, 0),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.onBack != null) ...[
+              _backButton(),
+              if (_hasEpisodeBadge) const SizedBox(width: 8),
+            ],
+            if (_hasEpisodeBadge) _episodeBadgeBox(),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  /// 画面左上角的返回按钮（0.8.15 第二批）。
+  Widget _backButton() => Material(
+    color: Colors.black38,
+    shape: const CircleBorder(),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      key: const ValueKey('feed-back'),
+      onTap: widget.onBack,
+      child: const SizedBox(
+        width: 38,
+        height: 38,
+        child: Icon(Icons.arrow_back_rounded, color: Colors.white, size: 21),
       ),
     ),
   );
@@ -3948,8 +4685,36 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   /// 亮度不再用画面滤镜（0.7.8）：改调窗口亮度，滤镜层直接透传。
   Widget _applyBrightness(Widget child) => child;
 
-  Future<void> _setSpeed(double value) async {
+  /// 弹幕层（0.8.11）：盖在视频上。
+  ///
+  /// 放在 `_applyBrightness` 之内，保证亮度和弹幕一起受同一个变换影响；
+  /// `DanmakuOverlay` 自己带 `IgnorePointer`，单击/双击/长按全部穿透到下层手势层。
+  /// `aspectRatio` 未知（首帧前）时按竖版 9:16 兜底，拿到真实比例后自然重排。
+  Widget _withDanmaku(Widget video) => Stack(
+    fit: StackFit.expand,
+    children: [
+      video,
+      Positioned.fill(
+        child: DanmakuOverlay(
+          controller: _danmaku,
+          aspectRatio: _aspectRatio > 0 ? _aspectRatio : 9 / 16,
+        ),
+      ),
+      // 加载失败时给一条可点的提示（0.8.21）：以前弹幕失败是静默的。
+      DanmakuRetryHint(controller: _danmaku),
+    ],
+  );
+
+  /// 弹幕开关（0.8.11）：只有红果的剧集有这个按钮。
+  Future<void> _toggleDanmaku() async {
     if (_closed) return;
+    final next = !_danmakuEnabled;
+    setState(() => _danmakuEnabled = next);
+    _danmaku.setEnabled(next);
+    await widget.store.setDanmakuEnabled(next);
+  }
+
+  Future<void> _setSpeed(double value) async {    if (_closed) return;
     setState(() => _speed = value);
     await _interactions?.applySpeed();
     await widget.store.setPlaybackPreferences(
@@ -4060,6 +4825,17 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // 0.8.14：顶部把手，红果那种"可以从底部拉上来"的观感。
+                  // 纯视觉元素，不参与手势（弹层本身仍由点击遮罩/关闭键收起）。
+                  Container(
+                    width: 36,
+                    height: 4,
+                    margin: const EdgeInsets.only(top: 8, bottom: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 18, 20, 8),
                     child: Row(
@@ -4310,12 +5086,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       return;
     }
     final columns = _episodeGridColumns;
-    // 让网格滚动到当前集附近（网格高度固定，先按行号估算偏移）。
+    // 让网格滚动到当前集附近。
+    //
+    // 0.8.14：行高改成按实际格宽算（原来是写死的 76，6 列时偏差明显，
+    // 长剧打开选集经常停在错误的位置）。格宽 = (可用宽 - 间距) / 列数，
+    // 行高 = 格宽 / childAspectRatio + 行间距。
+    const gridPadding = 16.0;
+    const gridSpacing = 10.0;
+    const cellAspect = 1.5;
+    final gridWidth = MediaQuery.sizeOf(context).width - gridPadding * 2;
+    final cellWidth =
+        (gridWidth - gridSpacing * (columns - 1)) / columns;
+    final rowExtent = cellWidth / cellAspect + gridSpacing;
     final gridController = ScrollController();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!gridController.hasClients) return;
       final row = currentIndex ~/ columns;
-      const rowExtent = 76.0;
       final target = (row * rowExtent - rowExtent).clamp(
         0.0,
         gridController.position.maxScrollExtent,
@@ -4397,11 +5183,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
     if (value != null && mounted) await _playEpisode(value);
   });
 
-  /// 选集网格列数：竖屏 4 列、横屏 8 列（横屏横向空间更大）。
+  /// 选集网格列数：竖屏 6 列、横屏 8 列（横屏横向空间更大）。
+  ///
+  /// 0.8.14：竖屏从 5 列提到 6 列 —— 短剧动辄几十上百集，6 列一屏能多看到
+  /// 一整行，和红果的密度更接近；窄屏（<400）仍用 5 列，免得数字挤成一团。
   int get _episodeGridColumns {
     final size = MediaQuery.sizeOf(context);
     if (size.width > size.height) return 8;
-    return size.width >= 400 ? 5 : 4;
+    return size.width >= 400 ? 6 : 5;
   }
 
   void _toast(String message) {
@@ -4448,10 +5237,14 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
               ]
             : [DeviceOrientation.portraitUp],
       );
-      // 全屏时隐藏状态栏与导航栏（沉浸式），退出时恢复。
-      await SystemChrome.setEnabledSystemUIMode(
-        next ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
-      );
+      // 全屏时隐藏状态栏与导航栏（沉浸式）。0.8.19：竖屏也保持沉浸
+      // （时间电量由 [PlayerStatusHud] 自绘），所以这里只负责"进全屏"，
+      // 退出交给 `_syncSystemUi` 重新断言 —— 切模式会让窗口 inset 变、
+      // 画面跟着跳，能少切一次就少切一次。
+      if (next) {
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      }
+      _appliedUiMode = null;
     } catch (_) {
       // 个别设备不支持锁定方向，忽略即可。
     }
@@ -4518,6 +5311,11 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
   }
 
   /// 恢复竖屏方向与系统栏（退出全屏收尾）。
+  ///
+  /// 0.8.19：这里**不再切回 `edgeToEdge`** —— 播放页在播放期间恒定沉浸，
+  /// 时间电量由 [PlayerStatusHud] 自绘。把 `_appliedUiMode` 清空即可，
+  /// 下一帧 `_syncSystemUi` 会重新断言一次沉浸模式（方向切换后系统可能
+  /// 自行把状态栏叫回来，需要重新压下去）。
   Future<void> _restorePortraitSystemUi() async {
     // 电视（0.8.0）：不锁竖屏，也不切系统栏模式。
     if (_television) return;
@@ -4529,10 +5327,10 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
       await SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
       ]);
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     } catch (_) {
       // 个别设备不支持锁定方向，忽略即可。
     }
+    _appliedUiMode = null;
   }
 
   // ===== 全屏横屏分区手势（0.7.2，XQ-0105）=====
@@ -4861,13 +5659,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    if (video != null)
+                    // 0.8.16 第二批：加载新集且还没出画面时撤掉旧帧，与竖屏一致。
+                    if (video != null && !(_loading && !_hasVideoFrame))
                       _applyBrightness(
-                        Video(
-                          controller: video,
-                          controls: (_) => const SizedBox.shrink(),
-                          // 全屏时铺满整个屏幕。
-                          fit: BoxFit.contain,
+                        _withDanmaku(
+                          Video(
+                            controller: video,
+                            controls: (_) => const SizedBox.shrink(),
+                            // 全屏时铺满整个屏幕。
+                            fit: BoxFit.contain,
+                          ),
                         ),
                       )
                     else
@@ -4904,18 +5705,20 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                     ),
                     // 与竖屏主层保持一致（0.6.11）：补上"已就绪但无画面"的兜底，
                     // 避免全屏时出现纯黑无文字。
-                    if (_loading ||
-                        (_awaitingFirstFrame &&
-                            !(_player?.state.playing ?? false)) ||
-                        // 0.7.13：改为判断"是否出过画面"。此前看 `width <= 0`，
-                        // 而部分流始终不报宽高 → 正常播放时提示也一直挂着。
-                        (!_userPaused &&
-                            _ready &&
-                            _error == null &&
-                            !_hasVideoFrame))
-                      const IgnorePointer(
-                        child: LoadingHint(message: '正在加载视频…', dark: true),
+                    //
+                    // 0.8.16 第二批：切集取流时的转圈延迟 [_loadingOverlayDelay]
+                    // 才出现，命中缓存 / 换得快时用户看不到任何闪动。
+                    // 「等首帧」与「已就绪却没画面」两条保持立即显示。
+                    //
+                    // 0.8.16 第三批：全屏同样收敛到 [_showPlaybackLoading]，
+                    // 换成纯动效（无文案），与竖屏 / 电视一致。
+                    if (_loadingOverlay && _loading)
+                      IgnorePointer(
+                        key: const ValueKey('feed-switch-loading'),
+                        child: PlaybackLoading(tv: _television),
                       )
+                    else if (_showPlaybackLoading)
+                      IgnorePointer(child: PlaybackLoading(tv: _television))
                     else if (_error != null)
                       Center(
                         child: Padding(
@@ -4979,6 +5782,7 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                 ),
                               ),
                             ),
+                            _statusHud(),
                             // 中央：播放/暂停。
                             if (!(state?.playing ?? false) &&
                                 !_loading &&
@@ -5136,6 +5940,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                             label: _qualityLabel,
                                             onPressed: _openQualityMenu,
                                           ),
+                                          // 弹幕开关（0.8.11）：只有红果剧集显示。
+                                          if (_plan?.supportsDanmaku ?? false)
+                                            _sideButton(
+                                              key: const ValueKey(
+                                                'fullscreen-danmaku',
+                                              ),
+                                              icon: _danmakuEnabled
+                                                  ? Icons
+                                                        .subtitles_rounded
+                                                  : Icons
+                                                        .subtitles_off_rounded,
+                                              label: _danmakuEnabled
+                                                  ? '弹幕'
+                                                  : '弹幕关',
+                                              onPressed: _toggleDanmaku,
+                                            ),
                                           _sideButton(
                                             key: const ValueKey(
                                               'fullscreen-episodes',
@@ -5307,18 +6127,35 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
             _loading ||
             _error != null ||
             !(state?.playing ?? false));
-    return Stack(
+    // 0.8.14：**视频始终铺满整屏**，控件全部以浮层压在画面上。
+    //
+    // 0.8.13 试过"视频在上、信息面板在下"的两段式（B 站那种），但短剧
+    // 16:9 画面只占屏高四分之一，剩下全被面板占掉，用户明确要求回到铺满、
+    // 不要面板里的按钮和简介。现在按红果短剧的做法：画面铺满 + 顶部剧名
+    // + 底部进度与功能行，点画面切换显隐。
+    final stage = Stack(
       fit: StackFit.expand,
       children: [
         if (widget.videoBuilder != null)
           // 测试注入的视频层：不依赖原生视频控制器。
           widget.videoBuilder!(const SizedBox.shrink())
-        else if (video != null && !_landscape)
+        // 0.8.16 第二批：**没命中缓存的切集，立刻把旧画面撤掉**。
+        //
+        // `Video` 在新地址 open 成功之前会一直显示上一集的最后一帧，
+        // 叠上"加载中"就成了用户说的"实际还停留在本集，加载成功才播上一集"。
+        // 这里在「正在加载 + 新集还没出画面」时不画视频层，露出黑底，
+        // 视觉上就是"已经切过去了，正在取流"。
+        //
+        // 命中缓存（或预载）时 `_loading == false`，条件不成立，
+        // 旧帧一直保留到新帧接上 —— 那才是真正的无缝。
+        else if (video != null && !_landscape && !(_loading && !_hasVideoFrame))
           _applyBrightness(
-            Video(
-              controller: video,
-              controls: (_) => const SizedBox.shrink(),
-              fit: BoxFit.contain,
+            _withDanmaku(
+              Video(
+                controller: video,
+                controls: (_) => const SizedBox.shrink(),
+                fit: BoxFit.contain,
+              ),
             ),
           )
         else if (_landscape)
@@ -5394,15 +6231,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         // 兜底条件补上「已就绪但播放器没有任何画面」：
         // 只要本页已 `_ready`、无错误、且播放器**既没在播也没有可用帧**，
         // 就显示加载提示，绝不让用户面对一块没有任何文字的黑屏。
-        if (_loading ||
-            (_awaitingFirstFrame && !(state?.playing ?? false)) ||
-            // 注意：必须排除 `_userPaused`，否则用户暂停后会错误地显示加载提示。
-            // 0.7.13：改为判断"是否出过画面"，不再看 `width <= 0`
-            // （部分流始终不报宽高，会让提示在正常播放时一直挂着）。
-            (!_userPaused && _ready && _error == null && !_hasVideoFrame))
-          const IgnorePointer(
-            child: LoadingHint(message: '正在加载视频…', dark: true),
+        // 0.8.16 第三批：加载态统一成抖音 / 红果那种**纯动效、无文案**。
+        //
+        // 用户已经点进来看这一集了，"我在等视频"是明摆着的，多一行
+        // 「正在加载视频…」只是噪音，还会把"卡住了"这件事显得更重。
+        // 四条来源（切集取流 / 等首帧 / 已就绪却没画面 / 缓冲卡顿）
+        // 收在 [_showPlaybackLoading] 里统一判断，竖屏、全屏、电视共用。
+        //
+        // 切集那条单独带 key：测试要能精确断言"那一瞬间没有闪动效"，
+        // 不被其余三条干扰。
+        if (_loadingOverlay && _loading)
+          IgnorePointer(
+            key: const ValueKey('feed-switch-loading'),
+            child: PlaybackLoading(tv: _television),
           )
+        else if (_showPlaybackLoading)
+          IgnorePointer(child: PlaybackLoading(tv: _television))
         else if (_error != null)
           Center(
             child: Padding(
@@ -5534,20 +6378,31 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                               ),
                             ),
                           ),
-                          // 左上角集数标签（0.6.2）。
+                          _statusHud(),
+                          // 左上角：返回按钮（仅独立播放页）+ 集数标签。
                           //
-                          // 只在有多个剧集时显示：单集、本地单文件不显示，
-                          // 避免出现"第1集"这种没有信息量的标签。
-                          if (_hasEpisodeBadge) _episodeBadge(),
-                          // 右上角推送按钮（0.6.4，从老播放器迁移）。
+                          // 集数标签只在有多个剧集时显示：单集、本地单文件
+                          // 不显示，避免出现"第1集"这种没有信息量的标签。
+                          //
+                          // 0.8.15 第二批：返回按钮从顶部黑条搬到这里，
+                          // 与集数标签同一行，跟随控件一起显隐。
+                          if (_hasEpisodeBadge || widget.onBack != null)
+                            _topLeftOverlay(),
+                          // 右上角：画中画按钮（0.8.17）+ 推送按钮（0.6.4，从老播放器迁移）。
                           //
                           // 位置选择理由：底部按钮行已固定为 5 个等宽槽位
                           // （320 窄屏槽位仅 59.2px，而"连播下一部"标签已 55px），
                           // 再加第 6 个会把标签挤到截断；因此放在视频右上角，
                           // 与左上角集数标签左右对称，也不占用底部功能位。
                           // 位于控件层内 → 跟随控件一起显隐。
-                          if (_canPush) _pushButton(),
-                          // 暂停时显示中央播放按钮。
+                          if (_canPush || _pipAvailable) _topRightOverlay(),
+                          // 中央播放按钮：**只在暂停时显示**。
+                          //
+                          // 0.8.14 试过"播放中也显示（点画面就出现）"，结果
+                          // 这个按钮正好压在画面正中，把双击暂停的手势全吃了
+                          // —— `feed_stall_recovery_test` 的"双击后应处于暂停态"
+                          // 直接红。按钮是 IconButton，会拦下点击，没法让双击穿透。
+                          // 所以维持原逻辑：暂停时给大按钮，播放中靠底部控件。
                           if (!(state?.playing ?? false) &&
                               !_loading &&
                               _error == null &&
@@ -5581,11 +6436,16 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
                                 Container(
-                                  padding: const EdgeInsets.fromLTRB(
+                                  // 0.8.15 第二批：独立播放页的画面铺到屏幕最上沿
+                                  // 之后，外面那层 `SafeArea` 没了，底部这一行会
+                                  // 压到手势导航条上，所以自己补一次底部安全区。
+                                  // 首页竖滑流外面还有 `SafeArea(bottom: true)`，
+                                  // 里面读到的 `padding.bottom` 已经是 0，不会叠加。
+                                  padding: EdgeInsets.fromLTRB(
                                     12,
                                     10,
                                     12,
-                                    8,
+                                    8 + MediaQuery.paddingOf(context).bottom,
                                   ),
                                   decoration: const BoxDecoration(
                                     gradient: LinearGradient(
@@ -5601,6 +6461,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
+                                      // 顶部剧名（红果那种：压在画面上的小标题，
+                                      // 点击进详情）。铺满布局下它回到画面里。
                                       _titleBar(),
                                       ValueListenableBuilder<double?>(
                                         valueListenable: _seekPreview,
@@ -5737,6 +6599,8 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                           ],
                                         ),
                                       ),
+                                      // 底部功能行（铺满布局下常驻在画面上，
+                                      // 随控件层一起显隐）。
                                       Row(
                                         mainAxisAlignment:
                                             MainAxisAlignment.spaceEvenly,
@@ -5769,6 +6633,22 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
                                             label: _qualityLabel,
                                             onPressed: _openQualityMenu,
                                           ),
+                                          // 弹幕开关（0.8.11）：只有红果剧集显示。
+                                          if (_plan?.supportsDanmaku ?? false)
+                                            _sideButton(
+                                              key: const ValueKey(
+                                                'feed-danmaku',
+                                              ),
+                                              icon: _danmakuEnabled
+                                                  ? Icons
+                                                        .subtitles_rounded
+                                                  : Icons
+                                                        .subtitles_off_rounded,
+                                              label: _danmakuEnabled
+                                                  ? '弹幕'
+                                                  : '弹幕关',
+                                              onPressed: _toggleDanmaku,
+                                            ),
                                           _sideButton(
                                             key: const ValueKey('feed-episodes'),
                                             icon: Icons.grid_view_rounded,
@@ -5818,14 +6698,159 @@ class _FeedPageState extends State<_FeedPage> with WidgetsBindingObserver {
         ),
       ],
     );
+    // 铺满整屏。`feed-stage` 这个 key 保留给手势测试取真实矩形
+    // （见 `feed_horizontal_swipe_test` 的 `_videoPoint`）。
+    //
+    // 0.8.15 第二批：状态栏显隐跟着"播放中 + 控件收起"走。
+    // 放在 build 末尾排队（不能在 build 里直接调平台通道），
+    // `_syncSystemUi` 自己比对上一次应用的模式，重复调用无副作用。
+    _queueSystemUiSync();
+    _queuePictureInPictureSync();
+    return SizedBox(key: const ValueKey('feed-stage'), child: stage);
   }
 
-  /// 控件层焦点变化（0.8.0 电视支持）。
+  /// 上一次真正应用过的系统栏模式（null = 还没应用过）。
+  SystemUiMode? _appliedUiMode;
+
+  /// 把状态栏显隐同步到"播放中 / 控件可见"（0.8.15 第二批）。
   ///
+  /// 用户要的效果（参照红果）：正常播放时状态栏隐藏、画面真正铺到屏幕最上沿；
+  /// 点击画面时能看到时间和电量。
+  ///
+  /// **0.8.19 改法（用户反馈"点一下画面就抖一下"）**：
+  /// 以前靠 `edgeToEdge` ↔ `immersiveSticky` 来回切来"叫出系统状态栏"。
+  /// 每次切换窗口 inset 都会变，`Video` 的 `BoxFit.contain` 跟着重算尺寸，
+  /// 用户看到的就是画面跳一下 —— 这不是渲染卡顿，是布局真的变了。
+  ///
+  /// 现在**不再切换模式**：播放页在播放期间恒定 `immersiveSticky`
+  /// （窗口尺寸全程不变 → 不可能抖），时间与电量由 [PlayerStatusHud]
+  /// 自绘在控件层顶部。全屏（横屏）走同一套，所以全屏点击也能看到时间电量。
+  ///
+  /// 只对独立播放页生效（`widget.immersive`）：首页竖滑流外面还有 AppBar，
+  /// 状态栏高度一变整页会跟着跳，得不偿失。
+  void _queueSystemUiSync() {
+    if (!widget.immersive) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncSystemUi());
+  }
+
+  void _syncSystemUi() {
+    if (!mounted || _closed || !widget.immersive) return;
+    // 小窗里由系统接管，别再切沉浸模式（会把小窗里的状态栏也藏掉）。
+    if (_pipActive) return;
+    // 电视没有状态栏概念，别去动它的系统栏（部分盒子会因此重排画面）。
+    if (_television) return;
+    const mode = SystemUiMode.immersiveSticky;
+    if (mode == _appliedUiMode) return;
+    _appliedUiMode = mode;
+    unawaited(SystemChrome.setEnabledSystemUIMode(mode));
+  }
+
+  // —— 画中画（0.8.17，手机端）——
+
+  /// 探测设备能力并挂上小窗进出回调。电视端直接跳过。
+  void _initPictureInPicture() {
+    if (_television) return;
+    unawaited(() async {
+      final available = await PictureInPicture.initialize();
+      if (!mounted || _closed) return;
+      PictureInPicture.active.addListener(_onPictureInPictureChanged);
+      // 小窗上的「播放 / 暂停」按钮点下来时，走的就是这里（0.8.18）。
+      PictureInPicture.onTogglePlayback = _onPictureInPictureTogglePlayback;
+      // 进小窗时页面可能被重建（例如从小窗点回来换了一集），
+      // 先把当前真实状态同步进来，别默认成"不在小窗"。
+      _pipActive = PictureInPicture.active.value;
+      if (available != _pipAvailable) {
+        setState(() => _pipAvailable = available);
+      }
+      _queuePictureInPictureSync();
+      _syncPictureInPicturePlayback(_player?.state.playing ?? false, force: true);
+    }());
+  }
+
+  /// 小窗里点了「播放 / 暂停」（0.8.18）。
+  ///
+  /// 直接复用页面上的 [_togglePlayback]：暂停时结束"等待首帧"、记录用户主动
+  /// 暂停、取消自动连播等一系列副作用都在里面，重写一份必然漏。
+  /// 切完之后播放态的变化由播放流监听推回去刷新图标，这里不抢先改 `_pipPlaying`。
+  void _onPictureInPictureTogglePlayback() {
+    if (!mounted || _closed) return;
+    _togglePlayback();
+  }
+
+  /// 把真实播放态同步给原生，刷新小窗上的图标（0.8.18）。
+  ///
+  /// [force] 用于播放器刚换实例时（换集 / 恢复）强制推一次：这时本地缓存
+  /// 的 `_pipPlaying` 可能跟新实例的真实状态不一致。
+  void _syncPictureInPicturePlayback(bool playing, {bool force = false}) {
+    if (_television || !_pipAvailable) return;
+    if (!force && playing == _pipPlaying) return;
+    _pipPlaying = playing;
+    unawaited(
+      PictureInPicture.updatePlayback(
+        playing: playing,
+        aspectRatio: _pipAspectRatio,
+      ),
+    );
+  }
+
+  /// 小窗进出：进去就把控件收掉（小窗里糊一层按钮很难看），
+  /// 出来恢复「点一下才出现」的默认态。
+  void _onPictureInPictureChanged() {
+    if (!mounted || _closed) return;
+    final active = PictureInPicture.active.value;
+    if (active == _pipActive) return;
+    _hideTimer?.cancel();
+    setState(() {
+      _pipActive = active;
+      if (active) {
+        _controlsVisible = false;
+        _panelOpen = false;
+      }
+    });
+    if (!active) {
+      // 小窗期间系统可能改过系统栏模式（退出小窗会重建 Activity），
+      // 清掉缓存标记，让 _syncSystemUi 退出后无条件重放一次沉浸模式。
+      _appliedUiMode = null;
+      _scheduleHide();
+    }
+    _queueSystemUiSync();
+  }
+
+  /// 按视频宽高比进入小窗。失败时什么都不做（有的 ROM 会直接拒绝）。
+  Future<void> _enterPictureInPicture() async {
+    if (_closed || !_pipAvailable) return;
+    _hideTimer?.cancel();
+    await PictureInPicture.enter(aspectRatio: _pipAspectRatio);
+  }
+
+  /// 视频宽高比（宽 / 高）。首帧前未知，按竖版 9:16 兜底。
+  double get _pipAspectRatio => _aspectRatio > 0 ? _aspectRatio : 9 / 16;
+
+  /// 排队同步「按 Home 自动进小窗」的开关。
+  ///
+  /// 与 `_queueSystemUiSync` 同样的理由：不能在 build 里直接调平台通道。
+  void _queuePictureInPictureSync() {
+    if (!_pipAvailable || _television) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncPictureInPictureArmed());
+  }
+
+  /// 只有「正在播放 + 当前页就是播放页 + 没在小窗里 + 没报错」时才武装。
+  ///
+  /// 暂停了还武装的话，用户按 Home 会莫名其妙弹出一个小窗；
+  /// 已经在小窗里再武装一次会让系统反复重进。
+  void _syncPictureInPictureArmed() {
+    if (!mounted || _closed || !_pipAvailable) return;
+    final playing = _player?.state.playing ?? false;
+    final armed =
+        playing && widget.active && !_pipActive && _error == null && !_loading;
+    if (armed == _pipArmed) return;
+    _pipArmed = armed;
+    unawaited(PictureInPicture.arm(armed, aspectRatio: _pipAspectRatio));
+  }
+
   /// 焦点进入控件层时停掉自动隐藏计时；离开时恢复计时。
   /// 只在电视模式下有意义，但记录本身无副作用，非电视模式也一并记录。
-  void _onControlsFocusChanged(bool focused) {
-    if (focused) {
+  void _onControlsFocusChanged(bool focused) {    if (focused) {
       _hideTimer?.cancel();
     } else if (mounted && _controlsVisible && !_closed) {
       _scheduleHide();

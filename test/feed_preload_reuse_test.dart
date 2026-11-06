@@ -113,6 +113,19 @@ int _currentPage(WidgetTester tester) {
   return (controller.page ?? controller.initialPage.toDouble()).round();
 }
 
+/// 取一个**落在视频画面内**的起手点（0.8.13）。
+///
+/// 小屏改成"视频 + 信息面板"两段式布局后，下半屏是可滚动的面板，
+/// 从那里起手只会滚动面板、不会切集/翻页；视频画面本身只有约 236 高，
+/// 正中的「播放」按钮与顶部 60px 禁滑条也要避开。
+Offset _videoPoint(WidgetTester tester) {
+  final stage = find.byKey(const ValueKey('feed-stage'));
+  final rect = stage.evaluate().isEmpty
+      ? tester.getRect(find.byType(VerticalFeedScreen))
+      : tester.getRect(stage);
+  return rect.centerLeft + const Offset(24, 0);
+}
+
 void main() {
   late LocalStore store;
 
@@ -148,12 +161,9 @@ void main() {
     repo.resolves.clear();
     repo.releases.clear();
 
-    await tester.fling(
-      find.byType(PageView),
-      const Offset(0, -400),
-      1200,
-      initialOffset: const Offset(210, 500),
-    );
+    // 0.8.13：小屏改了两段式布局，起点必须落在视频画面内，
+    // 否则手势只会滚动下方信息面板、不会翻页。
+    await tester.flingFrom(_videoPoint(tester), const Offset(0, -400), 1200);
     await _pump(tester, 120);
 
     final secondPage = _currentPage(tester);
@@ -210,17 +220,66 @@ void main() {
     expect(repo.preloads, contains('甲剧2'), reason: '应预加载第 2 集');
 
     repo.resolves.clear();
-    await tester.fling(
-      find.byType(PageView).evaluate().isEmpty
-          ? find.byType(VerticalFeedScreen)
-          : find.byType(PageView),
-      const Offset(0, -400),
-      1200,
-      initialOffset: const Offset(210, 500),
-    );
+    // 0.8.13：同上，起点取视频画面左侧空白处。
+    await tester.flingFrom(_videoPoint(tester), const Offset(0, -400), 1200);
     await _pump(tester, 120);
 
     expect(repo.resolves, isEmpty, reason: '切下一集不应重新解析');
+  });
+
+  testWidgets('0.8.15：切上一集同样复用预载（不再现解析）', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(420, 880);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final repo = _Repo();
+    final platforms = <ScriptedPlayer>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(
+          body: VerticalFeedScreen(
+            key: const ValueKey('feed'),
+            repository: repo,
+            store: store,
+            embedded: true,
+            active: true,
+            singleDrama: _a,
+            playerFactory: () {
+              final p = ScriptedPlayer();
+              platforms.add(p);
+              return Player(platformPlayer: p);
+            },
+            videoBuilder: (controls) => controls,
+          ),
+        ),
+      ),
+    );
+    await _pump(tester, 80);
+
+    // 先切到第 2 集（这一步没有预载可用，会现解析，属于正常）。
+    await tester.flingFrom(_videoPoint(tester), const Offset(0, -400), 1200);
+    await _pump(tester, 120);
+
+    // 让第 2 集播起来，触发"两侧预载"。
+    for (final p in platforms) {
+      p.state = p.state.copyWith(position: const Duration(seconds: 90));
+      p.positionController.add(const Duration(seconds: 90));
+    }
+    await _pump(tester, 80);
+
+    expect(
+      repo.preloads,
+      contains('甲剧1'),
+      reason: '0.8.15 起上一集也要预载，否则回看时整条解析链路都暴露在切集那一刻',
+    );
+
+    repo.resolves.clear();
+    await tester.flingFrom(_videoPoint(tester), const Offset(0, 400), 1200);
+    await _pump(tester, 120);
+
+    expect(repo.resolves, isEmpty, reason: '切上一集不应重新解析播放地址');
   });
 
   testWidgets('0.6.9：预载时机提前到 25%（原为过半）', (tester) async {

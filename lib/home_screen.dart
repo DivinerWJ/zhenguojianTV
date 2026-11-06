@@ -17,6 +17,7 @@ import 'catalog_sort_sheet.dart';
 import 'display_mode.dart';
 import 'recommendations_screen.dart';
 import 'tv_home.dart';
+import 'update_entry.dart';
 import 'vertical_feed_screen.dart';
 import 'rankings_screen.dart';
 import 'detail_screen.dart';
@@ -103,6 +104,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _selectedDramas = <String, Drama>{};
   Timer? _cacheRefreshTimer;
   bool _refreshingUpdatedCache = false;
+
+  /// 已经处理过的快照同步计数（0.8.20），见 [CatalogUpdates.snapshotRevision]。
+  int _seenSnapshotRevision = 0;
   bool _updateNotice = false;
   bool _selectionMode = false;
   bool _showRecommendations = false;
@@ -311,6 +315,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _autoUpdateChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// 剧集快照灌进了新剧库（0.8.20：只在手动同步后触发）：按站源走一次缓存重读。
+  ///
+  /// 复用 [_catalogUpdated] 的合并逻辑 —— 它已经处理了「只补更新、不打断
+  /// 当前列表和已选剧集」的细节，没必要再写一份。
+  void _snapshotApplied() {
+    if (!mounted) return;
+    for (final site in widget.store.sources) {
+      _catalogUpdated(site.id);
+    }
   }
 
   void _catalogUpdated(String source) {
@@ -797,6 +812,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ..start();
     widget.repository.catalogUpdates.addListener(_metadataChanged);
     if (widget.store.sources.isNotEmpty) {
+      // 剧集快照（0.8.20）：**不再自动同步**。用户明确要求"后续全改为手动
+      // 同步"，入口在「设置 → 站源管理 → 同步远程数据源」，那里会显示远端
+      // 数据的同步时间。首页只在手动同步成功后（markSnapshotSynced）重读缓存，
+      // 进首页本身不再发任何快照请求。
       _load(useCache: true);
       _loadCategories();
     } else {
@@ -829,6 +848,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _metadataChanged() {
+    // 手动同步了远端剧集快照（0.8.20）：整库重读缓存，不等某一部剧的资料更新。
+    final revision = widget.repository.catalogUpdates.snapshotRevision;
+    if (revision != _seenSnapshotRevision) {
+      _seenSnapshotRevision = revision;
+      _snapshotApplied();
+      return;
+    }
     final drama = widget.repository.catalogUpdates.latest;
     if (!mounted || drama == null || !widget.store.allowsSource(drama.source)) {
       return;
@@ -1330,7 +1356,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           if (widget.store.sources.isNotEmpty)
             item(
               Icons.live_tv_rounded,
-              _group.name,
+              // 0.8.11：侧栏固定写「站源」。
+              //
+              // 多选时 `_group.name` 是「剧场+AI+旧版」这种拼接串，
+              // 侧栏宽度只有十几个字，直接顶出去（用户反馈"外面显示 X果+X果，
+              // 超长不好展示"）。点进去就是站源设置页，名字不影响判断。
+              '站源',
               key: const ValueKey('tv-nav-source'),
               onPressed: _openSourceSheet,
             ),
@@ -1499,6 +1530,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
               children: [
                 const Text('独立运行，打开即可浏览和播放。观看记录与追剧收藏保存在当前设备。'),
+                const SizedBox(height: 12),
+                // 检查更新（0.8.18）：只在用户点这里时才发请求。
+                UpdateEntry(
+                  currentVersion: AppLayout.versionOf(context),
+                ),
                 const SizedBox(height: 12),
                 // 作者信息（0.2.30 新增，用户要求）：
                 // 名字蓝色可点击，跳转各自 GitHub 页面，并标明身份。

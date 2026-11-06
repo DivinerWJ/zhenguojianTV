@@ -15,6 +15,7 @@ import 'app_theme.dart';
 import 'back_guard.dart';
 import 'home_screen.dart';
 import 'local_store.dart';
+import 'playback_cache.dart';
 import 'profiles_screen.dart';
 import 'media_library.dart';
 import 'package_smoke.dart';
@@ -35,6 +36,14 @@ Future<void> main(List<String> arguments) async {
     await runPackageSmoke(arguments);
     return;
   }
+  // 0.8.11：开屏图先解进图片缓存，再起界面。
+  //
+  // 不预加载的话，Flutter 首帧画出来时 `Image.asset` 还没解码完，用户看到的是
+  // "一层纯色 → 整张图突然出现"的硬切，就是反馈里的"开屏闪了一下"。
+  // 这段等待期间原生启动窗口显示的是同色底（`splash_background`），
+  // 所以观感上只是开屏图稍微晚一点点出现，不会跳。
+  final device = await AppDevice.detect();
+  await precacheSplashImage(device.television);
   runApp(const AppBootstrap());
 }
 
@@ -124,6 +133,13 @@ class _AppBootstrapState extends State<AppBootstrap>
                   store!.mirrorConfigSource,
                 )
                 .catchError((Object _) {}),
+          );
+          // 0.8.12：把用户设置的预缓存上限推给原生侧。
+          // 原生不持久化这个值（设置是 Dart 侧的事），启动时对齐一次即可。
+          unawaited(
+            repository
+                .setMediaCacheLimit(store!.playbackCachePreferences.limitMB << 20)
+                .catchError((Object _) => const PlaybackCacheUsage()),
           );
           LanController.current?.dispose();
           final link = LanController(

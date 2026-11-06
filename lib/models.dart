@@ -13,9 +13,28 @@ class SourceSite {
       id == '51duanju' ||
       id == 'yeguo' ||
       id == 'xiangjiao' ||
-      id == 'ezdmw';
-  bool get pagedSearch =>
-      id == 'huangju' || id == '51duanju' || id == 'yeguo' || id == 'ezdmw';
+      id == 'ezdmw' ||
+      // 青空次元（0.8.15）：搜索走同一个 JSON 目录接口，支持翻页。
+      id == 'sorani' ||
+      // 河马剧场（0.8.17）：搜索走 /seo/video/6007，index 就是页码。
+      id == 'hema' ||
+      // 苹果CMS 采集站（0.8.11）：网果的搜索页被 WAF 拦死（返回"安全验证"），
+      // 只走本地缓存搜索，所以不在这个列表里。
+      id == 'huaguo' ||
+      id == 'faguo' ||
+      id == 'wuguo';
+  bool get pagedSearch => switch (id) {
+    // 花果的搜索页不认 page 参数（第 2 页返回空结果），只给第一页。
+    'huangju' ||
+    '51duanju' ||
+    'yeguo' ||
+    'ezdmw' ||
+    'sorani' ||
+    'hema' ||
+    'faguo' ||
+    'wuguo' => true,
+    _ => false,
+  };
   bool get searchSuggestions => id == 'hongguo';
   String get groupId => switch (id) {
     'huangguo-video' || 'huangguoai' || 'cloudfront' => 'huangguo',
@@ -36,6 +55,15 @@ class SourceSite {
   static const yeguo = SourceSite('yeguo', '野果', '热播 · 全集正片校验');
   static const xiangjiao = SourceSite('xiangjiao', '香蕉', '热播 · 分集权限识别');
   static const ezdmw = SourceSite('ezdmw', 'E站', '动漫 · 新番 · 完结');
+  // 青空次元（0.8.15）：番剧 / 剧场动画 / 特摄，纯 JSON 接口。
+  static const sorani = SourceSite('sorani', '青空', '番剧 · 剧场 · 特摄');
+  // 河马剧场（0.8.17）：网页只放出前 5 集，付费集走 App 门户接口取流。
+  static const hema = SourceSite('hema', '河马', '短剧 · 全集合集');
+  // 苹果CMS 采集站（0.8.11）。四个站都是整部剧一个视频，只有发果按集拆开。
+  static const huaguo = SourceSite('huaguo', '花果', '短剧 · 花生短剧');
+  static const wangguo = SourceSite('wangguo', '网果', '短剧 · 短剧网');
+  static const faguo = SourceSite('faguo', '发果', '短剧 · 168 影院');
+  static const wuguo = SourceSite('wuguo', '伍果', '短剧 · 五五短剧');
   static const huangguoVideo = SourceSite('huangguo-video', '剧场', '视频剧集');
   static const huangguoAI = SourceSite('huangguoai', 'AI', 'AI 短剧');
   static const cloudfront = SourceSite('cloudfront', '旧版', '旧 API 剧库');
@@ -52,6 +80,12 @@ class SourceSite {
     yeguo,
     xiangjiao,
     ezdmw,
+    sorani,
+    hema,
+    huaguo,
+    wangguo,
+    faguo,
+    wuguo,
     huangguoVideo,
     huangguoAI,
     cloudfront,
@@ -72,6 +106,12 @@ class SourceSite {
           duanju51,
           yeguo,
           ezdmw,
+          sorani,
+          hema,
+          huaguo,
+          wangguo,
+          faguo,
+          wuguo,
           huangguoVideo,
           huangguoAI,
           cloudfront,
@@ -80,6 +120,32 @@ class SourceSite {
   static bool isAvailable(String id) => values.any((site) => site.id == id);
   static SourceSite byId(String id) =>
       knownValues.firstWhere((site) => site.id == id, orElse: () => hongguo);
+
+  /// 「黑洞」站源（0.8.15 第二批）。
+  ///
+  /// 用户要求：这几站在设置里打开「黑洞」之后才展示，默认关闭。
+  /// 关闭时它们只是**不出现在站源列表里**（也就不会被拉目录 / 搜索），
+  /// 已经下载或历史记录里指向它们的剧集仍然能播 ——
+  /// 因此判定放在 `LocalStore.sources`，**不要**塞进 `isAvailable`。
+  static const blackholeIds = {
+    'huangdou',
+    'huangju',
+    '51duanju',
+    'yeguo',
+    // 黄果是一组三入口（剧场 / AI / 旧版），一起算黑洞。
+    'huangguo-video',
+    'huangguoai',
+    'cloudfront',
+  };
+
+  static bool isBlackhole(String id) => blackholeIds.contains(id);
+
+  /// 开启「黑洞」站源需要的口令（0.8.16）。
+  ///
+  /// **这不是安全边界**：口令是客户端常量，翻源码就能看到。它只是把入口
+  /// 从「随手一点就开」变成「得知道口令」，免得普通用户误开这一批站源。
+  /// 关闭不需要口令。
+  static const blackholePassword = 'github-zhenguojianTV';
 }
 
 class SourceGroup {
@@ -111,6 +177,58 @@ class CatalogCategory {
         json['id'] as String? ?? '',
         json['name'] as String? ?? '全部',
       );
+}
+
+/// 远端剧集快照的索引摘要（0.8.20）。
+///
+/// 站源管理页的「同步远程数据源」按钮靠它显示两件事：
+/// **远端那份剧库是什么时候生成的**，以及本机是不是已经吃到了这一版。
+/// 只包含索引里的元信息，不含任何剧集正文 —— 读它只花几 KB。
+class CatalogSnapshotInfo {
+  const CatalogSnapshotInfo({
+    this.generatedAt,
+    this.appliedAt,
+    this.appliedGeneratedAt,
+    this.counts = const {},
+  });
+
+  /// 远端这一版快照的生成时间。内容没变时不会前进（CI 会沿用上一版时间）。
+  final DateTime? generatedAt;
+
+  /// 本机最后一次真正把快照灌进剧库的时间。
+  final DateTime? appliedAt;
+
+  /// 本机已经灌过的那一版；与 [generatedAt] 相同即"已是最新"。
+  final DateTime? appliedGeneratedAt;
+
+  /// 各站源在快照里的条数（已按这份构建可用的站源过滤）。
+  final Map<String, int> counts;
+
+  int get total => counts.values.fold(0, (sum, count) => sum + count);
+
+  int get sourceCount => counts.length;
+
+  /// 本机已经吃过远端这一版。两边都为空时按"未同步"处理。
+  bool get upToDate =>
+      generatedAt != null && appliedGeneratedAt == generatedAt;
+
+  factory CatalogSnapshotInfo.fromJson(Map<String, dynamic> json) {
+    DateTime? parse(Object? value) =>
+        value is String && value.isNotEmpty ? DateTime.tryParse(value) : null;
+    final counts = <String, int>{};
+    final raw = json['counts'];
+    if (raw is Map) {
+      raw.forEach((key, value) {
+        if (key is String) counts[key] = intValue(value);
+      });
+    }
+    return CatalogSnapshotInfo(
+      generatedAt: parse(json['generatedAt']),
+      appliedAt: parse(json['appliedAt']),
+      appliedGeneratedAt: parse(json['appliedGeneratedAt']),
+      counts: counts,
+    );
+  }
 }
 
 int intValue(Object? value) =>
@@ -306,6 +424,7 @@ class PlaybackPlan {
     this.routeIndex = 0,
     this.routeCount = 1,
     this.local = false,
+    this.danmakuId = '',
   });
   final String url;
   final Map<String, String> headers;
@@ -318,7 +437,12 @@ class PlaybackPlan {
   final int routeIndex;
   final int routeCount;
   final bool local;
+
+  /// 弹幕（0.8.11）：只有红果会返回这个 id，其余站源为空字符串。
+  /// 为空表示本集没有弹幕可看，播放器据此隐藏弹幕开关。
+  final String danmakuId;
   bool get hasAlternative => session.isNotEmpty && routeIndex + 1 < routeCount;
+  bool get supportsDanmaku => !local && session.isNotEmpty && danmakuId.isNotEmpty;
   factory PlaybackPlan.fromJson(Map<String, dynamic> json) => PlaybackPlan(
     url: json['url'] as String? ?? '',
     local: json['local'] == true,
@@ -336,6 +460,7 @@ class PlaybackPlan {
     routeCount: intValue(json['routeCount']) > 0
         ? intValue(json['routeCount'])
         : 1,
+    danmakuId: json['danmakuId'] as String? ?? '',
   );
 }
 

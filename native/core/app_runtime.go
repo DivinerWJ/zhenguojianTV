@@ -52,6 +52,8 @@ type Downloader struct {
 	hongguo                *hongguoAppClient
 	huangjuOnce            sync.Once
 	huangju                *huangjuAPIClient
+	soraniOnce             sync.Once
+	sorani                 *soraniAPIClient
 	diagnostics            *diagnosticLog
 	apiMu                  sync.Mutex
 	apiBase                string
@@ -114,6 +116,32 @@ type nativeInput struct {
 	Sequence         int64                   `json:"sequence"`
 	Force            bool                    `json:"force"`
 	Mirrors          string                  `json:"mirrors"`
+	// AllCategories 让 categories 返回**未截断**的完整分类表（0.8.24）。
+	//
+	// UI 的横向 chip 条只放得下 40 个分类（河马上游有 126 项），但抓目录时
+	// 必须按全部分类各翻一遍才能补全剧库 —— 只抓 UI 暴露的那几十个，其余
+	// 分类下的剧永远进不了快照，用户在本机点那些分类后反而比远端多。
+	AllCategories bool `json:"allCategories"`
+	// 弹幕（0.8.11）：按播放会话 + 时间窗拉取，见 app_danmaku.go。
+	PlaybackSession string `json:"playbackSession"`
+	StartMS         int64  `json:"startMs"`
+	DurationMS      int64  `json:"durationMs"`
+	// 弹幕（0.8.19）：`DanmakuID` 是红果的视频 id（`nativePlan.DanmakuID`）。
+	// 带上它以后弹幕**不再依赖播放会话还活着** —— 会话被预载/预缓存顶掉、
+	// 或超过 12 小时过期，弹幕照样能取。详见 app_danmaku.go。
+	DanmakuID string `json:"danmakuId"`
+	// 剧集快照（0.8.19）：`CatalogSources` 是用户当前启用的站源。
+	// 整份快照 12 个站源约 8 MB，只开红果的用户只需要 1.9 MB，
+	// 所以按这个列表过滤后再下载。留空表示"全都要"。
+	CatalogSources []string `json:"catalogSources"`
+	// 预缓存（0.8.12）：`Entry` 是已预载好的本机播放地址，`Budget` 是
+	// 本次允许写入磁盘的字节数，`Limit` 是缓存容量上限，见 app_precache.go。
+	// `ReuseSession` 用来复用已预载的播放会话 —— 不能复用 `Session` 字段，
+	// 那个字段被读请求的"调用方标识"占用了（`_read` 会覆盖它）。
+	Entry        string `json:"entry"`
+	ReuseSession string `json:"reuseSession"`
+	Budget       int64  `json:"budget"`
+	Limit        int64  `json:"limit"`
 }
 
 type nativeCatalogResult struct {
@@ -139,6 +167,8 @@ type nativePlan struct {
 	Session         string            `json:"session,omitempty"`
 	RouteIndex      int               `json:"routeIndex"`
 	RouteCount      int               `json:"routeCount"`
+	// 弹幕（0.8.11）：只有红果能给出这个 id，其余站源为空，前端据此隐藏弹幕入口。
+	DanmakuID string `json:"danmakuId,omitempty"`
 }
 
 type nativeEngine struct {
@@ -162,8 +192,17 @@ type nativeEngine struct {
 	catalogSaveError error
 	sourceSaveError  error
 	covers           *nativeCoverCache
-	stream           *nativeStreamServer
-	playbacks        map[string]nativePlaybackChoice
+	// 播放分片的磁盘缓存（0.8.12），引擎级持有：设置页要在**没播过任何东西**
+	// 的情况下也能读到占用与上限，所以不能挂在懒创建的流服务上。
+	media     *nativeMediaCache
+	stream    *nativeStreamServer
+	playbacks map[string]nativePlaybackChoice
+	// 弹幕坐标登记表（0.8.19）：key = 红果视频 id。
+	//
+	// 以前弹幕只认 `playbacks[session]`，会话被预载/预缓存挤掉（上限 8 个）
+	// 或过期（12 小时）就报"播放会话已过期"，用户看到的就是"弹幕没了"。
+	// 这里单独按视频 id 记一份坐标，与会话生命周期彻底解耦。
+	danmakuTargets   map[string]nativeDanmakuTarget
 	playbackMu       sync.Mutex
 	playbackSequence int64
 	playbackCancel   context.CancelFunc
@@ -322,8 +361,20 @@ func newNativeEngine(directory string) (*nativeEngine, error) {
 	engine.loadCatalogCache()
 	engine.loadSourceRecords()
 	engine.covers = newNativeCoverCache(directory, d)
+	engine.media = newNativeMediaCache(directory)
 	engine.downloads = newNativeDownloads(engine)
 	return engine, nil
+}
+
+// mediaCache 取引擎级的分片磁盘缓存，没初始化时按需补上
+// （单测里会直接构造 `nativeEngine`，不走 `newNativeEngine`）。
+func (engine *nativeEngine) mediaCache() *nativeMediaCache {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if engine.media == nil {
+		engine.media = newNativeMediaCache(engine.directory)
+	}
+	return engine.media
 }
 
 func NativeRequest(raw string) (result string) {
@@ -342,6 +393,15 @@ func NativeRequest(raw string) (result string) {
 		envelope["error"] = publicError(err).Error()
 		if errors.Is(err, errNativeLocalFile) {
 			envelope["code"] = "local_media"
+		}
+		// 0.8.22：把"这次没取到片源"单列出来。
+		//
+		// 这类失败绝大多数是瞬时的（服务端某一发降级，用户点重试立刻就好），
+		// 前端据此**自己静默重来一次**，而不是先把错误亮给用户、再让他点。
+		// 判据只看哨兵值 —— 真的下架 / 设备注册失败不会命中这里，
+		// 那两种照旧直接报错。
+		if errors.Is(err, errNativeMediaTransient) {
+			envelope["code"] = "media_transient"
 		}
 		var backoff *requestBackoff
 		if errors.As(err, &backoff) {
@@ -420,10 +480,27 @@ func nativeDispatch(input nativeInput) (any, error) {
 		duration = 10 * time.Minute
 	} else if input.Action == "preload" {
 		duration = 15 * time.Second
+	} else if input.Action == "precache" {
+		// 整集预缓存要下几十 MB，给足时间；用户切走时由 `cancelPrecache` 中断。
+		duration = 3 * time.Minute
+	} else if input.Action == "danmaku" {
+		// 弹幕是"当下就要"的数据：一个 30 秒窗口的弹幕晚到 20 秒已经没有意义，
+		// 与其让它拖满 60 秒、期间一直占着请求名额，不如早点失败让前端重试。
+		duration = 20 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
-	if input.Action == "preload" || input.Action == "prepareHandoff" || input.Session != "" && (input.Action == "catalog" || input.Action == "categories" || input.Action == "suggestions" || input.Action == "recommendations" || input.Action == "metadata") {
+	// 0.8.21：弹幕也登记成"可取消的读请求"。
+	//
+	// 以前 `danmaku` 不在这里，前端 `cancelDanmaku()` 到原生侧找不到对应会话，
+	// 取消是空操作 —— 用户拖动进度条 / 连切几集之后，旧窗口的请求还在跑，
+	// 新的窗口请求只能排队等同一把站源闸门，表现出来就是"弹幕半天不出来"。
+	// 登记之后：同一会话来了更大的 sequence 会先取消上一发，用户退出时也能
+	// 真正停下来。
+	// 弹幕只在**带了请求标记**时才登记（老调用方 / 单测不传 session，
+	// 直接走不可取消的路径，行为与以前一致）。
+	cancelableDanmaku := input.Action == "danmaku" && input.Session != "" && input.Sequence > 0
+	if input.Action == "preload" || input.Action == "precache" || input.Action == "prepareHandoff" || cancelableDanmaku || input.Session != "" && (input.Action == "catalog" || input.Action == "categories" || input.Action == "suggestions" || input.Action == "recommendations" || input.Action == "metadata") {
 		work, finish, err := engine.beginRead(ctx, input)
 		if err != nil {
 			return nil, err
@@ -444,6 +521,15 @@ func nativeDispatch(input nativeInput) (any, error) {
 		return engine.downloads.controlBatchExpected(ctx, input.JobIDs, input.Command, input.ExpectedVersions)
 	case "preload":
 		return engine.nativePreload(ctx, input)
+	case "precache":
+		// 0.8.12：把整集分片落到磁盘，见 app_precache.go。
+		return engine.nativePrecache(ctx, input)
+	case "mediaCacheStats":
+		return engine.nativeMediaCacheStats(), nil
+	case "clearMediaCache":
+		return engine.nativeClearMediaCache(), nil
+	case "setMediaCacheLimit":
+		return engine.nativeSetMediaCacheLimit(input.Limit), nil
 	case "prepareHandoff":
 		return engine.nativeResolve(ctx, input)
 	case "cancelRead":
@@ -491,13 +577,23 @@ func nativeDispatch(input nativeInput) (any, error) {
 		return plan, err
 	case "catalog":
 		return engine.nativeCatalog(ctx, input)
+	case "syncCatalogSnapshot":
+		// 剧集快照（0.8.19）：优先吃仓库 catalog 分支的加密快照，
+		// 冷启动不必等一轮现场抓取。返回 true 表示这次真的灌进了新数据。
+		// `CatalogSources` 是用户当前启用的站源，只下载这些，省流量。
+		changed, err := engine.nativeSyncCatalogSnapshot(ctx, input.CatalogSources)
+		return map[string]bool{"changed": changed}, err
+	case "catalogSnapshotInfo":
+		// 剧集快照索引摘要（0.8.20）：只读 index.json，给「同步远程数据源」
+		// 按钮显示远端数据的同步时间与规模，不下载任何站源文件。
+		return engine.nativeCatalogSnapshotInfo(ctx)
 	case "cached":
 		if !validNativeCategory(canonicalProviderSource(input.Source), input.Category) {
 			return nil, errors.New("内容分类无效")
 		}
 		return engine.nativeCached(nativeCatalogKey(input.Source, input.Category)), nil
 	case "categories":
-		items, err := engine.nativeCategories(ctx, input.Source, input.Force)
+		items, err := engine.nativeCategoriesFull(ctx, input.Source, input.Force, input.AllCategories)
 		return map[string]any{"items": items}, err
 	case "sourceStatus":
 		return engine.sourceStatus(input.Source), nil
@@ -529,6 +625,9 @@ func nativeDispatch(input nativeInput) (any, error) {
 	case "release":
 		engine.nativeReleasePlayback(input.Session)
 		return true, nil
+	case "danmaku":
+		// 0.8.11：按播放会话 + 时间窗拉红果弹幕，见 app_danmaku.go。
+		return engine.nativeDanmaku(ctx, input)
 	default:
 		return nil, errors.New("不支持的应用操作")
 	}
@@ -609,7 +708,12 @@ func (engine *nativeEngine) nativeCatalogOnce(ctx context.Context, input nativeI
 			result.Items = append(result.Items, nativeNormalize(drama))
 		}
 		result.Warning, result.Page = entry.Warning, 1
-		if entry.Limited && result.Warning == "" {
+		// 0.8.19：红果的"综合搜索"（`/search/<关键词>` 的 SSR）已永久失效，
+		// 现在只剩按剧名匹配。搜不到时给一句能指导下一步的话，
+		// 而不是让用户对着空列表反复重试。
+		if len(result.Items) == 0 && result.Warning == "" {
+			result.Warning = "红果只支持按剧名匹配，换个更完整的剧名试试"
+		} else if entry.Limited && result.Warning == "" {
 			result.Warning = "已显示当前可获取的匹配结果，使用更完整的剧名可继续查找"
 		}
 		return result, nil
@@ -669,6 +773,43 @@ func (engine *nativeEngine) nativeCatalogOnce(ctx context.Context, input nativeI
 		result.HasMore = more
 		return result, nil
 	}
+	// 青空次元（0.8.15）：搜索走同一个目录接口，只是换路由与参数。
+	if query != "" && source == sourceSorani {
+		items, more, err := d.fetchSoraniCatalogPage(ctx, page, "", query)
+		if err != nil {
+			return result, err
+		}
+		for _, drama := range items {
+			result.Items = append(result.Items, nativeNormalize(drama))
+		}
+		result.HasMore = more
+		return result, nil
+	}
+	// 河马剧场（0.8.17）：搜索走站点的 /seo/video/6007，和分类目录是两条链路。
+	if query != "" && source == sourceHema {
+		items, more, err := d.fetchHemaCatalogPage(ctx, page, "", query)
+		if err != nil {
+			return result, err
+		}
+		for _, drama := range items {
+			result.Items = append(result.Items, nativeNormalize(drama))
+		}
+		result.HasMore = more
+		return result, nil
+	}
+	if query != "" {
+		if profile, found := maccmsProfileFor(source); found && profile.SearchURL != nil {
+			items, more, err := d.fetchMaccmsCatalogPage(ctx, source, page, query)
+			if err != nil {
+				return result, err
+			}
+			for _, drama := range items {
+				result.Items = append(result.Items, nativeNormalize(drama))
+			}
+			result.HasMore = more
+			return result, nil
+		}
+	}
 	if query != "" {
 		engine.mu.Lock()
 		items := append([]nativeDrama{}, engine.catalogs[source]...)
@@ -722,8 +863,24 @@ func (engine *nativeEngine) nativeCatalogOnce(ctx context.Context, input nativeI
 		}
 	case sourceHuangdou:
 		client := newHuangdouAPIClient(d)
+		// 黄豆的 `/drama/list` 有**硬性流量上限**：单排序最多服务到第 100 页
+		// （要第 101 页它把 page 夹回 100，返回的还是那 30 条），30 条/页
+		// ⇒ 3000 部。而 `category` 参数会被服务端**忽略**（传任何值都回同一批），
+		// 只有 `order` 真的改排序：实测三种排序各自 3000 条、两两不同，
+		// 并集 5000 条 —— 快照原来只有 3000，缺 40%。
+		//
+		// 所以用 `order:` 前缀把排序编码进 category，让 catalogdump 能像
+		// 分类那样遍历多个排序取并集（它与分类走同一条 `source|category` 路径）。
+		order := ""
+		if strings.HasPrefix(category, huangdouOrderCategoryPrefix) {
+			order = strings.TrimPrefix(category, huangdouOrderCategoryPrefix)
+		}
+		params := map[string]any{"page": strconv.Itoa(page), "page_size": "30"}
+		if order != "" {
+			params["order"] = order
+		}
 		var decoded any
-		err = client.call(ctx, "/drama/list", map[string]any{"page": strconv.Itoa(page), "page_size": "30"}, &decoded)
+		err = client.call(ctx, "/drama/list", params, &decoded)
 		if err == nil {
 			rows := huangdouList(decoded)
 			for _, row := range rows {
@@ -745,6 +902,12 @@ func (engine *nativeEngine) nativeCatalogOnce(ctx context.Context, input nativeI
 		items, result.HasMore, err = d.fetchXiangjiaoCatalogPage(ctx, page, "")
 	case sourceEZDMW:
 		items, result.HasMore, err = d.fetchEZDMWCatalogPage(ctx, page, category, "")
+	case sourceSorani:
+		items, result.HasMore, err = d.fetchSoraniCatalogPage(ctx, page, category, "")
+	case sourceHema:
+		items, result.HasMore, err = d.fetchHemaCatalogPage(ctx, page, category, "")
+	case sourceHuaguo, sourceWangguo, sourceFaguo, sourceWuguo:
+		items, result.HasMore, err = d.fetchMaccmsCatalogPage(ctx, source, page, "")
 	case sourceHuangguoVideo:
 		address := fmt.Sprintf("%s/videos?page=%d", d.providerBaseURL(source), page)
 		if category != "" {
@@ -806,6 +969,12 @@ func (engine *nativeEngine) nativeDetail(ctx context.Context, drama nativeDrama)
 		raw, chapters, err = engine.downloader.fetchXiangjiaoDetail(ctx, sourceID)
 	case sourceEZDMW:
 		raw, chapters, err = engine.downloader.fetchEZDMWDetail(ctx, sourceID)
+	case sourceSorani:
+		raw, chapters, err = engine.downloader.fetchSoraniDetail(ctx, sourceID)
+	case sourceHema:
+		raw, chapters, err = engine.downloader.fetchHemaDetail(ctx, sourceID)
+	case sourceHuaguo, sourceWangguo, sourceFaguo, sourceWuguo:
+		raw, chapters, err = engine.downloader.fetchMaccmsDetail(ctx, source, sourceID)
 	default:
 		title, chapters, err = engine.downloader.GetHuangguoChapters(ctx, source, sourceID)
 	}
@@ -874,5 +1043,10 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 		return nativePlan{}, err
 	}
 	choice := nativePlaybackChoices(media, input.Quality)
+	// 弹幕（0.8.11）：只有红果的播放地址带 `hongguo-cenc://<videoId>`，
+	// 能从中取出剧集 id / 视频 id；其余站源留空，前端据此隐藏弹幕开关。
+	if seriesID, videoID, ok := hongguoPlaybackIDs(task); ok {
+		choice.danmakuSeries, choice.danmakuVideo = seriesID, videoID
+	}
 	return engine.nativeOpenPlayback(ctx, choice)
 }

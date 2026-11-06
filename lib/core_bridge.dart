@@ -10,6 +10,8 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import 'models.dart';
+import 'playback_cache.dart';
+import 'danmaku_models.dart';
 import 'background_downloads.dart';
 import 'local_store.dart';
 import 'app_build.dart';
@@ -132,15 +134,76 @@ abstract class AppRepository {
   ) async => throw AppFailure('当前环境不支持资源设置');
   final catalogUpdates = CatalogUpdates();
   Future<void> cancelPreload() async {}
+
+  /// 弹幕（0.8.11）：按播放会话 + 时间窗拉取，只有红果支持。
+  ///
+  /// [PlaybackPlan.danmakuId] 为空表示本集没有弹幕，调用方应该先看
+  /// [PlaybackPlan.supportsDanmaku]，不要拿异常当"不支持"来判断。
+  Future<DanmakuPage> danmaku(
+    PlaybackPlan plan, {
+    required int startMs,
+    required int durationMs,
+  }) async => throw AppFailure('当前环境不支持弹幕');
+  Future<void> cancelDanmaku() async {}
   Future<PlaybackPlan?> preload(
     Drama drama,
     Episode episode, {
     int quality = 0,
     bool online = false,
   }) async => null;
+
+  /// 预缓存（0.8.12）：把这一集的**全部分片**落到磁盘。
+  ///
+  /// 与 [preload] 的分工：`preload` 只解析地址、预热开头几 MB 到内存，
+  /// 切集就没了；`precache` 写磁盘、跨会话复用，切过去整集都不用等。
+  ///
+  /// [session] / [entry] 传上一集 `preload` 拿到的会话与播放地址，
+  /// 可以省掉一次重复解析；会话失效时原生侧会自己重新解析。
+  /// 返回本次实际写入的字节数（已缓存过的分片会跳过）。
+  Future<int> precache(
+    Drama drama,
+    Episode episode, {
+    int quality = 0,
+    String session = '',
+    String entry = '',
+    int budget = 0,
+  }) async => 0;
+  Future<void> cancelPrecache() async {}
+
+  /// 磁盘缓存用量（预缓存占用 / 条目数 / 上限）。
+  Future<PlaybackCacheUsage> mediaCacheUsage() async =>
+      const PlaybackCacheUsage();
+
+  /// 清空预缓存。
+  Future<PlaybackCacheUsage> clearMediaCache() async =>
+      const PlaybackCacheUsage();
+
+  /// 调整预缓存容量上限（字节）。
+  Future<PlaybackCacheUsage> setMediaCacheLimit(int bytes) async =>
+      const PlaybackCacheUsage();
+
   Future<void> cancelCatalog() async {}
   Future<void> cancelSuggestions() async {}
   Future<void> cancelRecommendations() async {}
+
+  /// 剧集快照（0.8.19）：拉仓库 `catalog` 分支的加密剧库给本地打底。
+  ///
+  /// 每台设备各自按 2 小时去各站源抓目录太浪费，冷启动还得等一轮；
+  /// 改成 CI 统一生成一份快照、客户端优先吃它，现场抓取只做兜底。
+  ///
+  /// [sources] 是用户当前启用的站源 —— 整份快照十几个站源约 42MB，
+  /// 只开红果的用户只需要其中 4.4MB，不传就会把全部站源都下下来。
+  ///
+  /// 返回 `true` 表示这次真的灌进了新数据，调用方可以据此刷新首页。
+  /// 失败时**不要**当成错误 —— 快照只是加速，抓取链路照旧。
+  Future<bool> syncCatalogSnapshot({List<String> sources = const []}) async =>
+      false;
+
+  /// 读远端剧集快照的索引摘要（0.8.20）。
+  ///
+  /// 只拉 `index.json`（几 KB），不下载任何站源文件 —— 站源管理页每次打开
+  /// 都会读一次，用来显示"远端站源数据同步时间"。不支持的环境返回 null。
+  Future<CatalogSnapshotInfo?> catalogSnapshotInfo() async => null;
 
   /// 首页视频流专用的目录读取。
   ///
@@ -300,6 +363,35 @@ class NativeRepository extends AppRepository {
   @override
   Future<void> cancelHandoff() => _cancelReads('handoff');
 
+  @override
+  Future<DanmakuPage> danmaku(
+    PlaybackPlan plan, {
+    required int startMs,
+    required int durationMs,
+  }) async {
+    _authorize('hongguo');
+    if (!plan.supportsDanmaku) {
+      throw AppFailure('本集暂不支持弹幕');
+    }
+    return DanmakuPage.fromJson(
+      await _read('danmaku', {
+        'action': 'danmaku',
+        'playbackSession': plan.session,
+        // 0.8.19：把视频 id 一起带下去。原生侧现在按它查弹幕坐标，
+        // 不再依赖播放会话还活着 —— 会话被预载顶掉 / 过期也能取到弹幕。
+        'danmakuId': plan.danmakuId,
+        'startMs': startMs,
+        'durationMs': durationMs,
+      }),
+      episodeId: plan.danmakuId,
+      startMs: startMs,
+      durationMs: durationMs,
+    );
+  }
+
+  @override
+  Future<void> cancelDanmaku() => _cancelReads('danmaku');
+
   void _adminPermission() {
     if (access != null && (access!.locked || !access!.profile.admin)) {
       throw AppFailure('仅管理员可修改本机资源设置');
@@ -365,13 +457,65 @@ class NativeRepository extends AppRepository {
   Future<void> cancelPreload() => _cancelReads('preload');
 
   @override
+  Future<void> cancelPrecache() => _cancelReads('precache');
+
+  @override
+  Future<int> precache(
+    Drama drama,
+    Episode episode, {
+    int quality = 0,
+    String session = '',
+    String entry = '',
+    int budget = 0,
+  }) async {
+    final result = await _read('precache', {
+      'action': 'precache',
+      'drama': drama.toJson(),
+      'chapter': episode.raw,
+      'index': episode.number,
+      'quality': quality,
+      'reuseSession': session,
+      'entry': entry,
+      'budget': budget,
+    });
+    return (result['bytes'] as num?)?.toInt() ?? 0;
+  }
+
+  @override
+  Future<PlaybackCacheUsage> mediaCacheUsage() async =>
+      PlaybackCacheUsage.fromJson(
+        await _call({'action': 'mediaCacheStats'}),
+      );
+
+  @override
+  Future<PlaybackCacheUsage> clearMediaCache() async =>
+      PlaybackCacheUsage.fromJson(
+        await _call({'action': 'clearMediaCache'}),
+      );
+
+  @override
+  Future<PlaybackCacheUsage> setMediaCacheLimit(int bytes) async =>
+      PlaybackCacheUsage.fromJson(
+        await _call({'action': 'setMediaCacheLimit', 'limit': bytes}),
+      );
+
+  @override
   Future<PlaybackPlan?> preload(
     Drama drama,
     Episode episode, {
     int quality = 0,
     bool online = false,
   }) async => PlaybackPlan.fromJson(
-    await _read('preload', {
+    // 0.8.15：读取作用域按**集号**拆开。
+    //
+    // 原生侧 `beginRead` 是按 session 分组的：同一个 session 再来一个更高的
+    // sequence 会**取消上一个请求**。以前只预载"下一集"，共用 `preload`
+    // 这个 session 没影响；现在上一集和下一集会同时预载，共用就会互相取消，
+    // 表现是"预载看起来在跑，但两边都拿不到结果"。
+    //
+    // 拆成 `preload-<集号>` 之后两路互不干扰；`cancelPreload()` 走的是
+    // 前缀匹配（`_cancelReads('preload')`），照样一次全停。
+    await _read('preload-${episode.number}', {
       'action': 'preload',
       'drama': drama.toJson(),
       'chapter': episode.raw,
@@ -616,6 +760,7 @@ class NativeRepository extends AppRepository {
         'metadata',
         'resolve',
         'preload',
+        'precache',
         'prepareHandoff',
         'enqueueDownloads',
         'localPlayback',
@@ -645,6 +790,14 @@ class NativeRepository extends AppRepository {
         Duration(
           seconds: action == 'moveDownloads'
               ? 620
+              : action == 'precache'
+              ? 190
+              // 快照要逐个下载十几个站源，原生侧整轮预算是 400 秒。
+              : action == 'syncCatalogSnapshot'
+              ? 420
+              // 只读索引，原生侧给 45 秒（jsDelivr 冷启动偶尔要等十几秒）。
+              : action == 'catalogSnapshotInfo'
+              ? 55
               : action == 'preload'
               ? 20
               : 70,
@@ -680,6 +833,7 @@ class NativeRepository extends AppRepository {
             'recommendations',
             'metadata',
             'preload',
+            'precache',
             'prepareHandoff',
           }.contains(input['action'])) {
         unawaited(
@@ -840,6 +994,21 @@ class NativeRepository extends AppRepository {
           'source': source,
           'category': category,
         }),
+      );
+
+  @override
+  Future<bool> syncCatalogSnapshot({List<String> sources = const []}) async {
+    final data = await _call({
+      'action': 'syncCatalogSnapshot',
+      if (sources.isNotEmpty) 'catalogSources': sources,
+    });
+    return data['changed'] == true;
+  }
+
+  @override
+  Future<CatalogSnapshotInfo?> catalogSnapshotInfo() async =>
+      CatalogSnapshotInfo.fromJson(
+        await _call({'action': 'catalogSnapshotInfo'}),
       );
   @override
   Future<String> cover(Drama drama, {bool force = false}) async {

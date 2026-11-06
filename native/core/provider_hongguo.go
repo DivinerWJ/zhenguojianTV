@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -206,6 +207,24 @@ func (d *Downloader) resolveHongguoMedia(ctx context.Context, task Task) (provid
 	if err := ctx.Err(); err != nil {
 		return providerMedia{}, err
 	}
+	// 设备没注册成功时，取流必然空正文，公开片源与网页链路也只会给 10 秒预告
+	// （会被时长校验拒掉）。继续往下试只是让用户多等两个网络往返，还会把
+	// 真正的根因埋在"公开片源不可用"后面 —— 直接把根因抛给用户。
+	if errors.Is(nativeErr, errHongguoDeviceUnregistered) {
+		return providerMedia{}, fmt.Errorf("%v，请检查网络后重试", nativeErr)
+	}
+	// 0.8.16 第四批：App 链路换设备重注册后仍然空正文，也直接短路。
+	//
+	// 公开片源对游客固定只给 10 秒预告（且第 4 集起 404），网页播放页同样
+	// 只有预告 —— 再试这两条路必然是"多等两三个网络往返，然后报一个更长
+	// 的错误"。实测网页侧没有隐藏的取流接口，所以这里没有损失可捡。
+	if errors.Is(nativeErr, errHongguoAppEmptyModel) {
+		// 0.8.22：包一层 `errNativeMediaTransient`，让前端知道"这次值得再试
+		// 一遍"。用户实测点重试立刻就好，说明它本来就是瞬时的 —— 与其把
+		// 错误亮出来让用户点，不如让前端自己静默重来一次。
+		return providerMedia{}, fmt.Errorf("%w：红果暂时取不到这一集的片源（%v）",
+			errNativeMediaTransient, nativeErr)
+	}
 	media, publicErr := d.resolveHongguoPublicMedia(ctx, videoID)
 	if publicErr == nil {
 		return media, nil
@@ -220,15 +239,24 @@ func (d *Downloader) resolveHongguoMedia(ctx context.Context, task Task) (provid
 	// 原先这里还有一级第三方解析（djapi.999888456.xyz）。实测该接口
 	// 解密后固定返回 {"parse":0,"url":""}，多剧多轮均无地址，已移除，
 	// 避免用户等待一个必然失败的请求。
-	return providerMedia{}, fmt.Errorf("红果 App 取流失败：%v；公开片源失败：%v；网页取流失败：%w", publicError(nativeErr), publicError(publicErr), pageErr)
+	//
+	// 0.8.14：三条链路都失败时把各级原因摊开。App 链路是主链路，它失败
+	// 通常是设备注册没成功或该集确实没有地址。
+	return providerMedia{}, fmt.Errorf(
+		"红果取不到该集播放地址（App：%v；公开片源：%v；网页：%v）",
+		publicError(nativeErr), publicError(publicErr), pageErr)
 }
 
 // resolveHongguoPublicMedia 使用红果网页播放器同款的公开片源。
 //
-// 站点前端把免费试看集直接映射到 /video/public/{vid}/360p.mp4（见
-// player.3d3aa477ab.js 中的 "/video/public/" 分支），该地址不带签名、
-// 不带 Cookie，实测返回 video/mp4 且支持 Range。它只覆盖每部剧的前几集
-// （实测为前 3 集），因此仅作为 App 取流失败时的兜底，不能替代主链路。
+// 站点前端把公开集映射到 /video/public/{vid}/360p.mp4（见
+// player 的 "/video/public/" 分支），该地址不带签名、不带 Cookie，返回
+// video/mp4 且支持 Range。
+//
+// **0.8.14 起这里只作为最后兜底，而且必须校验时长**：2026-10-27 实测，
+// 这个 360p 已经从"完整正片"换成了**固定 10.00 秒的预告**（mvhd
+// duration=10000 / timescale=1000），旧链路把它当正片返回，于是每集只播
+// 10 秒就结束。现在先读 64KB 头部判断真实时长，明显短于正片的一律拒收。
 func (d *Downloader) resolveHongguoPublicMedia(ctx context.Context, videoID string) (providerMedia, error) {
 	if !hongguoNumericID.MatchString(videoID) {
 		return providerMedia{}, errors.New("红果视频 ID 无效")
@@ -246,24 +274,47 @@ func (d *Downloader) resolveHongguoPublicMedia(ctx context.Context, videoID stri
 			continue
 		}
 		request.Header.Set("User-Agent", userAgent)
-		request.Header.Set("Range", "bytes=0-1")
+		// 多读一点：要顺带从 mp4 头部判断时长（见 hongguoPreviewMaxDuration）。
+		request.Header.Set("Range", "bytes=0-65535")
 		response, err := d.doCatalogRequestWithTimeout(request, providerTimeout)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		response.Body.Close()
 		if response.StatusCode != http.StatusPartialContent && response.StatusCode != http.StatusOK {
+			response.Body.Close()
 			lastErr = fmt.Errorf("红果公开片源不可用（HTTP %d）", response.StatusCode)
 			continue
 		}
 		contentType := strings.ToLower(response.Header.Get("Content-Type"))
 		if !strings.Contains(contentType, "video/") && !strings.Contains(contentType, "mp4") {
+			response.Body.Close()
 			lastErr = errors.New("红果公开片源返回的不是视频内容")
 			continue
 		}
+		prefix, readErr := io.ReadAll(io.LimitReader(response.Body, hongguoMediaProbeBytes))
+		response.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		duration, durationErr := hongguoMediaDurationFromPrefix(prefix)
+		if durationErr != nil {
+			// 0.8.16 第四批：**读不出时长必须拒收**，不能放行。
+			//
+			// 这条路已知只给 10 秒预告（见上面的实测说明），读不出时长就
+			// 没有任何证据证明这次拿到的是正片。以前这里按"未知"放行，
+			// 结果网络抖动导致只读到半截头部时，预告被当正片交给播放器 ——
+			// 用户看到的就是"有的手机每集只能播 10 秒"。
+			lastErr = fmt.Errorf("红果公开片源无法确认时长（%v），疑似预告", durationErr)
+			continue
+		}
+		if hongguoLooksLikePreview(duration) {
+			lastErr = fmt.Errorf("红果公开片源只有 %.0f 秒预告，不是正片", duration.Seconds())
+			continue
+		}
 		d.rememberProviderHost(sourceHongguo, base)
-		return providerMedia{URL: address, Referer: "", Quality: 360}, nil
+		return providerMedia{URL: address, Referer: "", Quality: 360, Duration: duration}, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("红果公开片源没有可用域名")
@@ -271,6 +322,12 @@ func (d *Downloader) resolveHongguoPublicMedia(ctx context.Context, videoID stri
 	return providerMedia{}, lastErr
 }
 
+// resolveHongguoWebMedia 走网页播放页（服务端渲染）。
+//
+// 这是兜底链路：红果的播放页由服务端渲染，匿名访问时
+// `protectedPlayback: true`、`videoList` 为空，前端 JS 只能拼出 10 秒预告，
+// 所以正常情况下拿不到正片 —— 主链路是 App 取流（见 resolveHongguoAppMedia）。
+// 这里保留是因为站点偶尔会放开部分剧集，命中时能多一条路。
 func (d *Downloader) resolveHongguoWebMedia(ctx context.Context, seriesID, videoID string) (providerMedia, error) {
 	pageURL := hongguoBaseURL + "/player/" + url.PathEscape(seriesID) + "/" + url.PathEscape(videoID)
 	body, err := d.fetchProviderText(ctx, pageURL, hongguoBaseURL+"/")
@@ -278,22 +335,101 @@ func (d *Downloader) resolveHongguoWebMedia(ctx context.Context, seriesID, video
 		return providerMedia{}, err
 	}
 	page := routerLoaderMap(parseRouterData(body), "player_", "player_page")
-	if mapString(page, "vid") != videoID || mapString(page, "series_id") != seriesID {
-		return providerMedia{}, fmt.Errorf("红果未返回所请求的剧集，可能仅允许网页试看；请在站点确认该集的访问权限")
+	if vid := mapString(page, "vid"); vid != "" && vid != videoID {
+		return providerMedia{}, errors.New("红果未返回所请求的剧集")
 	}
 	info, _ := page["video_player_info"].(map[string]any)
-	addresses := hongguoMediaAddresses(info)
+	addresses := hongguoWebAddresses(page)
 	if len(addresses) == 0 {
-		return providerMedia{}, fmt.Errorf("红果该集未提供公开播放地址，可能需要登录或 App 授权；不会将试看集冒充该集下载")
+		return providerMedia{}, errors.New("红果网页未提供播放地址（未登录时只放预告）")
 	}
-	duration, _ := strconv.ParseFloat(mapString(info, "duration"), 64)
+	duration, _ := strconv.ParseFloat(hongguoWebDuration(page, info), 64)
+	// 与公开片源同一套判断：不足 20 秒说明拿到的还是预告，不能当正片播。
+	if hongguoLooksLikePreview(time.Duration(duration * float64(time.Second))) {
+		return providerMedia{}, fmt.Errorf("红果网页只返回了 %.0f 秒预告", duration)
+	}
 	media := providerMedia{URL: addresses[0], Referer: d.providerBaseURL(sourceHongguo) + "/", Duration: time.Duration(duration * float64(time.Second))}
+	if media.Duration <= 0 {
+		// 0.8.16 第四批：网页没给时长时也不能直接放行。
+		// 游客访问这条路本来就只放预告，读不出时长等于没有任何正片证据，
+		// 与其让用户看 10 秒，不如报错让他换一集 / 重试。
+		probed, probeErr := d.hongguoProbeMediaDuration(ctx, media)
+		if probeErr != nil {
+			return providerMedia{}, fmt.Errorf("红果网页片源无法确认时长（%v），疑似预告", probeErr)
+		}
+		if hongguoLooksLikePreview(probed) {
+			return providerMedia{}, fmt.Errorf("红果网页只返回了 %.0f 秒预告", probed.Seconds())
+		}
+		media.Duration = probed
+	}
 	for _, address := range addresses {
 		variant := media
 		variant.URL, variant.Variants = address, nil
 		media.Variants = append(media.Variants, variant)
 	}
 	return media, nil
+}
+
+// hongguoWebAddresses 从播放页里收集片源地址。
+//
+// 匿名时只有 `video_player_info`（通常为空）；站点放开时真实片源会出现在
+// `videoList`（清晰度 → 片源对象）。两处都扫，任一命中即可。
+func hongguoWebAddresses(page map[string]any) []string {
+	var addresses []string
+	seen := map[string]bool{}
+	collect := func(info map[string]any) {
+		if len(info) == 0 {
+			return
+		}
+		for _, address := range hongguoMediaAddresses(info) {
+			if seen[address] {
+				continue
+			}
+			seen[address] = true
+			addresses = append(addresses, address)
+		}
+	}
+	info, _ := page["video_player_info"].(map[string]any)
+	collect(info)
+	switch list := page["videoList"].(type) {
+	case map[string]any:
+		for _, value := range list {
+			entry, _ := value.(map[string]any)
+			collect(entry)
+		}
+	case []any:
+		for _, value := range list {
+			entry, _ := value.(map[string]any)
+			collect(entry)
+		}
+	}
+	return addresses
+}
+
+// hongguoWebDuration 取播放页里声明的片长（秒，字符串形式）。
+func hongguoWebDuration(page map[string]any, info map[string]any) string {
+	if value := mapString(info, "duration", "video_duration"); value != "" {
+		return value
+	}
+	switch list := page["videoList"].(type) {
+	case map[string]any:
+		for _, value := range list {
+			if entry, ok := value.(map[string]any); ok {
+				if duration := mapString(entry, "duration", "video_duration"); duration != "" {
+					return duration
+				}
+			}
+		}
+	case []any:
+		for _, value := range list {
+			if entry, ok := value.(map[string]any); ok {
+				if duration := mapString(entry, "duration", "video_duration"); duration != "" {
+					return duration
+				}
+			}
+		}
+	}
+	return mapString(page, "duration", "video_duration")
 }
 
 func hongguoDramaFromAny(v any, category string) Drama {

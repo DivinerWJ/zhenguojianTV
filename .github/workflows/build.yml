@@ -74,24 +74,27 @@ jobs:
       # 没配 key.properties 时 AGP 用 `~/.android/debug.keystore`，而它在每台
       # runner 上都是新生成的随机密钥 —— 每次构建签名都不同，用户装新包时
       # 安装器判签名冲突（部分 ROM 报的正是"解析软件包失败"），升级必须先卸载。
-      # 这里自己生成一把固定密钥并缓存：第一次构建生成，之后每次复用。
+      #
+      # 0.8.18：**改成从仓库 Secret 还原**。原来用 `actions/cache` 存这把密钥，
+      # 但缓存会在 7 天未访问 / 仓库总量超 10GB 时被清掉，然后下面的
+      # `keytool -genkeypair` 就现造一把新的 —— 实测 0.8.5 / 0.8.7 / 0.8.9 /
+      # 0.8.10~0.8.17 已经是**四把不同的证书**，跨这几版覆盖安装必然失败。
+      #
+      # 所以这里只做两件事：从 `secrets.CI_KEYSTORE_BASE64` 解出 p12；缺失就
+      # **直接构建失败**。绝不能再 fallback 到现生成 —— 静默换钥匙比构建失败
+      # 可怕得多，用户只会看到"下载完装不上"。
       - name: Restore CI debug keystore
-        uses: actions/cache@v4
-        with:
-          path: android/app/ci-debug.keystore
-          key: android-ci-debug-keystore-v1
-
-      - name: Create CI debug keystore
         shell: bash
+        env:
+          CI_KEYSTORE_BASE64: ${{ secrets.CI_KEYSTORE_BASE64 }}
         run: |
-          set -euxo pipefail
-          if [ ! -f android/app/ci-debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore android/app/ci-debug.keystore \
-              -storetype PKCS12 -storepass android -keypass android \
-              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10950 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          set -euo pipefail
+          if [ -z "${CI_KEYSTORE_BASE64:-}" ]; then
+            echo "缺少仓库 Secret CI_KEYSTORE_BASE64（base64 编码的 ci-debug.keystore）。" >&2
+            echo "签名一旦变化，已装用户将无法覆盖安装，因此这里直接失败而不是现生成一把新密钥。" >&2
+            exit 1
           fi
+          printf '%s' "$CI_KEYSTORE_BASE64" | base64 -d > android/app/ci-debug.keystore
           keytool -list -keystore android/app/ci-debug.keystore -storepass android | grep -i "androiddebugkey"
 
       - name: Build APK
@@ -128,6 +131,31 @@ jobs:
             "$build_tools/aapt2" dump badging "$apk" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^native-code"
           done
 
+      # 0.8.18：签名证书指纹硬断言。
+      #
+      # `Verify APK` 只能证明"签名没坏"，证明不了"签名还是那把钥匙"。历史上
+      # 已经因为缓存被清换过四次密钥，每次换完用户都得卸载重装。这里把期望
+      # 指纹写死（= 0.8.10 起线上所有安装包的那把），对不上就让构建失败，
+      # 免得又悄悄发出一批装不上的包。
+      #
+      # 真要换密钥时，必须同时改这里，并且清楚这意味着老用户只能卸载重装。
+      - name: Assert signing certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_tools="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n1)"
+          expected="4c467845d641eca462515baccce10c55b4b624c50e8c55d15f9f225107065231"
+          for apk in dist/android/*.apk; do
+            actual=$("$build_tools/apksigner" verify --print-certs "$apk" \
+              | sed -n 's/.*certificate SHA-256 digest: //p' | head -n1 | tr -d ' :' | tr 'A-Z' 'a-z')
+            echo "$apk -> $actual"
+            if [ "$actual" != "$expected" ]; then
+              echo "签名证书指纹不符（期望 $expected，实际 $actual）。" >&2
+              echo "已装用户将无法覆盖安装，构建终止。" >&2
+              exit 1
+            fi
+          done
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -150,6 +178,8 @@ jobs:
           sparse-checkout: |
             CHANGELOG.md
             pubspec.yaml
+            config/update.json
+            scripts/write_update_config.py
           sparse-checkout-cone-mode: false
 
       - name: Download APK
@@ -166,10 +196,14 @@ jobs:
           test -n "$(find artifacts -name '*.apk' -type f)"
 
       # 发布说明原来是在下面硬编码的 0.8.7 文案，之后每版都忘了改，
-      # 于是每个 Release 都写着 0.8.7。现在从 CHANGELOG.md 里
-      # 抓出当前版本的所有 `### <版本> · <主题>` 小节，生成主题清单。
-      # 版本号取自 pubspec.yaml，改版本时两处自动对齐。
+      # 于是每个 Release 都写着 0.8.7。现在从 CHANGELOG.md 里抓当前版本的
+      # `### <版本> · <主题>` 小节。版本号取自 pubspec.yaml，两处自动对齐。
       # （0.8.10：更新说明从 README 抽到 CHANGELOG.md，README 只留产品介绍。）
+      #
+      # 0.8.17：原来只抓标题里的主题文字，Release 正文就一行
+      # `- 画中画 + 河马站源`，点进去看不到任何细节（0.8.17 的正文是事后
+      # 用 API 补的）。现在把整节正文（标题 + 所有条目）搬过来，标题降一级
+      # `### x · y` → `## x · y`，遇到下一个 `### ` 或分隔线 `---` 收尾。
       - name: Compose release notes
         shell: bash
         run: |
@@ -179,19 +213,27 @@ jobs:
             echo "pubspec.yaml 里没读到版本号" >&2
             exit 1
           fi
-          titles=$(LC_ALL=C awk -v v="$version" '
+          notes=$(LC_ALL=C awk -v v="$version" '
             /^### / {
               if (index($0, "### " v " · ") == 1) {
-                print "- " substr($0, length("### " v " · ") + 1)
+                grab = 1
+                print "## " substr($0, 5)
+                next
+              } else if (grab) {
+                exit
               }
             }
-          ' CHANGELOG.md)
+            grab {
+              if ($0 ~ /^---[[:space:]]*$/) exit
+              print
+            }
+          ' CHANGELOG.md | sed -e 's/[[:space:]]*$//' | cat -s)
           {
-            echo "## $version"
-            echo
-            if [ -n "$titles" ]; then
-              printf '%s\n' "$titles"
+            if [ -n "$notes" ]; then
+              printf '%s\n' "$notes"
             else
+              echo "## $version"
+              echo
               echo "本版构建产物见下方附件，详细说明见 CHANGELOG.md。"
             fi
             echo
@@ -203,15 +245,95 @@ jobs:
           } > release_body.md
           echo "--- release_body.md ---"
           cat release_body.md
+          # Release 标题要带产品名（0.8.16）：原来直接用 tag 名，列表里只剩
+          # `v0.8.16` 这种光秃秃的版本号，看不出是哪个应用。版本号取自
+          # pubspec.yaml，跟 APK 里的一致；tag 带不带 `v` 都不影响。
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          # build 号也要带出去：发布后要靠它清掉同一 tag 下被取代的旧附件。
+          build=$(sed -n 's/^version:[[:space:]]*[0-9][0-9.]*+\([0-9][0-9]*\).*/\1/p' pubspec.yaml | head -n1)
+          if [ -z "$build" ]; then
+            echo "pubspec.yaml 里没读到 build 号" >&2
+            exit 1
+          fi
+          echo "APP_BUILD=$build" >> "$GITHUB_ENV"
+
+      # 附件前缀统一成 `zhenguojianTV`（0.8.16）。
+      #
+      # 产物本来由 `scripts/package_release.py` 按 `variant.slug` 命名，即
+      # `zhenguojian-<版本+build>-<abi>.apk`。这里只把前缀换成品牌全名，
+      # 版本号和 ABI 原样保留 —— **别重新拼整段文件名**：slug 拼出来的
+      # 已经是完整名字，再拼一层就成了
+      # `zhenguojianTV-0.8.16+95-zhenguojian-0.8.16+95-all.apk.apk`。
+      #
+      # `hongguojian-` 是只含红果的独立分发线，品牌不动，不在这里改。
+      - name: Rename APK for release
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for apk in artifacts/**/*.apk; do
+            base=$(basename "$apk")
+            renamed=$(printf '%s' "$base" | sed 's/^zhenguojian-/zhenguojianTV-/')
+            [ "$renamed" = "$base" ] && continue
+            mv "$apk" "$(dirname "$apk")/$renamed"
+            echo "renamed: $base -> $renamed"
+          done
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
-          name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          # 标题固定 `zhenguojianTV v<版本>`：品牌在前，版本在后。
+          name: zhenguojianTV v${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
           files: artifacts/**/*.apk
           body_path: release_body.md
+
+      # 0.8.20 第二批：同一个 tag 会连着发好几批（`+99` / `+100` / `+101`），
+      # 而 action-gh-release 只上传、从不删除，Release 页面上于是堆着好几套
+      # 同名 APK —— 手动点进去的人很可能选到旧包，装完发现修复没生效。
+      # 客户端不受影响（update.json 按 abi 只取 build 最大的），所以这一步
+      # 只解决"人看花眼"的问题，失败也不能把发布标成失败。
+      - name: Prune superseded assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+        run: |
+          python3 scripts/prune_release_assets.py \
+            --repo "${{ github.repository }}" \
+            --tag "$RELEASE_TAG" \
+            --keep-build "$APP_BUILD" || echo "::warning::旧附件清理失败，Release 页面上可能残留上一批包"
+
+      # 0.8.18：把最新版本信息同步到 config/update.json。
+      #
+      # 客户端检查更新的兜底通道就是 jsDelivr 上的这个文件（api.github.com
+      # 连不上时才会用到）。里面的 sha256 必须来自 GitHub 给的 digest，
+      # **手写必然出错** —— 校验值错了会把好包当成坏包丢掉，所以由发布流程生成。
+      #
+      # 注意顺序：release 已经发出去了，这一步失败只是"兜底配置没跟上"，
+      # 用 warning 收尾，不把整个发布标成失败。
+      - name: Sync config/update.json
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 打 tag 之后 main 可能又前进了（比如补工作流），先切到最新 main 再提交，
+          # 否则 push 会被判成非快进。
+          git fetch origin main
+          git checkout -B main FETCH_HEAD
+          python3 scripts/write_update_config.py "$RELEASE_TAG"
+          if git diff --quiet -- config/update.json; then
+            echo "config/update.json 已是最新"
+            exit 0
+          fi
+          git add config/update.json
+          git commit -m "chore(release): 同步 config/update.json 到 $RELEASE_TAG [skip ci]"
+          git push origin main || echo "::warning::config/update.json 推送失败，请手动同步"

@@ -15,6 +15,10 @@ type nativePlaybackChoice struct {
 	qualities     []int
 	streamSession string
 	created       time.Time
+	// 弹幕（0.8.11）：红果专属。播放会话建立时把剧集 id 和视频 id 记下来，
+	// 前端按会话拉弹幕，就不必再传一遍这两个 id（也避免传错）。
+	danmakuSeries string
+	danmakuVideo  string
 }
 
 func nativePlaybackChoices(media providerMedia, quality int) nativePlaybackChoice {
@@ -73,6 +77,7 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 		URL: media.URL, Headers: map[string]string{"User-Agent": userAgent, "Referer": media.Referer},
 		Key: hex.EncodeToString(media.CENCKey), Quality: media.Quality, Qualities: choice.qualities,
 		RouteIndex: choice.index, RouteCount: len(choice.media), Session: hex.EncodeToString(tokenBytes),
+		DanmakuID: choice.danmakuVideo,
 	}
 	if media.credentials != nil && !media.credentials.expires.IsZero() {
 		if !time.Now().Before(media.credentials.expires) {
@@ -81,12 +86,15 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 		plan.ExpiresAt = media.credentials.expires.UnixMilli()
 	}
 	choice.streamSession = ""
+	var stream *nativeStreamServer
 	{
+		// 先拿缓存再进锁：`mediaCache()` 自己会加 `engine.mu`，不能嵌套。
+		cache := engine.mediaCache()
 		engine.mu.Lock()
 		if engine.stream == nil {
-			engine.stream, err = newNativeStreamServer(engine.downloader)
+			engine.stream, err = newNativeStreamServer(engine.downloader, cache)
 		}
-		stream := engine.stream
+		stream = engine.stream
 		engine.mu.Unlock()
 		if err != nil {
 			return nativePlan{}, err
@@ -105,19 +113,33 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 			delete(engine.playbacks, token)
 		}
 	}
+	// 与 `nativeOpen` 的会话上限同理（0.8.13）：上限只用来防无限增长，
+	// **不能淘汰正在播的那一路**。首版按 `created` 挑最老的第 9 个淘汰，
+	// 预缓存多开几个会话就可能顶到上限，把用户正在看的播放当场释放
+	// （`nativeRelease` 会 cancel 掉 stream 会话，播放器随即收到 410）。
+	//
+	// 现在跳过"正在被播放器使用"的会话（判定见 `nativeHot`）；
+	// 全都热就允许临时超一点。注意锁序：这里已持有 `engine.mu`，
+	// 再取 `stream.mu` —— 反方向（持 `stream.mu` 取 `engine.mu`）的路径不存在。
 	if len(engine.playbacks) >= 8 {
 		oldest := ""
 		for token, old := range engine.playbacks {
+			if stream.nativeHot(old.streamSession, 2*time.Minute) {
+				continue
+			}
 			if oldest == "" || old.created.Before(engine.playbacks[oldest].created) {
 				oldest = token
 			}
 		}
-		expired = append(expired, engine.playbacks[oldest].streamSession)
-		delete(engine.playbacks, oldest)
+		if oldest != "" {
+			expired = append(expired, engine.playbacks[oldest].streamSession)
+			delete(engine.playbacks, oldest)
+		}
 	}
 	engine.playbacks[plan.Session] = choice
-	stream := engine.stream
 	engine.mu.Unlock()
+	// 弹幕坐标单独登记（0.8.19）：会话被挤掉 / 释放后弹幕仍然取得到。
+	engine.rememberDanmakuTarget(choice.danmakuSeries, choice.danmakuVideo)
 	if stream != nil {
 		for _, token := range expired {
 			stream.nativeRelease(token)

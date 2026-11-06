@@ -7,6 +7,7 @@ import 'local_profiles.dart';
 import 'local_snapshot.dart';
 import 'models.dart';
 import 'playback_preferences.dart';
+import 'playback_cache.dart';
 import 'download_preferences.dart';
 import 'catalog_sort.dart';
 import 'follow_state.dart';
@@ -113,8 +114,20 @@ class LocalStore extends ChangeNotifier {
   bool get canDownload => !locked && (profile.admin || profile.download);
   bool allowsSource(String source) =>
       !locked && SourceSite.isAvailable(source) && profile.allows(source);
-  List<SourceSite> get sources =>
-      SourceSite.values.where((site) => allowsSource(site.id)).toList();
+
+  /// 「黑洞」开关（0.8.15 第二批）：默认关闭。
+  ///
+  /// 关闭时黄豆 / 黄剧 / 黄果 / 51 / 野果这几站**不出现在站源列表**里，
+  /// 首页站源弹窗、站源管理、目录抓取都跟着少这一批。
+  /// 只影响"展示"，不影响权限判定（[allowsSource] 保持原样）：
+  /// 已经下载好的、历史记录里的黑洞剧集照常能播。
+  bool get blackholeEnabled => !locked && (_bool(_key('blackhole')) ?? false);
+
+  /// 当前**可展示**的站源：权限放行 + 黑洞开关过滤。
+  List<SourceSite> get sources => SourceSite.values
+      .where((site) => allowsSource(site.id))
+      .where((site) => blackholeEnabled || !SourceSite.isBlackhole(site.id))
+      .toList();
 
   void _loadLibrary() {
     _lanDocumentCache = null;
@@ -247,6 +260,13 @@ class LocalStore extends ChangeNotifier {
   /// 播放页还有一层自动降级（连续两次拿不到首帧时自动切软解），
   /// 这里只是给用户一个"手动强制"的开关。
   bool get tvCompatMode => !locked && (_bool(_key('tvCompatMode')) ?? false);
+
+  /// 弹幕开关（0.8.11）：默认开启。
+  ///
+  /// 只有红果的剧集有弹幕（播放计划里带 `danmakuId`），其余站源开关无效、
+  /// 入口也不显示。关掉后不再发起弹幕请求。
+  bool get danmakuEnabled =>
+      !locked && (_bool(_key('danmakuEnabled')) ?? true);
   String get source {
     if (locked) return '';
     final value = _string(_key('source')) ?? '';
@@ -275,6 +295,21 @@ class LocalStore extends ChangeNotifier {
       );
     } catch (_) {
       return const PlaybackPreferences();
+    }
+  }
+
+  /// 播放预缓存偏好（0.8.12）：预缓存集数与磁盘缓存上限。
+  ///
+  /// 与 `playback` 分开存：播放偏好是"每集都用"的即时设置，
+  /// 这里是"后台跑"的缓存策略，备份 / 迁移时也更方便单独处理。
+  PlaybackCachePreferences get playbackCachePreferences {
+    if (locked) return const PlaybackCachePreferences();
+    try {
+      return PlaybackCachePreferences.fromJson(
+        jsonDecode(_string(_key('precache')) ?? '{}') as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return const PlaybackCachePreferences();
     }
   }
 
@@ -435,6 +470,22 @@ class LocalStore extends ChangeNotifier {
   /// 电视兼容模式开关（0.8.3）。
   Future<void> setTvCompatMode(bool value) =>
       _setting(_key('tvCompatMode'), value);
+  /// 弹幕开关（0.8.11）。
+  Future<void> setDanmakuEnabled(bool value) =>
+      _setting(_key('danmakuEnabled'), value);
+  /// 「黑洞」站源开关（0.8.15 第二批）。
+  Future<void> setBlackholeEnabled(bool value) =>
+      _setting(_key('blackhole'), value);
+
+  /// 用口令解锁黑洞站源（0.8.16）：口令对了才落盘，返回是否解开。
+  ///
+  /// 只是挡住误触，不是权限判定 —— 和 [allowsSource] 无关，
+  /// 所以历史 / 已下载里的黑洞剧集一直都能播。
+  Future<bool> unlockBlackhole(String password) async {
+    if (password.trim() != SourceSite.blackholePassword) return false;
+    await setBlackholeEnabled(true);
+    return true;
+  }
   Future<void> setHideVip(bool value) => _setting(_key('hideVip'), value);
   Future<void> setSource(String value) {
     if (!allowsSource(value)) return Future.error(StateError('当前用户没有此站源权限'));
@@ -452,6 +503,12 @@ class LocalStore extends ChangeNotifier {
   Future<void> setPlaybackPreferences(PlaybackPreferences value) {
     PlaybackPreferences.fromJson(value.toJson());
     return _setting(_key('playback'), jsonEncode(value.toJson()));
+  }
+
+  /// 播放预缓存偏好（0.8.12）。
+  Future<void> setPlaybackCachePreferences(PlaybackCachePreferences value) {
+    PlaybackCachePreferences.fromJson(value.toJson());
+    return _setting(_key('precache'), jsonEncode(value.toJson()));
   }
 
   Future<void> setDownloadPreferences(DownloadPreferences value) {
@@ -843,6 +900,9 @@ class LocalStore extends ChangeNotifier {
             'downloadPreferences': jsonDecode(
               _string(_key('downloadPreferences', profile.id)) ?? '{}',
             ),
+            'precache': jsonDecode(
+              _string(_key('precache', profile.id)) ?? '{}',
+            ),
             'catalogView': jsonDecode(
               _string(_key('catalogView', profile.id)) ?? '{}',
             ),
@@ -905,6 +965,10 @@ class LocalStore extends ChangeNotifier {
       PlaybackPreferences.fromJson(
         Map<String, dynamic>.from(library['playback'] as Map? ?? {}),
       );
+      // 0.8.12：预缓存偏好也要过一遍校验，坏值直接拒掉整份备份。
+      PlaybackCachePreferences.fromJson(
+        Map<String, dynamic>.from(library['precache'] as Map? ?? {}),
+      );
       DownloadPreferences.fromJson(
         Map<String, dynamic>.from(library['downloadPreferences'] as Map? ?? {}),
       );
@@ -962,6 +1026,7 @@ class LocalStore extends ChangeNotifier {
         _key('downloadPreferences', profile.id): jsonEncode(
           library['downloadPreferences'] ?? {},
         ),
+        _key('precache', profile.id): jsonEncode(library['precache'] ?? {}),
         _key('catalogView', profile.id): jsonEncode(
           library['catalogView'] ?? {},
         ),

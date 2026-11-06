@@ -27,6 +27,10 @@ const (
 	sourceHuangju       = "huangju"
 	sourceCloudFront    = "cloudfront"
 	sourceEZDMW         = "ezdmw"
+	// 青空次元（番剧 / 剧场动画 / 特摄），0.8.15 接入。
+	sourceSorani = "sorani"
+	// 河马剧场，0.8.17 接入。
+	sourceHema = "hema"
 
 	providerMaxBodyBytes = 20 * 1024 * 1024
 	providerTimeout      = 12 * time.Second
@@ -56,16 +60,19 @@ var (
 	huangguoAISlugs     = []string{"recommend", "newest", "ai-duanju", "ai-manju", "ai-huanlian", "ai-mogai", "ranks/hot"}
 	huangguoAITypeNames = map[string]string{"recommend": "精选推荐", "newest": "最近上新", "ai-duanju": "AI成人短剧", "ai-manju": "AI成人漫剧", "ai-huanlian": "AI换脸", "ai-mogai": "AI魔改", "ranks/hot": "排行榜"}
 
-	reDetailHref      = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*/detail/([^"'/?#]+)[^"']*)["'][^>]*>.*?</a>`)
-	reDramaCardStart  = regexp.MustCompile(`(?is)<div\b[^>]*class=["'][^"']*\bhg-drama-card\b[^"']*["'][^>]*>`)
-	reVideoCard       = regexp.MustCompile(`(?is)<article\b[^>]*class=["'][^"']*\bvideo-card\b[^"']*["'][^>]*>.*?</article>`)
-	reAnyArticle      = regexp.MustCompile(`(?is)<article\b[^>]*>.*?</article>`)
-	reHuangguoLink    = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*/(?:series|video)/([^"'/?#]+)[^"']*)["'][^>]*>.*?</a>`)
-	reAIEpisodeLink   = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*/video/[^"']+)["'][^>]*>.*?</a>`)
-	reTitleTag        = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-	reH1Tag           = regexp.MustCompile(`(?is)<h1[^>]*>(.*?)</h1>`)
-	reDescMeta        = regexp.MustCompile(`(?is)<meta\b[^>]*(?:name|property)=["'](?:description|og:description)["'][^>]*content=["']([^"']+)["'][^>]*>`)
-	reEpisodeNumber   = regexp.MustCompile(`(?i)(?:第\s*0*(\d+)\s*(?:集|话|期)|(?:更新至|共|全)\s*0*(\d+)\s*(?:集|话|期)|(?:episode|ep)\s*#?\s*0*(\d+))`)
+	reDetailHref     = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*/detail/([^"'/?#]+)[^"']*)["'][^>]*>.*?</a>`)
+	reDramaCardStart = regexp.MustCompile(`(?is)<div\b[^>]*class=["'][^"']*\bhg-drama-card\b[^"']*["'][^>]*>`)
+	reVideoCard      = regexp.MustCompile(`(?is)<article\b[^>]*class=["'][^"']*\bvideo-card\b[^"']*["'][^>]*>.*?</article>`)
+	reAnyArticle     = regexp.MustCompile(`(?is)<article\b[^>]*>.*?</article>`)
+	reHuangguoLink   = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*/(?:series|video)/([^"'/?#]+)[^"']*)["'][^>]*>.*?</a>`)
+	reAIEpisodeLink  = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']*/video/[^"']+)["'][^>]*>.*?</a>`)
+	reTitleTag       = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	reH1Tag          = regexp.MustCompile(`(?is)<h1[^>]*>(.*?)</h1>`)
+	reDescMeta       = regexp.MustCompile(`(?is)<meta\b[^>]*(?:name|property)=["'](?:description|og:description)["'][^>]*content=["']([^"']+)["'][^>]*>`)
+	// 0.8.11：补 `ep-2` / `ep_2` 这种 URL 里的集号写法。
+	// 黄果详情页的选集链接是 `/video/<id>/ep-<n>/`，原来只认 `ep 2`，
+	// 从链接推出来的集号全部落空，只能按 DOM 顺序编号。
+	reEpisodeNumber   = regexp.MustCompile(`(?i)(?:第\s*0*(\d+)\s*(?:集|话|期)|(?:更新至|共|全)\s*0*(\d+)\s*(?:集|话|期)|(?:episode|ep)\s*[-_#]?\s*0*(\d+))`)
 	reResolution      = regexp.MustCompile(`(?i)RESOLUTION\s*=\s*(\d+)x(\d+)`)
 	reBandwidth       = regexp.MustCompile(`(?i)(?:AVERAGE-)?BANDWIDTH\s*=\s*(\d+)`)
 	reDataHLS         = regexp.MustCompile(`(?is)data-hls=["']([^"']+)["']`)
@@ -86,12 +93,38 @@ type providerEpisode struct {
 	Locked bool
 }
 
+// normalizeProviderSourceID 把站点给的剧集标识收敛成唯一写法。
+//
+// 这是 id 唯一性的第一道地基，**必须所有站源共用**：同一个剧集在列表页 /
+// 详情页 / 推荐位 / 搜索结果里，写法经常差一点点 —— 尾斜杠、`?` 后面的追踪
+// 参数、`#` 锚点、HTML 属性里带出来的引号。只要有一处没归一，同一部剧就会
+// 算出两个 id，合并时变成两条，按 id 去重也救不回来（id 真的不一样）。
+//
+// 只做"写法归一"，不改语义：
+//   - 保留内部的 `/`：黄果剧场的 id 本身就是 `video/<code>` / `series/<code>`；
+//   - 不做大小写折叠：黄果 / 黄豆的 id 是 base62 / hex，大小写敏感。
+func normalizeProviderSourceID(raw string) string {
+	id := strings.TrimSpace(html.UnescapeString(raw))
+	id = strings.Trim(id, " \t\r\n\"'")
+	if cut := strings.IndexAny(id, "?#"); cut >= 0 {
+		id = strings.TrimRight(id[:cut], " \t/")
+	}
+	return strings.Trim(id, "/")
+}
+
+// providerDramaID 生成剧集的全局唯一标识：`<规范站源>:<归一化 sourceID>`。
+//
+// 两条硬规矩：
+//  1. **站源必须走 canonicalProviderSource**。`huangguo` 是 `huangguoai` 的别名，
+//     如果哪天某个调用点传了别名，同一部剧就会变成 `huangguo:123` 和
+//     `huangguoai:123` 两套 id —— 桶是同一个，去重却挡不住。
+//  2. **sourceID 必须归一化**，见 normalizeProviderSourceID。
 func providerDramaID(source, sourceID string) string {
-	return source + ":" + strings.TrimSpace(sourceID)
+	return canonicalProviderSource(source) + ":" + normalizeProviderSourceID(sourceID)
 }
 
 func providerChapterID(source, sourceID, chapterKey string) string {
-	return source + ":" + strings.TrimSpace(sourceID) + ":" + strings.TrimSpace(chapterKey)
+	return canonicalProviderSource(source) + ":" + normalizeProviderSourceID(sourceID) + ":" + normalizeProviderSourceID(chapterKey)
 }
 
 func splitProviderDramaID(id string) (source, sourceID string, ok bool) {
@@ -105,7 +138,8 @@ func splitProviderDramaID(id string) (source, sourceID string, ok bool) {
 
 func isHuangguoProviderSource(source string) bool {
 	switch canonicalProviderSource(source) {
-	case sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo, sourceHuangju, sourceDuanju51, sourceYeguo, sourceXiangjiao, sourceCloudFront, sourceEZDMW:
+	case sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo, sourceHuangju, sourceDuanju51, sourceYeguo, sourceXiangjiao, sourceCloudFront, sourceEZDMW,
+		sourceHuaguo, sourceWangguo, sourceFaguo, sourceWuguo, sourceSorani, sourceHema:
 		return true
 	default:
 		return false
@@ -133,6 +167,24 @@ func canonicalProviderSource(source string) string {
 		return sourceXiangjiao
 	case "ezdmw", "e站", "e站动漫", "ezdmw.org", "m.ezdmw.org", "www.ezdmw.org":
 		return sourceEZDMW
+	// 0.8.15：青空次元（番剧）。名字 / 域名都收进来，局域网同步与旧存档里的
+	// `sorani:123` 才能正确回落到这个站源。
+	case "sorani", "青空", "青空次元", "青空动漫", "www.sorani.net", "sorani.net", "api.sorani.cc":
+		return sourceSorani
+	// 0.8.17：河马剧场。名字 / 域名都收进来，局域网同步与旧存档里的
+	// `hema:41000115794` 才能正确回落到这个站源。
+	case "hema", "河马", "河马剧场", "河马短剧", "www.kuaikaw.cn", "kuaikaw.cn":
+		return sourceHema
+	// 0.8.11：苹果CMS 采集站。名字 / 域名都收进来，局域网同步与旧存档里的
+	// `huaguo:123` 才能正确回落到对应站源。
+	case "huaguo", "花果", "花生", "www.zywest263.com", "zywest263.com":
+		return sourceHuaguo
+	case "wangguo", "网果", "短剧网", "www.duanju2.com", "duanju2.com":
+		return sourceWangguo
+	case "faguo", "发果", "168影院", "www.xzyx168.com", "xzyx168.com":
+		return sourceFaguo
+	case "wuguo", "伍果", "五五", "www.duanju55.com", "duanju55.com":
+		return sourceWuguo
 	case "cloudfront":
 		return sourceCloudFront
 	default:
@@ -245,6 +297,8 @@ func (d *Downloader) GetHuangguoChapters(ctx context.Context, source, sourceID s
 		return d.fetchLegacyChapters(ctx, sourceID)
 	case sourceEZDMW:
 		return d.fetchEZDMWChapters(ctx, sourceID)
+	case sourceHuaguo, sourceWangguo, sourceFaguo, sourceWuguo:
+		return d.fetchMaccmsChapters(ctx, canonicalProviderSource(source), sourceID)
 	default:
 		return "", nil, fmt.Errorf("unsupported provider source: %s", source)
 	}
@@ -268,7 +322,28 @@ func (d *Downloader) fetchHuangguoAIDetail(ctx context.Context, sourceID string)
 		return Drama{}, nil, err
 	}
 	drama := huangguoDetailMetadata(body, detailURL, sourceHuangguoAI, sourceID)
-	episodes := buildAIEpisodes(body, detailURL, sourceID)
+	title := drama.DisplayTitle()
+	// 0.8.11 修复（用户反馈"外面显示 42 集，进内容页只有 2 集"）：
+	//
+	// 原来优先用 `videoInitialData.epPlaySrcs`，**有数据就不再扫 HTML**。
+	// 但站点改版后这个字段只下发部分集的直链（按需签发，实测有的剧只剩 2 条），
+	// 于是分集列表被截断成 2 集，而列表卡片的总集数来自 `data-ep-base`，
+	// 两边对不上。
+	//
+	// 现在反过来：**页面里的选集链接是权威的全量列表**（服务端渲染，
+	// 形如 `/video/<id>/ep-<n>/`），先扫它；`epPlaySrcs` 只作为
+	// "已经知道播放地址"的补充，按集号灌进对应分集。
+	htmlEpisodes := parseHuangguoAIEpisodes(body, detailURL, sourceID)
+	initialEpisodes := parseAIVideoInitialEpisodes(body, detailURL)
+	episodes := mergeHuangguoAIEpisodes(htmlEpisodes, initialEpisodes)
+	// 最后一层兜底：页面选集区抓漏时，按「更新至 N 集」补齐，保证内页集数
+	// 和列表卡片一致（见 padHuangguoAIEpisodes 的注释）。
+	episodes = padHuangguoAIEpisodes(episodes, detailURL, sourceID, nativeEpisodeCount(drama.TotalEpisode))
+	if len(episodes) == 0 {
+		if media := parseAIVideoURL(body, detailURL); media != "" {
+			episodes = []providerEpisode{{Key: "1", Title: title, URL: detailURL, Index: 1, HLS: media}}
+		}
+	}
 	if len(episodes) == 0 {
 		return drama, nil, nil
 	}
@@ -906,7 +981,11 @@ func parseHuangguoAIEpisodes(rawHTML, pageURL, sourceID string) []providerEpisod
 		}
 		seen[key] = true
 		seen[fullURL] = true
-		idx := episodeIndex(title, 0)
+		idx := episodeIndex(key, 0)
+		if idx <= 0 {
+			// 链接里没带集号（第 1 集就是 `/video/<id>/`），退回按钮文字。
+			idx = episodeIndex(title, 0)
+		}
 		if idx <= 0 {
 			idx = len(episodes) + 1
 		}
@@ -987,25 +1066,14 @@ func parseAIVideoURL(rawHTML, pageURL string) string {
 	return ""
 }
 
-var reVideoInitialData = regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
-var reAIPageEpisode = regexp.MustCompile(`/ep-(\d+)(?:/|$)`)
-var reDigits = regexp.MustCompile(`(\d+)`)
-
-func aiInitialData(rawHTML string) map[string]any {
-	m := reVideoInitialData.FindStringSubmatch(rawHTML)
+func parseAIVideoInitialData(rawHTML, pageURL string) string {
+	re := regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
+	m := re.FindStringSubmatch(rawHTML)
 	if len(m) < 2 {
-		return nil
+		return ""
 	}
 	var data map[string]any
 	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &data); err != nil {
-		return nil
-	}
-	return data
-}
-
-func parseAIVideoInitialData(rawHTML, pageURL string) string {
-	data := aiInitialData(rawHTML)
-	if data == nil {
 		return ""
 	}
 	if media := normalizeProviderMediaURL(pageURL, mapString(data, "videoSrc", "videoUrl", "playUrl")); media != "" {
@@ -1016,7 +1084,7 @@ func parseAIVideoInitialData(rawHTML, pageURL string) string {
 		return ""
 	}
 	preferred := firstNonEmpty(mapString(data, "ep", "episode"))
-	if m := reAIPageEpisode.FindStringSubmatch(pageURL); len(m) > 1 {
+	if m := regexp.MustCompile(`/ep-(\d+)(?:/|$)`).FindStringSubmatch(pageURL); len(m) > 1 {
 		preferred = m[1]
 	}
 	if preferred != "" {
@@ -1083,11 +1151,16 @@ func huangguoInNonEpisodeBlock(rawHTML string, position int) bool {
 
 // 从 videoInitialData 解析**全部分集**。
 //
-// 站点 2026-10 改版后 epPlaySrcs 只带「当前集 + 下一集」等少量限时地址，
-// 这里退化为兜底：集数全集以集数网格（parseAIEpisodeGrid）为准。
+// 这是站点的权威分集数据：epPlaySrcs 是 "集数 -> 播放地址" 的映射，
+// 比在 HTML 里扫链接可靠得多（HTML 里混有热搜榜、猜你喜欢等推荐位）。
 func parseAIVideoInitialEpisodes(rawHTML, pageURL string) []providerEpisode {
-	data := aiInitialData(rawHTML)
-	if data == nil {
+	re := regexp.MustCompile(`(?is)<script\b[^>]*id=["']videoInitialData["'][^>]*>(.*?)</script>`)
+	m := re.FindStringSubmatch(rawHTML)
+	if len(m) < 2 {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &data); err != nil {
 		return nil
 	}
 	episodes := make([]providerEpisode, 0, 8)
@@ -1149,152 +1222,93 @@ func parseAIVideoInitialEpisodes(rawHTML, pageURL string) []providerEpisode {
 	return episodes
 }
 
-// aiEpisodeIndex 从集数键（"1"、"02"、"ep-3"、data-ep-id）里取集号。
-func aiEpisodeIndex(value any) int {
-	switch x := value.(type) {
-	case float64:
-		if x > 0 {
-			return int(x)
-		}
-	case json.Number:
-		if n, err := x.Int64(); err == nil && n > 0 {
-			return int(n)
-		}
-	case string:
-		text := strings.TrimSpace(x)
-		if n, err := strconv.Atoi(text); err == nil && n > 0 {
-			return n
-		}
-		if m := reDigits.FindStringSubmatch(text); len(m) > 1 {
-			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
-				return n
-			}
-		}
+// 合并"页面选集链接"与"epPlaySrcs 直链"两份分集数据。
+//
+// [paged] 来自 HTML 里的选集区，是**全量**但通常不含播放地址；
+// [initial] 来自 videoInitialData，含播放地址但**可能只有部分集**。
+//
+// 规则：以 [paged] 为骨架（集数、顺序、页面链接都取自它），
+// 按集号把 [initial] 的直链灌进去；[paged] 没覆盖到的集再用 [initial] 补。
+// 只有 [paged] 为空时才整份退回 [initial]。
+func mergeHuangguoAIEpisodes(paged, initial []providerEpisode) []providerEpisode {
+	if len(paged) == 0 {
+		return initial
 	}
-	return 0
-}
-
-// aiEpisodeSources 取内嵌 JSON 已覆盖集的播放地址。
-// 站点改版后 epPlaySrcs 只带「当前集 + 下一集」，只能当地址缓存用。
-func aiEpisodeSources(data map[string]any) map[int]string {
-	sources := map[int]string{}
-	if rows, ok := data["epPlaySrcs"].(map[string]any); ok {
-		for key, value := range rows {
-			if index := aiEpisodeIndex(key); index > 0 {
-				sources[index] = fmt.Sprint(value)
-			}
-		}
+	if len(initial) == 0 {
+		return paged
 	}
-	return sources
-}
-
-func aiCurrentEpisode(data map[string]any, pageURL string) int {
-	if m := reAIPageEpisode.FindStringSubmatch(pageURL); len(m) > 1 {
-		if index := aiEpisodeIndex(m[1]); index > 0 {
-			return index
-		}
-	}
-	return aiEpisodeIndex(mapString(data, "ep", "episode"))
-}
-
-// parseAIEpisodeGrid 解析详情页集数网格（hg-web-play__ep-grid）里的全集。
-// 每集的标题用网格里的原始文本；当前集的 href 是剧集首页（/video/{id}/），
-// 播放时 parseAIVideoURL 会按内嵌 JSON 的 ep 字段取到正确地址。
-func parseAIEpisodeGrid(rawHTML, pageURL, sourceID string) []providerEpisode {
-	grid := huangguoClassBlock(rawHTML, "hg-web-play__ep-grid")
-	if grid == "" {
-		return nil
-	}
-	episodes := map[int]providerEpisode{}
-	for _, m := range reAIEpisodeLink.FindAllStringSubmatchIndex(grid, -1) {
-		if len(m) < 4 || m[2] < 0 || m[3] < 0 {
+	media := make(map[int]string, len(initial))
+	for _, ep := range initial {
+		if ep.HLS == "" || ep.Index <= 0 {
 			continue
 		}
-		href := grid[m[2]:m[3]]
-		index := aiEpisodeIndex(extractAttr(grid[m[0]:m[1]], "data-ep-id"))
-		if index <= 0 {
-			index = aiEpisodeIndex(aiEpisodeKey(href, sourceID))
+		if _, exists := media[ep.Index]; !exists {
+			media[ep.Index] = ep.HLS
 		}
-		if index <= 0 {
+	}
+	merged := make([]providerEpisode, 0, len(paged)+len(initial))
+	covered := make(map[int]bool, len(paged))
+	for _, ep := range paged {
+		if ep.Index > 0 {
+			covered[ep.Index] = true
+			if ep.HLS == "" {
+				ep.HLS = media[ep.Index]
+			}
+		}
+		merged = append(merged, ep)
+	}
+	for _, ep := range initial {
+		if ep.Index <= 0 || covered[ep.Index] {
 			continue
 		}
-		episodes[index] = providerEpisode{
-			Key:   firstNonEmpty(aiEpisodeKey(href, sourceID), strconv.Itoa(index)),
-			Title: firstNonEmpty(cleanText(grid[m[0]:m[1]]), fmt.Sprintf("第%d集", index)),
-			URL:   resolveProviderURL(pageURL, href),
-			Index: index,
-		}
+		covered[ep.Index] = true
+		merged = append(merged, ep)
 	}
-	if len(episodes) == 0 {
-		return nil
-	}
-	out := make([]providerEpisode, 0, len(episodes))
-	for _, episode := range episodes {
-		out = append(out, episode)
-	}
-	sortProviderEpisodes(out)
-	return out
+	sortProviderEpisodes(merged)
+	return merged
 }
 
-// buildAIEpisodes 汇总黄果 AI 分集：集数网格是权威全集，
-// 内嵌 JSON（epPlaySrcs / videoSrc）只负责给已覆盖的集补播放地址；
-// 没覆盖的集 VideoURL 留空，播放时按 PageURL 现取。
-func buildAIEpisodes(body, detailURL, sourceID string) []providerEpisode {
-	initial := aiInitialData(body)
-	sources := aiEpisodeSources(initial)
-	current := aiCurrentEpisode(initial, detailURL)
-	if current > 0 && sources[current] == "" {
-		if media := normalizeProviderMediaURL(detailURL, mapString(initial, "videoSrc", "videoUrl", "playUrl")); media != "" {
-			sources[current] = media
+// 按详情页的总集数把分集列表补全。
+//
+// 站点的选集区会随改版变化（折叠、懒加载、换 class），抓漏几集是常态；
+// 而「更新至 42 集」这种文案一直都在。列表卡片上的集数本来就来自这个数字，
+// 内页必须和它对齐，否则用户看到的就是"外面 42 集、进去 2 集"。
+//
+// 补出来的分集只带页面地址（`/video/<id>/ep-<n>/`），播放地址留空 ——
+// `resolveProviderMedia` 对黄果本来就是按 PageURL 现场取流的，
+// 所以补齐的集点进去照样能播，不会变成死链。
+func padHuangguoAIEpisodes(episodes []providerEpisode, detailURL, sourceID string, total int) []providerEpisode {
+	if total <= 0 || len(episodes) >= total {
+		return episodes
+	}
+	parsed, err := url.Parse(detailURL)
+	if err != nil || parsed.Host == "" {
+		return episodes
+	}
+	seen := make(map[int]bool, len(episodes))
+	for _, ep := range episodes {
+		if ep.Index > 0 {
+			seen[ep.Index] = true
 		}
 	}
-	episodes := parseAIEpisodeGrid(body, detailURL, sourceID)
-	if len(episodes) == 0 {
-		episodes = parseAIVideoInitialEpisodes(body, detailURL)
-	}
-	if len(episodes) == 0 {
-		episodes = parseHuangguoAIEpisodes(body, detailURL, sourceID)
-	}
-	if len(episodes) == 0 {
-		if media := sources[current]; media != "" {
-			return []providerEpisode{{Key: strconv.Itoa(current), URL: detailURL, Index: current, HLS: media}}
+	origin := parsed.Scheme + "://" + parsed.Host
+	escaped := url.PathEscape(sourceID)
+	for i := 1; i <= total; i++ {
+		if seen[i] {
+			continue
 		}
-		if media := parseAIVideoURL(body, detailURL); media != "" {
-			return []providerEpisode{{Key: "1", URL: detailURL, Index: 1, HLS: media}}
+		link := fmt.Sprintf("%s/video/%s/ep-%d/", origin, escaped, i)
+		if i == 1 {
+			link = fmt.Sprintf("%s/video/%s/", origin, escaped)
 		}
-		return nil
-	}
-	known := map[int]bool{}
-	for _, episode := range episodes {
-		known[episode.Index] = true
-	}
-	appendMissing := func(index int) {
-		if index <= 0 || known[index] {
-			return
-		}
-		known[index] = true
 		episodes = append(episodes, providerEpisode{
-			Key:   strconv.Itoa(index),
-			Title: fmt.Sprintf("第%d集", index),
-			URL:   resolveProviderURL(detailURL, fmt.Sprintf("/video/%s/ep-%d/", sourceID, index)),
-			Index: index,
+			Key:   fmt.Sprintf("ep-%d", i),
+			Title: fmt.Sprintf("第%d集", i),
+			URL:   link,
+			Index: i,
 		})
 	}
-	appendMissing(current)
-	indexes := make([]int, 0, len(sources))
-	for index := range sources {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
-	for _, index := range indexes {
-		appendMissing(index)
-	}
 	sortProviderEpisodes(episodes)
-	for i := range episodes {
-		if episodes[i].HLS == "" {
-			episodes[i].HLS = sources[episodes[i].Index]
-		}
-	}
 	return episodes
 }
 

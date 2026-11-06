@@ -92,6 +92,11 @@ class CatalogAutoUpdater extends ChangeNotifier {
     }
     _running = true;
     try {
+      // 剧集快照不再在这里自动拉（0.8.20）。
+      //
+      // 用户要求"后续全改为手动同步，而不是自动同步"：快照入口挪到
+      // 「设置 → 站源管理 → 同步远程数据源」，那里会显示远端数据的同步时间。
+      // 这里的定时任务只做原来的现场抓取，行为和 0.8.19 之前完全一致。
       final started = <String>[];
       for (final source in sources) {
         if (!_valid) return;

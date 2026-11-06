@@ -32,6 +32,8 @@ python3 scripts/build_android.py --tv --universal --all-sources
 
 工作流固定 Flutter `3.47.4`、Go `1.24.1`、NDK `28.2.13676358`，与本机脚本一致。
 
+**同一个 tag 只会留最新一批附件**：0.8.20 起同一个 tag 会连发好几批（`+99` / `+100` / `+101`），而 `action-gh-release` 只上传、从不删除。发布后 `scripts/prune_release_assets.py` 会把同 tag 下 build 号更小的 `.apk` 删掉，只留当前这版的三套 ABI —— 否则 Release 页面上堆着几套同名包，手动下载的人很容易选到旧包，装完以为修复没生效。解析不出 build 号的文件（老命名 `zhenguojian-TV-v0.8.6-all.apk`、`SHA256SUMS.txt`）一律不动。客户端不受影响，`config/update.json` 本来就按 abi 只取 build 最大的。
+
 ### 出包校验
 
 CI 会用官方工具逐个验，任何一项不过直接失败：
@@ -44,7 +46,51 @@ CI 会用官方工具逐个验，任何一项不过直接失败：
 
 ### 签名
 
-未配置 `android/key.properties` 时，工作流会生成并缓存 `android/app/ci-debug.keystore` 作为固定调试签名（Gradle 回落顺序 `release` → `ciDebug` → `debug`）。要正式上架请自行放置 `key.properties` 指向真实发布密钥。
+签名密钥从仓库 Secret `CI_KEYSTORE_BASE64` 还原（base64 的 keystore），**缺失即构建失败**。`Verify APK` 之后还有一道 `Assert signing certificate` 硬断言：实际证书指纹必须等于预期值，不符当场终止。
+
+历史上密钥存在 `actions/cache` 里，缓存一被清理就现造一把新的，导致 0.8.5 / 0.8.7 / 0.8.9 / 0.8.10~0.8.18 是**四把不同的证书**，跨这几版覆盖安装必然报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。别退回 keytool 现场生成 —— 换一次签名就等于让所有老用户卸载重装。
+
+未配置 `android/key.properties` 时，Gradle 按 `release` → `ciDebug` → `debug` 的顺序回落。
+
+## 剧集快照（`catalog` 分支）
+
+`Build Catalog Snapshot` 工作流把各站源的剧集目录导出、加密、提交到 `catalog` 分支。0.8.20 起分成两条路径，**定时只剩增量**：
+
+| 触发 | cron | 模式 | 说明 |
+| --- | --- | --- | --- |
+| 每 6 小时 | `20 */6 * * *` | 增量 | `-pages 3` + 1 轮 + `--merge`，只翻前几页拿新剧，其余由上一轮快照按 id 补齐 |
+| 手动 | 无（`workflow_dispatch`） | 全量 | `-pages 2000` + 3 轮取并集，整站重抓，清掉增量期间残留的下架剧 |
+
+**全量故意不进 cron**：14 个站源整站翻到底、每天一轮，请求量和规律性都太显眼，容易触发对端风控。需要时去 Actions 页面手动跑一次 `mode=full` 就够了 —— 手动触发的界面上还能填 `mode`（`incremental` / `full`）、`pages`、`passes`、`sources`，`pages` / `passes` 留空按模式取默认值（3 / 2000、1 / 3）。
+
+**为什么全量要跑多轮**：红果的 App 分类接口每次返回的切片都不一样 —— 2026-11-02 同一天四轮分别拿到 1331 / 2803 / 3217 / 3595 条，两两交集只有 1200~2100，每轮都「看起来翻到底了」。任何单轮都不能当全站目录（用户那边本机反而比远端多就是这么来的）。并集是收敛的：2803 → 3903 → 3903，所以全量跑 3 轮、没有新增就提前收工。合并逻辑在 `scripts/merge_catalog_dumps.py`，每轮换一个 `-dir` 拿到新会话。
+
+**翻页上限也必须给足**：`-pages 60` 会把红果截成 2868 部，而且以前是**静默**的。现在 `dumpSource` 撞到上限会打 `[warn] … 快照不完整`，工作流转成 Actions 注解，看到就该调大 `pages`。
+
+**快照不允许比上一轮小**：全量模式如果本轮抓到的剧**上一轮全都有**（一条新剧都没有），说明接口又只吐了子集，此时保留上一轮而不是把 2000 部缩成几十部。真·缩水（有新剧、老剧下架）照旧按本轮写。
+
+**id 是合并的唯一依据，三层都要守住**：`providerDramaID(source, sourceID)` 固定拼成 `站源:id`，所以跨站源不会撞号；`catalogdump` 翻页时按 id 去重；`build_catalog_snapshot.py` 发布前再 `dedupe_items` 收一遍（同时检查 id 前缀是否属于本文件对应的站源，串了只告警不丢数据）。客户端 `mergeNativeCatalog` 两个方向都按 id 合并。种子阶段还会校验「文件名 / 条目 source / id 前缀」三者一致，不一致的条目直接跳过并在站源卡片上留提示 —— 塞错桶比少一条难排查得多。实测线上 14 源 119219 条：id 全唯一、无空 id、无跨源撞号、前缀全对。
+
+**id 的写法也要归一**（`normalizeProviderSourceID`）：同一个剧集在列表页 / 详情页 / 推荐位给出的 sourceID 常差一点点 —— 尾斜杠、`?` 后的追踪参数、`#` 锚点、HTML 属性带出来的引号。只要一处没归一就是两条剧，按 id 去重救不回来（id 真的不一样）。规则：去首尾空白/斜杠/引号、砍掉 `?#` 之后、站源走 `canonicalProviderSource`；**内部 `/` 保留**（黄果剧场 id 就是 `video/<code>`），**不做大小写折叠**（黄果 / 黄豆是 base62 / hex）。归一化必须幂等 —— 线上 119219 条 id 一条都不该被改动。`站源:` 这种只有前缀没有尾巴的 id 在导出、发布、种子三处都会被丢掉：解析不出 provider，也没有稳定的去重键。
+
+```
+index.json                    明文索引：version / generatedAt / digest / sources{file, sha256, count}
+sources/<站源>.json.enc       [12 字节 nonce][AES-256-GCM 密文]
+```
+
+- 密钥 = `sha256("zhenguojianTV/catalog-snapshot/v1")`，与 `native/core/app_catalog_snapshot.go` 的 `catalogSnapshotSecret`、`scripts/build_catalog_snapshot.py` 的 `SECRET` 三处必须一致。**密钥随 APK 分发，这是混淆不是安全边界。**
+- 客户端走 jsDelivr 分支引用（边缘缓存 12 小时），兜底 `gh-proxy.org` 代理 raw。`GeneratedAt` 没变就一个文件都不下载。
+- **内容不变就不发新版**：nonce 由明文派生（`sha256(明文)[:12]`），密文里不写时间戳，`index.json` 用 `digest` 判断内容是否真的变了 —— 否则每轮都会产出一版「新快照」，客户端跟着重下几 MB。**增量模式同样要满足这条**，所以 `--merge` 的顺序是确定的：本轮抓到的在前（站点翻页顺序稳定），上一轮独有的按原顺序跟在后面，绝不按时间重排。
+- 客户端只下载**用户启用的站源**（整份快照 14 源约 42MB，只开红果只需 4.4MB）；后来又开了别的源，下一轮会补下缺的那些。单个文件最大 11MB（网果 / 无果各 3.8 万部），所以原生侧单文件超时 90 秒、整轮 400 秒 —— 20 秒对应 550KB/s，弱网下必失败。
+- **客户端只在手动触发时同步**（0.8.20）：入口是「设置 → 站源管理 → 同步远程数据源」，首页 `initState` 与 `CatalogAutoUpdater.runNow()` 都不再自动拉快照。页面上那行「远端站源数据：…」来自 `catalogSnapshotInfo` 这个只读 action（只拉 `index.json`，不下载任何站源文件）。
+- **按站源同步**（0.8.20）：每张站源卡片上还有一个「同步远端」按钮（仅当远端快照里确实有这个站源时才出现），点它只传这一个站源 id 下去，原生只下载那一份文件。全量按钮和单站源按钮共用一个互斥门 —— 原生那侧要读改写状态文件，并发会把「已同步的站源」记错。
+- 加密/索引由 `scripts/build_catalog_snapshot.py` 完成，导出由 `native/cmd/catalogdump` 完成；单测在 `scripts/test_build_catalog_snapshot.py` 与 `native/core/app_catalog_snapshot_test.go`。
+- 分支用 `git push --force` 只保留一个提交 —— 一天要变好几次，留历史会让仓库无限膨胀；jsDelivr 按分支名取最新，不受影响。
+- 抓不到的站源会沿用上一轮的文件（`previous_entries`），不会因为 runner 一时连不上就把某个站源从快照里抹掉。
+- **花果 / 网果 / 发果在境外 runner 上是 HTTP 403**（Cloudflare / 站点自己的 WAF 按 IP 拦，换 UA 无效），CI 抓不到它们；App 在国内网络下照常现场抓取。
+  - 花果、网果已用国内机器跑 `catalogdump` 导出后手工提交到 `catalog` 分支（2151 / 1440 条），之后的 CI 轮次靠 `previous_entries` 一直沿用这份，不会因为抓不到就被抹掉。
+  - 发果从国内也拿不到（Cloudflare 直接 403），`index.json` 里没有它。
+  - `dumpSource` 有一条硬规矩：**翻页中途出错就算整站失败**，不能把「第 1 页成功、第 2 页 403」的几十条当成完整目录去覆盖上一轮（花果真实目录 2000+，早期就踩过 36 条顶掉全量的坑）。唯一例外是站点把页码夹住（黄剧只服务到第 100 页，请求 101 会回 100），那属于正常收尾。
 
 ## 源码结构
 
@@ -52,8 +98,9 @@ CI 会用官方工具逐个验，任何一项不过直接失败：
 | --- | --- |
 | `lib/` | 页面、播放器、本地用户、FFI、下载与媒体处理 |
 | `native/core/`、`native/bridge/` | Go 站源核心、缓存、下载与 C ABI |
+| `native/cmd/` | 辅助工具（`catalogdump` 导出剧集快照） |
 | `android/`、`windows/`、`ios/` | 平台工程与必要资源 |
-| `scripts/`、`.github/workflows/` | 构建、签名、验证与版本快照 |
+| `scripts/`、`.github/workflows/` | 构建、签名、验证、版本快照与剧集快照 |
 | `test/`、`integration_test/` | 自动化与设备回归 |
 
 仓库只提交业务源码，不包含构建产物、依赖缓存、本地机器配置、签名文件与任何密钥。
