@@ -1,0 +1,63 @@
+{
+  "algorithm": "aes-256-gcm",
+  "digest": "86545b052cf9bb51ab8b7f7780172f8b96324e5f5d6c9d6832fe500f9d0b52d7",
+  "generatedAt": "2026-11-07T13:25:33Z",
+  "sources": {
+    "51duanju": {
+      "count": 58,
+      "file": "sources/51duanju.json.enc",
+      "sha256": "d1a87d32ce14780010436378d6d1fe9a7f247d0e8e0296ce47f3eea3a0fe9d7b"
+    },
+    "cloudfront": {
+      "count": 297,
+      "file": "sources/cloudfront.json.enc",
+      "sha256": "584410fa9b98fc65297d45b369fcd90d7c70cad13c41848b7b282ecf6233ea6a"
+    },
+    "ezdmw": {
+      "count": 60,
+      "file": "sources/ezdmw.json.enc",
+      "sha256": "ff4340ebd0dffdc2f1f8bb59eea033526c61e0e384aef5e0c1a422fb2b607b8b"
+    },
+    "hema": {
+      "count": 12747,
+      "file": "sources/hema.json.enc",
+      "sha256": "c96a92c4f6724506b0f56b9136b5f6a5db8feaf86e957d4c787d52e8c334b4a0"
+    },
+    "hongguo": {
+      "count": 3246,
+      "file": "sources/hongguo.json.enc",
+      "sha256": "3d41c64a3757dcbd5e6216612a09aa80933abccc982b3fdf4d705dec0987db2b"
+    },
+    "huangdou": {
+      "count": 4208,
+      "file": "sources/huangdou.json.enc",
+      "sha256": "adbed940dc6ad84576582651756d314d913a1be731ebd2560764fccb606b02e1"
+    },
+    "huangguo-video": {
+      "count": 106,
+      "file": "sources/huangguo-video.json.enc",
+      "sha256": "8a543e5e4f636f305de07a4556f230581d53d0d41411c02790217fde17859662"
+    },
+    "huangguoai": {
+      "count": 290,
+      "file": "sources/huangguoai.json.enc",
+      "sha256": "a27137009fb53dd7b9906eb785ea651faf15428934cd8595aea344bbc39282bc"
+    },
+    "huangju": {
+      "count": 60,
+      "file": "sources/huangju.json.enc",
+      "sha256": "969c12f1c7f5f9ef6a55374a1f53226c63009eaf3d132a4c9b5e2ee06f94c95b"
+    },
+    "sorani": {
+      "count": 72,
+      "file": "sources/sorani.json.enc",
+      "sha256": "825bd952ec8cea997afd0ca458ceda2a5d9bc46d44d402d4f44a48d863e01c6b"
+    },
+    "yeguo": {
+      "count": 115,
+      "file": "sources/yeguo.json.enc",
+      "sha256": "bf6b74f7d6e4522be6ca89f6538d6775e1dab60bdec939deef156179f1afe5f1"
+    }
+  },
+  "version": 1
+}
