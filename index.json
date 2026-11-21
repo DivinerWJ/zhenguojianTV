@@ -1,0 +1,64 @@
+{
+  "algorithm": "aes-256-gcm",
+  "digest": "83b90dd0c90f2ccf3bc653d30693c7b9c19e5cbcc7e34ebc387eb929a207db04",
+  "generatedAt": "2026-11-21T07:22:30Z",
+  "sources": {
+    "51duanju": {
+      "count": 58,
+      "file": "sources/51duanju.json.enc",
+      "sha256": "2da7a36688ff7b814ce63e4e39169a383e8bc0c7137996f3eca536574353f0a5",
+      "truncated": false
+    },
+    "cloudfront": {
+      "count": 399,
+      "file": "sources/cloudfront.json.enc",
+      "sha256": "ad1266be55eed6d195fd615d501b89aa82c977d32bc7a64a5c4870e5d6e2a155"
+    },
+    "ezdmw": {
+      "count": 1385,
+      "file": "sources/ezdmw.json.enc",
+      "sha256": "2aa6443ef9741f1d4f6604d86ef14d368b5b7ef41c4c858178fc46f77da08608"
+    },
+    "hema": {
+      "count": 22425,
+      "file": "sources/hema.json.enc",
+      "sha256": "926a11fccefe6fee7c47db5a3933654b19ba66c8e4e3666bad0cf90297715585"
+    },
+    "hongguo": {
+      "count": 21412,
+      "file": "sources/hongguo.json.enc",
+      "sha256": "8148eb8d7dfcd18185ad345b640e744401d6f251658d5696770baeeefde69a3f"
+    },
+    "huangdou": {
+      "count": 5429,
+      "file": "sources/huangdou.json.enc",
+      "sha256": "ecae93bd5c0c9a88ea6910ae4946384744a032b48e898d8b108a137a7c706507"
+    },
+    "huangguo-video": {
+      "count": 2142,
+      "file": "sources/huangguo-video.json.enc",
+      "sha256": "0a13ab21d26440f39c99a6527a9c63bd5e0bda1935387b72916723e4bad181d2"
+    },
+    "huangguoai": {
+      "count": 307,
+      "file": "sources/huangguoai.json.enc",
+      "sha256": "982b6a3f214d3bc1e01b03797881e90f246454ecc5ebaca77a39bd4b2d82438c"
+    },
+    "huangju": {
+      "count": 63,
+      "file": "sources/huangju.json.enc",
+      "sha256": "38ca346f6743f3091664b6d7a9f191ea3f8053a7cf6096797da9ffc1c87d598b"
+    },
+    "sorani": {
+      "count": 73,
+      "file": "sources/sorani.json.enc",
+      "sha256": "045d23cc392597bd9955bd30dd91ede7e6d748f253754b6ab72990c730e138c7"
+    },
+    "yeguo": {
+      "count": 1378,
+      "file": "sources/yeguo.json.enc",
+      "sha256": "52e5f7d1d98b91b35421ad88d978335d9fd03ef240ea38ee8381c2f633eaab9b"
+    }
+  },
+  "version": 1
+}
