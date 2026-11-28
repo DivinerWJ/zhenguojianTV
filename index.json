@@ -1,0 +1,70 @@
+{
+  "algorithm": "aes-256-gcm",
+  "digest": "d6555b535eac7cf34c89edebb23fe9bb212a2b41402aa75c4afa47f4e3420973",
+  "generatedAt": "2026-11-28T08:25:08Z",
+  "sources": {
+    "51duanju": {
+      "count": 58,
+      "file": "sources/51duanju.json.enc",
+      "sha256": "2da7a36688ff7b814ce63e4e39169a383e8bc0c7137996f3eca536574353f0a5",
+      "truncated": false
+    },
+    "cloudfront": {
+      "count": 426,
+      "file": "sources/cloudfront.json.enc",
+      "sha256": "7b1ca03401e59e3859fd736ed9b7ea19b4dec6c9f93e69d4231330ebc0dbaa2e"
+    },
+    "ezdmw": {
+      "count": 1385,
+      "file": "sources/ezdmw.json.enc",
+      "sha256": "a250ba2096dbb3c56b1f73efb036e21e0fa470cb37928dd48f7efbc4e21152a4"
+    },
+    "hema": {
+      "count": 25628,
+      "file": "sources/hema.json.enc",
+      "sha256": "8cbb394003000fb9c7d44bf352dc9d0561081b34d69d22c9c7aa2f0d7a901d87"
+    },
+    "hongguo": {
+      "count": 23863,
+      "file": "sources/hongguo.json.enc",
+      "sha256": "2ca0a45d74cb3e8ed0455a6bad327c8edd8e98fcb64dc5db8473c1bdb2eb9b37"
+    },
+    "huaguo": {
+      "count": 108,
+      "file": "sources/huaguo.json.enc",
+      "sha256": "2be0d0c355c00b37cd82765e6bf2309ef66e3e74eea5c8921d50d2117ef64ce5",
+      "truncated": false
+    },
+    "huangdou": {
+      "count": 5624,
+      "file": "sources/huangdou.json.enc",
+      "sha256": "c7986071b2f9caf89f1c244917e7ced2b37001a73acd2c5c7a67cd29f66fd015"
+    },
+    "huangguo-video": {
+      "count": 2297,
+      "file": "sources/huangguo-video.json.enc",
+      "sha256": "e2735f9c2cb66f486ccb12d4377ee0c7b7fa979f0142d1a1695556d38e4db9c7"
+    },
+    "huangguoai": {
+      "count": 311,
+      "file": "sources/huangguoai.json.enc",
+      "sha256": "d9f82b86e4eff5c9919b82d27c6d2a32932ea0e6d827cfb98c822923b4ec983e"
+    },
+    "huangju": {
+      "count": 4158,
+      "file": "sources/huangju.json.enc",
+      "sha256": "97c13c45fbe09c4118e2f6767fa1910a10d8a6e4e0ed577796b16abb78c186d6"
+    },
+    "sorani": {
+      "count": 4777,
+      "file": "sources/sorani.json.enc",
+      "sha256": "4e80a0067fce971d4fb3afb6221d6ff3c81cc0d8e7585a8a52053e95380b614f"
+    },
+    "yeguo": {
+      "count": 1546,
+      "file": "sources/yeguo.json.enc",
+      "sha256": "32a7d35cca968f4025a99f294b6b3f43aadd52b769e90da9f5100d94e18f8750"
+    }
+  },
+  "version": 1
+}
